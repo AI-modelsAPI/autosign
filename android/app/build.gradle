@@ -1,0 +1,28 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'icu.justwoker.justsign'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "icu.justwoker.justsign"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.work:work-runtime:2.9.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
