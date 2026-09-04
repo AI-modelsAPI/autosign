@@ -59,7 +59,8 @@ public final class OffscreenCheckin {
             ht = new HandlerThread("offcheckin");
             ht.start();
             th = new Handler(ht.getLooper());
-            th.post(this::go);
+            /* WebView 必须在主线程构造与操作；HandlerThread 仅用于超时看门狗 */
+            main.post(this::go);
         }
 
         private void go() {
@@ -130,10 +131,11 @@ public final class OffscreenCheckin {
             done = true;
             final WebView w = wv; wv = null;
             final HandlerThread theHt = ht;
-            if (th != null) th.post(() -> {
+            /* destroy 必须与创建线程一致（WebView 已改在主线程创建），统一投回主线程 */
+            main.post(() -> {
                 try { if (w != null) { w.loadUrl("about:blank"); w.destroy(); } } catch (Exception ignored) {}
-                if (theHt != null) theHt.quitSafely();
             });
+            if (theHt != null) theHt.quitSafely();
             /* 成功（非重复签）→ 写本地徽章（今日已签/置灰/站点徽章立即生效） */
             if (ok && !already && reward > 0) {
                 try {
