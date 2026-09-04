@@ -6,72 +6,199 @@ import android.content.SharedPreferences;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** SharedPreferences 存取：tokens / config / 运行日志（与 Node 版 db.js + config.js 对齐） */
+/**
+ * SharedPreferences 存取：config（含 sites 站点数组，每站点含 accounts 账号数组）/ 运行日志
+ * 数据模型（两级）：site{ key,name,baseUrl,checkinType } → account{ key,alias,siteKey,token,... }
+ * 首次运行自动迁移旧 tokens 数组。
+ */
 public class Store {
     private static final String SP = "justsign";
     private final SharedPreferences sp;
 
     public Store(Context c) { sp = c.getApplicationContext().getSharedPreferences(SP, Context.MODE_PRIVATE); }
 
-    /* ---------- tokens ---------- */
-    public JSONArray tokens() {
-        try { return new JSONArray(sp.getString("tokens", "[]")); } catch (Exception e) { return new JSONArray(); }
+    /* ---------- config + sites + accounts ---------- */
+    public JSONObject config() {
+        try {
+            String raw = sp.getString("config", "");
+            JSONObject cfg = raw.isEmpty() ? defaultConfig() : new JSONObject(raw);
+            migrate(cfg);
+            return cfg;
+        } catch (Exception e) { return defaultConfig(); }
     }
-    public void saveTokens(JSONArray a) { sp.edit().putString("tokens", a.toString()).apply(); }
+    public void saveConfig(JSONObject c) { sp.edit().putString("config", c.toString()).apply(); }
 
-    public JSONObject findToken(String key) {
-        JSONArray a = tokens();
-        for (int i = 0; i < a.length(); i++) {
-            try {
-                JSONObject o = a.getJSONObject(i);
-                if (key != null && key.equals(o.optString("key"))) return o;
-            } catch (Exception ignored) {}
+    /** 旧版 tokens 数组 → sites[].accounts 迁移（一次性） */
+    private void migrate(JSONObject cfg) {
+        try {
+            if (!cfg.has("sites")) cfg.put("sites", defaultConfig().optJSONArray("sites"));
+            if (!sp.getBoolean("migrated_v2", false)) {
+                JSONArray old = new JSONArray(sp.getString("tokens", "[]"));
+                for (int i = 0; i < old.length(); i++) {
+                    JSONObject tk = old.optJSONObject(i);
+                    if (tk == null) continue;
+                    String siteKey = tk.optString("siteKey", "justworker");
+                    JSONObject site = findSiteObj(cfg, siteKey);
+                    if (site == null) continue;
+                    JSONArray accs = site.optJSONArray("accounts");
+                    if (accs == null) { accs = new JSONArray(); site.put("accounts", accs); }
+                    // 去重
+                    boolean dup = false;
+                    for (int j = 0; j < accs.length(); j++) {
+                        JSONObject a = accs.optJSONObject(j);
+                        if (a != null && tk.optString("key").equals(a.optString("key"))) { dup = true; break; }
+                    }
+                    if (!dup) accs.put(tk);
+                }
+                sp.edit().putBoolean("migrated_v2", true).putString("config", cfg.toString()).apply();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static JSONObject findSiteObj(JSONObject cfg, String siteKey) {
+        try {
+            JSONArray sites = cfg.getJSONArray("sites");
+            for (int i = 0; i < sites.length(); i++) {
+                JSONObject s = sites.optJSONObject(i);
+                if (s != null && siteKey.equals(s.optString("key"))) return s;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /* ---------- 站点操作 ---------- */
+    public JSONArray sites() { return config().optJSONArray("sites"); }
+
+    public void upsertSite(JSONObject site) {
+        try {
+            JSONObject cfg = config();
+            JSONArray arr = cfg.optJSONArray("sites");
+            if (arr == null) arr = new JSONArray();
+            JSONArray out = new JSONArray();
+            String key = site.optString("key");
+            boolean found = false;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject s = arr.optJSONObject(i);
+                if (s != null && key.equals(s.optString("key"))) { out.put(site); found = true; }
+                else if (s != null) out.put(s);
+            }
+            if (!found) out.put(site);
+            cfg.put("sites", out);
+            saveConfig(cfg);
+        } catch (Exception ignored) {}
+    }
+
+    public void removeSite(String siteKey) {
+        try {
+            JSONObject cfg = config();
+            JSONArray arr = cfg.optJSONArray("sites");
+            JSONArray out = new JSONArray();
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject s = arr.optJSONObject(i);
+                if (s != null && !siteKey.equals(s.optString("key"))) out.put(s);
+            }
+            cfg.put("sites", out);
+            saveConfig(cfg);
+        } catch (Exception ignored) {}
+    }
+
+    /** 由 baseUrl 自动生成站点 key（小写、去协议/特殊字符） */
+    public static String siteKeyOf(String baseUrl) {
+        String k = baseUrl == null ? "site" : baseUrl.toLowerCase()
+                .replaceFirst("^https?://", "")
+                .replaceAll("[^a-z0-9]+", "-").replaceAll("^-+|-+$", "");
+        return k.isEmpty() ? "site" : k;
+    }
+
+    /* ---------- 账号操作（账号挂站点之下） ---------- */
+    public JSONObject findSite(String siteKey) { return findSiteObj(config(), siteKey); }
+
+    public JSONObject findAccount(String key) {
+        JSONArray sites = config().optJSONArray("sites");
+        if (sites != null) for (int i = 0; i < sites.length(); i++) {
+            JSONObject s = sites.optJSONObject(i);
+            if (s == null) continue;
+            JSONArray accs = s.optJSONArray("accounts");
+            if (accs == null) continue;
+            for (int j = 0; j < accs.length(); j++) {
+                JSONObject a = accs.optJSONObject(j);
+                if (a != null && key.equals(a.optString("key"))) return a;
+            }
         }
         return null;
     }
 
-    public void upsertToken(JSONObject rec) {
-        try {
-            String key = rec.getString("key");
-            JSONArray a = tokens(), out = new JSONArray();
-            boolean found = false;
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.getJSONObject(i);
-                if (key.equals(o.optString("key"))) { out.put(rec); found = true; } else out.put(o);
+    /** 找到账号所属站点（含 site 引用） */
+    public JSONObject siteOfAccount(String key) {
+        JSONArray sites = config().optJSONArray("sites");
+        if (sites != null) for (int i = 0; i < sites.length(); i++) {
+            JSONObject s = sites.optJSONObject(i);
+            if (s == null) continue;
+            JSONArray accs = s.optJSONArray("accounts");
+            if (accs == null) continue;
+            for (int j = 0; j < accs.length(); j++) {
+                JSONObject a = accs.optJSONObject(j);
+                if (a != null && key.equals(a.optString("key"))) return s;
             }
-            if (!found) out.put(rec);
-            saveTokens(out);
+        }
+        return null;
+    }
+
+    public void upsertAccount(String siteKey, JSONObject acc) {
+        try {
+            JSONObject cfg = config();
+            JSONArray sites = cfg.optJSONArray("sites");
+            if (sites == null) return;
+            for (int i = 0; i < sites.length(); i++) {
+                JSONObject s = sites.optJSONObject(i);
+                if (s == null || !siteKey.equals(s.optString("key"))) continue;
+                JSONArray accs = s.optJSONArray("accounts");
+                if (accs == null) accs = new JSONArray();
+                JSONArray out = new JSONArray();
+                String key = acc.optString("key");
+                boolean found = false;
+                for (int j = 0; j < accs.length(); j++) {
+                    JSONObject a = accs.optJSONObject(j);
+                    if (a != null && key.equals(a.optString("key"))) { out.put(acc); found = true; }
+                    else if (a != null) out.put(a);
+                }
+                if (!found) out.put(acc);
+                s.put("accounts", out);
+                break;
+            }
+            saveConfig(cfg);
         } catch (Exception ignored) {}
     }
 
-    public void removeToken(String key) {
-        JSONArray a = tokens(), out = new JSONArray();
-        for (int i = 0; i < a.length(); i++) {
-            try {
-                JSONObject o = a.getJSONObject(i);
-                if (!key.equals(o.optString("key"))) out.put(o);
-            } catch (Exception ignored) {}
-        }
-        saveTokens(out);
+    public void removeAccount(String key) {
+        try {
+            JSONObject cfg = config();
+            JSONArray sites = cfg.optJSONArray("sites");
+            if (sites == null) return;
+            for (int i = 0; i < sites.length(); i++) {
+                JSONObject s = sites.optJSONObject(i);
+                if (s == null) continue;
+                JSONArray accs = s.optJSONArray("accounts");
+                if (accs == null) continue;
+                JSONArray out = new JSONArray();
+                for (int j = 0; j < accs.length(); j++) {
+                    JSONObject a = accs.optJSONObject(j);
+                    if (a != null && !key.equals(a.optString("key"))) out.put(a);
+                }
+                s.put("accounts", out);
+            }
+            saveConfig(cfg);
+        } catch (Exception ignored) {}
     }
 
-    /* ---------- config ---------- */
-    public JSONObject config() {
-        try { return new JSONObject(sp.getString("config", "")); } catch (Exception e) { return defaultConfig(); }
-    }
-    public void saveConfig(JSONObject c) { sp.edit().putString("config", c.toString()).apply(); }
-
+    /* ---------- 默认配置 ---------- */
     public static JSONObject defaultConfig() {
         try {
             JSONObject proxy = new JSONObject().put("enabled", true).put("type", "socks5")
                     .put("host", "127.0.0.1").put("port", 10808);
             JSONObject schedule = new JSONObject().put("enabled", true).put("cron", "0 3 * * *");
-            JSONObject site = new JSONObject().put("key", "justworker")
-                    .put("name", "justworker (小学生公益站)")
-                    .put("baseUrl", "https://api.justwoker.icu")
-                    .put("checkinType", "login");
-            return new JSONObject().put("proxy", proxy).put("schedule", schedule)
-                    .put("sites", new JSONArray().put(site));
+            JSONArray sites = new JSONArray(); // 站点由用户手动添加，不预置
+            return new JSONObject().put("proxy", proxy).put("schedule", schedule).put("sites", sites);
         } catch (Exception e) { return new JSONObject(); }
     }
 

@@ -8,11 +8,11 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.animation.AlphaAnimation;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -22,7 +22,6 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.URLEncoder;
@@ -35,44 +34,70 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /**
- * AuthActivity — GitHub 授权桥（新版 new-api 流程）：
- *   1. 先 POST /api/oauth/state {provider:'github',intent:'login'} 拿 flow_token（服务端绑定会话）
- *   2. WebView 打开 https://github.com/login/oauth/authorize?client_id=..&state=flow_token&scope=user:email
- *   3. GitHub 授权后回调 /oauth/github?code=..&state=..，站点前端拿 flow_token 交换 session
- *   4. 前端把完整 bundle 写入 localStorage['new-api:auth-session'] → 轮询读取 → 落盘 → 关窗
- *   兼容：老版直接 {access_token}，新版 {access_token, token_type, access_expires_at, session{..}, user{username}}
+ * AuthActivity — GitHub 授权桥（新版 new-api，v0.1.2 修复）：
+ *   1. GET /api/status → github_client_id（按站点动态）
+ *   2. POST /api/oauth/state {provider:github,intent:login} → flow_token
+ *   3. WebView 打开 github.com/login/oauth/authorize?client_id&state=flow_token&scope=user:email
+ *   4. GitHub 回调 站点/oauth/github?code&state —— onPageFinished 检测到站点域 /oauth/ 路径后，
+ *      注入脚本直接 GET /api/oauth/github?code&state 拿完整 bundle（access_token+user.username），
+ *      通过 @JavascriptInterface 回传落盘 → 关窗。
+ *   （新版前端 token 只存内存，靠 /api/user/auth/refresh 刷；localStorage['new-api:auth-session']
+ *     只是跨页签广播事件，轮询它永远拿不到 token —— 这是 v0.1.1 授权失败的根因。）
  */
 public class AuthActivity extends Activity {
     private WebView wv;
-    private LinearLayout boot;          // 启动层（拿 flow_token 时显示进度）
+    private LinearLayout boot;
     private TextView bootText;
+    private TextView tip;
     private FrameLayout root;
-    private String siteKey, accountKey, baseUrl, clientId;
+    private String siteKey, accountKey, alias, baseUrl, siteHost;
     private final Handler h = new Handler(Looper.getMainLooper());
     private volatile boolean done = false;
 
-    @SuppressLint("SetJavaScriptEnabled")
+    /** JS ↔ Java 桥：回调页注入脚本通过它回传交换结果 */
+    public class Bridge {
+        @JavascriptInterface public void onSession(String json) {
+            if (done) return;
+            try {
+                JSONObject resp = new JSONObject(json);
+                boolean ok = resp.optBoolean("success");
+                JSONObject d = resp.optJSONObject("data");
+                if (ok && d != null) {
+                    String token = d.optString("access_token", d.optString("accessToken", null));
+                    if (token != null && !token.isEmpty()) { finishOk(d, token); return; }
+                }
+                String msg = resp.optString("message", "交换失败");
+                showTip("授权交换失败: " + msg);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         siteKey = getIntent().getStringExtra("siteKey");
         accountKey = getIntent().getStringExtra("accountKey");
-        baseUrl = stripTail(findBaseUrl());
-        clientId = findClientId();
+        alias = getIntent().getStringExtra("alias");
+        JSONObject site = new Store(this).findSite(siteKey);
+        baseUrl = (site != null ? site.optString("baseUrl") : "https://api.justwoker.icu").replaceAll("/+$", "");
+        try { siteHost = new java.net.URL(baseUrl).getHost(); } catch (Exception e) { siteHost = ""; }
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
 
-        /* ---- WebView（隐藏，直到拿到 state 开始加载） ---- */
+        /* ---- WebView ---- */
         wv = new WebView(this);
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setJavaScriptCanOpenWindowsAutomatically(true);
-        s.setSupportMultipleWindows(true);
         s.setUserAgentString("Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36");
+        wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
-                return false; // GitHub ↔ 站点 跳转全部留在本 WebView
+                return false; // GitHub ↔ 站点 全部留在本 WebView
+            }
+            @Override public void onPageFinished(WebView v, String url) {
+                maybeExchange(v, url);
             }
         });
         wv.setVisibility(View.GONE);
@@ -103,43 +128,51 @@ public class AuthActivity extends Activity {
         boot.addView(wrap, new LinearLayout.LayoutParams(-2, -2));
         root.addView(boot, new FrameLayout.LayoutParams(-1, -1));
 
-        /* ---- 顶部提示条（WebView 阶段） ---- */
-        TextView tip = new TextView(this);
+        /* ---- 底部提示条（放下方，不遮挡站点页面内容） ---- */
+        tip = new TextView(this);
         tip.setText("  GitHub 授权中 · 已登录 GitHub 将自动完成，成功后本窗口自动关闭  ");
         tip.setTextColor(Color.WHITE);
         tip.setTextSize(12);
         tip.setBackgroundColor(0xE6111827);
-        tip.setPadding(20, 26, 20, 26);
-        root.addView(tip, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        tip.setPadding(20, 24, 20, 24);
+        root.addView(tip, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
         setContentView(root);
         startAuthFlow();
     }
 
-    /** 第一步：拿 flow_token（服务端 state），第二步：打开官方 authorize URL */
+    private void showTip(String text) {
+        h.post(() -> { if (tip != null) tip.setText("  " + text + "  "); });
+    }
+
+    /** 第一步：拿 clientId + flow_token；第二步：打开官方 authorize URL */
     private void startAuthFlow() {
-        final OkHttpClient client = new OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build();
         new Thread(() -> {
             String state = null, err = null;
             try {
                 JSONObject proxy = new Store(this).config().optJSONObject("proxy");
-                String url = baseUrl + "/api/oauth/state";
-                Request.Builder rb = new Request.Builder().url(url)
+                OkHttpClient base = new OkHttpClient.Builder()
+                        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build();
+                OkHttpClient c = withProxy(base, proxy);
+
+                // 1) 站点 clientId（失败不阻塞，用空串走通用流）
+                String clientId = "";
+                try {
+                    Response rs = c.newCall(new Request.Builder().url(baseUrl + "/api/status")
+                            .header("User-Agent", "Mozilla/5.0").build()).execute();
+                    String sb = rs.body() != null ? rs.body().string() : "";
+                    if (rs.code() == 200) {
+                        JSONObject st = new JSONObject(sb).optJSONObject("data");
+                        if (st != null) clientId = st.optString("github_client_id", "");
+                    }
+                } catch (Exception ignored) {}
+
+                // 2) flow_token
+                Response resp = c.newCall(new Request.Builder().url(baseUrl + "/api/oauth/state")
                         .header("User-Agent", "Mozilla/5.0 (Linux; Android 16) Mobile Safari/537.36")
                         .post(RequestBody.create(
                                 "{\"provider\":\"github\",\"intent\":\"login\"}".getBytes(),
-                                MediaType.parse("application/json")));
-                OkHttpClient c = client;
-                if (proxy != null && proxy.optBoolean("enabled")) {
-                    try {
-                        java.net.Proxy p = new java.net.Proxy(java.net.Proxy.Type.SOCKS,
-                                new java.net.InetSocketAddress(proxy.optString("host", "127.0.0.1"),
-                                        proxy.optInt("port", 10808)));
-                        c = client.newBuilder().proxy(p).build();
-                    } catch (Exception ignored) {}
-                }
-                Response resp = c.newCall(rb.build()).execute();
+                                MediaType.parse("application/json"))).build()).execute();
                 String body = resp.body() != null ? resp.body().string() : "";
                 JSONObject j = new JSONObject(body);
                 if (resp.code() == 200 && j.optBoolean("success")) {
@@ -148,107 +181,87 @@ public class AuthActivity extends Activity {
                     else if (d instanceof JSONObject) state = ((JSONObject) d).optString("flow_token", null);
                 }
                 if (state == null || state.isEmpty()) err = j.optString("message", "state 获取失败 http=" + resp.code());
-            } catch (Exception e) { err = "state 请求异常: " + e.getMessage(); }
 
-            final String st = state, er = err;
-            h.post(() -> {
-                if (done || isFinishing()) return;
-                if (st == null) {
-                    bootText.setText("准备失败: " + er + "\n返回可重试");
-                    return;
-                }
-                boot.setVisibility(View.GONE);
-                wv.setVisibility(View.VISIBLE);
-                AlphaAnimation a = new AlphaAnimation(0f, 1f);
-                a.setDuration(220);
-                wv.startAnimation(a);
-                String authUrl;
-                if (clientId != null && !clientId.isEmpty()) {
-                    authUrl = "https://github.com/login/oauth/authorize?client_id=" + clientId
-                            + "&state=" + urlEncode(st) + "&scope=user:email";
-                } else {
-                    // 兜底：老版本站点端点（自带 state 生成）
-                    authUrl = baseUrl + "/api/oauth/github";
-                }
-                wv.loadUrl(authUrl);
-                h.postDelayed(poll, 1500);
-            });
+                final String cid = clientId, st2 = state, er = err;
+                h.post(() -> {
+                    if (done || isFinishing()) return;
+                    if (st2 == null) {
+                        bootText.setText("准备失败: " + er + "\n返回可重试");
+                        return;
+                    }
+                    boot.setVisibility(View.GONE);
+                    wv.setVisibility(View.VISIBLE);
+                    AlphaAnimation a = new AlphaAnimation(0f, 1f);
+                    a.setDuration(220);
+                    wv.startAnimation(a);
+                    String authUrl = "https://github.com/login/oauth/authorize?client_id=" + urlEncode(cid)
+                            + "&state=" + urlEncode(st2) + "&scope=user:email";
+                    wv.loadUrl(authUrl);
+                });
+            } catch (Exception e) {
+                final String er = "state 请求异常: " + e.getMessage();
+                h.post(() -> { if (!isFinishing()) bootText.setText("准备失败: " + er + "\n返回可重试"); });
+            }
         }).start();
     }
 
-    private static String urlEncode(String s) {
-        try { return URLEncoder.encode(s, "UTF-8"); } catch (Exception e) { return s; }
-    }
-
-    private static String stripTail(String u) { return u.replaceAll("/+$", ""); }
-
-    private String findBaseUrl() {
-        Store store = new Store(this);
-        try {
-            JSONArray sites = store.config().getJSONArray("sites");
-            for (int i = 0; i < sites.length(); i++) {
-                JSONObject st = sites.getJSONObject(i);
-                if (siteKey != null && siteKey.equals(st.optString("key"))) return st.optString("baseUrl");
-            }
-        } catch (Exception ignored) {}
-        return "https://api.justwoker.icu";
-    }
-
-    /** github_client_id 来自 /api/status 缓存（MainActivity 写入），缺省用已知值 */
-    private String findClientId() {
-        try {
-            JSONObject cfg = new Store(this).config();
-            String id = cfg.optString("github_client_id", "");
-            if (!id.isEmpty()) return id;
-        } catch (Exception ignored) {}
-        return "Ov23liBGecTYSePKpXQC";
-    }
-
-    /** 1.5s 轮询 localStorage['new-api:auth-session']（新版含 token_type/session，老版仅 access_token） */
-    private final Runnable poll = new Runnable() {
-        @Override public void run() {
-            if (done || wv == null) return;
-            wv.evaluateJavascript("localStorage.getItem('new-api:auth-session')", v -> {
-                try {
-                    if (v != null && !"null".equals(v) && v.length() > 4) {
-                        String raw = v;
-                        if (raw.startsWith("\"")) // evaluateJavascript 返回的是 JS 字符串字面量
-                            raw = raw.substring(1, raw.length() - 1)
-                                    .replace("\\\"", "\"").replace("\\\\", "\\").replace("\\n", "\n");
-                        JSONObject sess = new JSONObject(raw);
-                        String token = tokenOf(sess);
-                        if (token != null && !token.isEmpty()) { finishOk(sess, token); return; }
-                    }
-                } catch (Exception ignored) {}
-                h.postDelayed(this, 1500);
-            });
+    private static OkHttpClient withProxy(OkHttpClient base, JSONObject proxy) {
+        if (proxy != null && proxy.optBoolean("enabled")) {
+            try {
+                java.net.Proxy p = new java.net.Proxy(java.net.Proxy.Type.SOCKS,
+                        new java.net.InetSocketAddress(proxy.optString("host", "127.0.0.1"),
+                                proxy.optInt("port", 10808)));
+                return base.newBuilder().proxy(p).build();
+            } catch (Exception ignored) {}
         }
-    };
-
-    /** 新版: access_token / user.username；老版: accessToken / user.login */
-    private static String tokenOf(JSONObject sess) {
-        String t = sess.optString("access_token", null);
-        if (t == null || t.isEmpty()) t = sess.optString("accessToken", null);
-        return t;
+        return base;
     }
 
-    private void finishOk(JSONObject sess, String token) {
+    /** GitHub 回调落地站点域 /oauth/ 路径时，注入脚本主动交换拿 bundle */
+    private void maybeExchange(WebView v, String url) {
+        if (done || url == null) return;
+        try {
+            java.net.URL u = new java.net.URL(url);
+            if (!u.getHost().equalsIgnoreCase(siteHost)) return;
+            String path = u.getPath();
+            if (path == null || !path.startsWith("/oauth/")) return;
+            String provider = path.substring("/oauth/".length());
+            if (provider.contains("/")) provider = provider.substring(0, provider.indexOf('/'));
+            if (provider.isEmpty()) return;
+
+            final String js =
+                "(async()=>{try{" +
+                "const p=new URLSearchParams(location.search);" +
+                "const code=p.get('code'),state=p.get('state');" +
+                "if(!code){window.JustSign.onSession(JSON.stringify({success:false,message:'回调缺少 code'}));return;}" +
+                "const r=await fetch('/api/oauth/" + provider + "?code='+encodeURIComponent(code)+'&state='+encodeURIComponent(state||''),{headers:{'Accept':'application/json'},credentials:'include'});" +
+                "const j=await r.json();" +
+                "window.JustSign.onSession(JSON.stringify(j));" +
+                "}catch(e){window.JustSign.onSession(JSON.stringify({success:false,message:String(e)}));}})()";
+            h.postDelayed(() -> { if (!done) v.evaluateJavascript(js, null); }, 400);
+        } catch (Exception ignored) {}
+    }
+
+    private static String urlEncode(String s2) {
+        try { return URLEncoder.encode(s2 == null ? "" : s2, "UTF-8"); } catch (Exception e) { return s2; }
+    }
+
+    /** 新版: user.username；老版: user.login */
+    private void finishOk(JSONObject bundle, String token) {
         done = true;
         Store store = new Store(this);
+        String login = bundle.optJSONObject("user") == null ? null
+                : bundle.optJSONObject("user").optString("username",
+                    bundle.optJSONObject("user").optString("login", null));
         try {
-            JSONObject rec = store.findToken(accountKey);
+            JSONObject rec = store.findAccount(accountKey);
             if (rec == null) rec = new JSONObject().put("key", accountKey);
             rec.put("siteKey", siteKey);
-            String login = null;
-            try { login = sess.getJSONObject("user").optString("username", null); } catch (Exception ignored) {}
-            if (login == null || login.isEmpty()) try {
-                login = sess.getJSONObject("user").optString("login", null);
-            } catch (Exception ignored) {}
-            if (login == null || login.isEmpty()) login = guessLogin(sess);
-            if (login != null) rec.put("githubAccount", login);
+            if (alias != null && !alias.isEmpty()) rec.put("alias", alias);
+            if (login != null && !login.isEmpty()) rec.put("githubAccount", login);
             rec.put("token", token);
             rec.put("updatedAt", System.currentTimeMillis());
-            store.upsertToken(rec);
+            store.upsertAccount(siteKey, rec);
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
 
             Intent out = new Intent();
@@ -259,16 +272,6 @@ public class AuthActivity extends Activity {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
         }
         finish();
-    }
-
-    /** 兜底：从 bundle 任意层级找 login 类字段 */
-    private static String guessLogin(JSONObject sess) {
-        try {
-            JSONObject u = sess.getJSONObject("user");
-            for (String k : new String[]{"username", "login", "display_name", "name"})
-                if (u.has(k) && !u.isNull(k) && !u.optString(k).isEmpty()) return u.optString(k);
-        } catch (Exception ignored) {}
-        return null;
     }
 
     @Override public void onBackPressed() {

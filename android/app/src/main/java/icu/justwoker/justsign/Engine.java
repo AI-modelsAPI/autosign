@@ -100,9 +100,10 @@ public class Engine {
     /* ================= 业务 ================= */
 
     public JSONObject status(String key) throws Exception {
-        JSONObject tk = store.findToken(key);
+        JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
-        JSONObject site = findSite(tk.optString("siteKey"));
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
         String token = tk.optString("token", null);
 
         JSONObject self = call(site, token, "GET", "/api/user/self");
@@ -128,9 +129,10 @@ public class Engine {
     }
 
     public JSONObject checkin(String key) throws Exception {
-        JSONObject tk = store.findToken(key);
+        JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
-        JSONObject site = findSite(tk.optString("siteKey"));
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
         if (!"manual".equals(site.optString("checkinType")))
             return new JSONObject().put("ok", true).put("skipped", true)
                     .put("message", "该站点登录即签到，无需单独签到");
@@ -140,9 +142,10 @@ public class Engine {
     }
 
     public JSONObject logs(String key, String category, int limit) throws Exception {
-        JSONObject tk = store.findToken(key);
+        JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
-        JSONObject site = findSite(tk.optString("siteKey"));
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
         String path = "/api/log/self?category=" + URLEncoder.encode(category, "UTF-8")
                 + "&limit=" + limit + "&page=1";
         JSONObject r = call(site, tk.optString("token", null), "GET", path);
@@ -186,22 +189,28 @@ public class Engine {
 
     /** cron 等价：manual 站点签到，login 站点刷新保活 */
     public void runAllOnce() {
-        JSONArray tokens = store.tokens();
-        for (int i = 0; i < tokens.length(); i++) {
-            JSONObject tk = tokens.optJSONObject(i);
-            if (tk == null || tk.optString("token", "").isEmpty()) continue;
-            String key = tk.optString("key");
-            try {
-                JSONObject site = findSite(tk.optString("siteKey"));
-                if ("manual".equals(site.optString("checkinType"))) {
-                    JSONObject r = call(site, tk.optString("token"), "POST", "/api/user/checkin");
-                    store.appendLog(site.optString("key"), key, "cron-checkin", "http=" + r.optInt("http"));
-                } else {
-                    JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
-                    store.appendLog(site.optString("key"), key, "cron-login-refresh", "http=" + r.optInt("http"));
+        JSONArray sites = store.config().optJSONArray("sites");
+        if (sites == null) return;
+        for (int i = 0; i < sites.length(); i++) {
+            JSONObject site = sites.optJSONObject(i);
+            if (site == null) continue;
+            JSONArray accs = site.optJSONArray("accounts");
+            if (accs == null) continue;
+            for (int j = 0; j < accs.length(); j++) {
+                JSONObject tk = accs.optJSONObject(j);
+                if (tk == null || tk.optString("token", "").isEmpty()) continue;
+                String key = tk.optString("key");
+                try {
+                    if ("manual".equals(site.optString("checkinType"))) {
+                        JSONObject r = call(site, tk.optString("token"), "POST", "/api/user/checkin");
+                        store.appendLog(site.optString("key"), key, "cron-checkin", "http=" + r.optInt("http"));
+                    } else {
+                        JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
+                        store.appendLog(site.optString("key"), key, "cron-login-refresh", "http=" + r.optInt("http"));
+                    }
+                } catch (Exception e) {
+                    store.appendLog(site.optString("key"), key, "cron-error", e.getMessage());
                 }
-            } catch (Exception e) {
-                store.appendLog("?", key, "cron-error", e.getMessage());
             }
         }
     }

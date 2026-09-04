@@ -1,3 +1,8 @@
+/**
+ * config.js — 配置加载/保存（v0.1.2：站点→账号两级模型）
+ *   config.sites[] = 站点（用户手动添加，不写死）；site.accounts[] = 该站点下的账号（含 token）。
+ *   旧版扁平 data/tokens.json 由 server.js migrateLegacy() 自动迁移。
+ */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -12,17 +17,17 @@ export const DEFAULT = {
   chromiumPath: null,
   chromiumArgs: ['--no-sandbox', '--disable-dev-shm-usage', '--single-process'],
   schedule: { enabled: false, cron: '0 3 * * *' },
-  sites: [
-    { key: 'justworker', name: 'justworker (小学生公益站)', baseUrl: 'https://api.justwoker.icu', checkinType: 'login' }
-  ],
-  accounts: []
+  sites: [] // 站点不写死，由用户手动添加（名称 + API 地址 + 签到方式）
 };
 
 export function loadConfig() {
   try {
     if (existsSync(CFG)) {
       const raw = readFileSync(CFG, 'utf8');
-      return deepMerge(DEFAULT, JSON.parse(raw));
+      const merged = deepMerge(DEFAULT, JSON.parse(raw));
+      if (!Array.isArray(merged.sites)) merged.sites = [];
+      // 兼容旧结构：如果配置里仍有顶层 accounts 数组，丢弃（真正数据在 tokens.json 迁移）
+      return merged;
     }
   } catch (_) {}
   return structuredClone(DEFAULT);

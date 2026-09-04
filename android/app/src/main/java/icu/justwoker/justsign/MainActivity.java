@@ -2,6 +2,7 @@ package icu.justwoker.justsign;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -10,11 +11,11 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -23,561 +24,557 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
-
 /**
- * MainActivity — 纯原生 Material 3 风格首页（零 WebView、零网页壳）：
- *   卡片式账号列表（可用/已用/今日消耗大字排版）+ 原生对话框交互 + 自动/手动刷新。
- *   - "一键授权" 跳 AuthActivity（新版 new-api 两步 OAuth，流程内自动完成）
- *   - 签到/日志/删除 全部原生 AlertDialog
- *   - WorkManager 12h 后台调度在此激活
+ * MainActivity — 纯原生 M3 UI（v0.1.2，站点→账号两级）：
+ *   顶部：标题 + ＋添加站点 / ⚙设置
+ *   站点卡片（每站点一张）：
+ *     站点名 · 签到方式 | 右侧 ⟳刷新 ＋账号 ⋯(编辑/删除站点)
+ *     └ 账号行 ×N：别名 [状态chip] @GitHub
+ *                  $可用(绿) 已用(橙) 今日(紫)
+ *                  [立即签到] [授权/重新授权] [日志] [删除]
+ *   所有状态缓存在账号记录 lastStatus（秒开）。
  */
 public class MainActivity extends Activity {
+    private static final int BG = 0xFFF1F5F9, CARD = 0xFFFFFFFF, ACCENT = 0xFF2563EB;
+    private static final int GREEN = 0xFF16A34A, ORANGE = 0xFFEA580C, PURPLE = 0xFF7C3AED;
+    private static final int TXT = 0xFF0F172A, SUB = 0xFF64748B;
 
-    private static final int REQ_AUTH = 1001;
-
-    /* ---------- M3 色板 ---------- */
-    private static final int C_BG = 0xFFF1F5F9;
-    private static final int C_CARD = 0xFFFFFFFF;
-    private static final int C_TEXT = 0xFF0F172A;
-    private static final int C_SUB = 0xFF64748B;
-    private static final int C_ACCENT = 0xFF2563EB;
-    private static final int C_GREEN = 0xFF16A34A;
-    private static final int C_ORANGE = 0xFFEA580C;
-    private static final int C_PURPLE = 0xFF7C3AED;
-    private static final int C_RED = 0xFFDC2626;
-    private static final int C_CHIP_OK = 0xFFDCFCE7;
-    private static final int C_CHIP_WAIT = 0xFFE2E8F0;
-    private static final int C_BTN_GHOST = 0xFFEFF6FF;
-
-    private final Handler h = new Handler(Looper.getMainLooper());
-    private Store store;
-    private Engine engine;
     private LinearLayout list;
-    private TextView subtitle;
-    private final Map<String, Long> unitCache = new HashMap<>();
-    private volatile boolean refreshing = false;
-    private long lastRefresh = 0;
+    private final Engine engine = new Engine(this);
+    private final Handler h = new Handler(Looper.getMainLooper());
+    private static final int REQ_AUTH = 41;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        store = new Store(this);
-        engine = new Engine(this);
-        try { Engine.schedule(this); } catch (Exception ignored) {}
-        buildUi();
-        render();       // 先渲染缓存，秒开
-        refresh(false); // 再后台拉真实数据
-    }
+        Engine.schedule(this);
 
-    @Override protected void onResume() {
-        super.onResume();
-        render();
-        if (System.currentTimeMillis() - lastRefresh > 60_000) refresh(false);
-    }
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
 
-    /* ================= UI 构建 ================= */
-
-    private int dp(float v) {
-        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics()));
-    }
-
-    private void buildUi() {
-        ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(C_BG);
-        scroll.setFillViewport(true);
-
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(20);
-        page.setPadding(pad, dp(28), pad, dp(32));
-        scroll.addView(page, new ScrollView.LayoutParams(-1, -2));
-
-        /* 顶栏：标题 + 刷新按钮 */
+        /* 顶栏 */
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(40, 44, 40, 24);
         TextView title = new TextView(this);
-        title.setText("公益签到");
-        title.setTextColor(C_TEXT);
-        title.setTextSize(26);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        top.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+        title.setText("JustSign");
+        title.setTextColor(TXT); title.setTextSize(22); title.setTypeface(Typeface.DEFAULT_BOLD);
+        TextView spacer = new TextView(this);
+        spacer.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
+        TextView addSite = ghost(this, "＋ 添加站点", ACCENT);
+        addSite.setOnClickListener(v -> promptAddSite());
+        TextView settings = ghost(this, "⚙ 设置", SUB);
+        settings.setOnClickListener(v -> showSettings());
+        top.addView(title); top.addView(spacer);
+        top.addView(addSite); top.addView(sp(this, 24));
+        top.addView(settings);
 
-        TextView refresh = pillButton("⟳ 刷新", C_ACCENT, Color.WHITE);
-        refresh.setOnClickListener(v -> refresh(true));
-        top.addView(refresh, new LinearLayout.LayoutParams(-2, dp(38)));
-        page.addView(top);
-
-        subtitle = new TextView(this);
-        subtitle.setText("正在同步…");
-        subtitle.setTextColor(C_SUB);
-        subtitle.setTextSize(13);
-        subtitle.setPadding(0, dp(6), 0, 0);
-        page.addView(subtitle);
-
-        /* 账号卡片容器 */
+        ScrollView sv = new ScrollView(this);
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(0, dp(16), 0, 0);
-        page.addView(list);
+        list.setPadding(32, 8, 32, 60);
+        sv.addView(list);
 
-        /* 添加账号（大按钮卡片） */
-        LinearLayout add = card();
-        add.setGravity(Gravity.CENTER);
-        add.setPadding(dp(16), dp(18), dp(16), dp(18));
-        TextView addText = new TextView(this);
-        addText.setText("＋  添加账号（GitHub 一键授权）");
-        addText.setTextColor(C_ACCENT);
-        addText.setTextSize(15);
-        addText.setTypeface(Typeface.DEFAULT_BOLD);
-        add.addView(addText);
-        add.setOnClickListener(v -> addAccountDialog());
-        page.addView(add, lpCard(dp(4)));
-
-        /* 底部说明 */
-        TextView foot = new TextView(this);
-        foot.setText("后台每 12 小时自动保活签到 · 数据实时来自站点 API");
-        foot.setTextColor(0xFF94A3B8);
-        foot.setTextSize(11);
-        foot.setGravity(Gravity.CENTER);
-        foot.setPadding(0, dp(20), 0, 0);
-        page.addView(foot);
-
-        setContentView(scroll);
+        root.addView(top);
+        root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+        setContentView(root);
     }
 
-    /** M3 卡片：白底圆角 */
-    private LinearLayout card() {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(dp(18), dp(16), dp(18), dp(16));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(C_CARD);
-        bg.setCornerRadius(dp(22));
-        c.setBackground(bg);
-        c.setElevation(dp(2));
-        return c;
-    }
-
-    private LinearLayout.LayoutParams lpCard(int topMargin) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.topMargin = topMargin;
-        return lp;
-    }
-
-    /** 胶囊按钮 + 原生按压涟漪 */
-    private TextView pillButton(String text, int bg, int fg) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextColor(fg);
-        t.setTextSize(13);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(16), 0, dp(16), 0);
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(bg);
-        g.setCornerRadius(dp(19));
-        t.setBackground(g);
-        ripple(t);
-        return t;
-    }
-
-    /** 描边幽灵小按钮 */
-    private TextView ghostButton(String text) {
-        return pillButton(text, C_BTN_GHOST, C_ACCENT);
-    }
-
-    private void ripple(View v) {
-        try {
-            TypedValue tv = new TypedValue();
-            getTheme().resolveAttribute(android.R.attr.selectableItemBackground, tv, true);
-            if (android.os.Build.VERSION.SDK_INT >= 23) v.setForeground(getDrawable(tv.resourceId));
-        } catch (Exception ignored) {}
-    }
-
-    private TextView label(String text, int color, float sizeSp, boolean bold) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextColor(color);
-        t.setTextSize(sizeSp);
-        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
-        return t;
-    }
+    @Override protected void onResume() { super.onResume(); render(); }
+    @Override public void onBackPressed() { goHome(); }
 
     /* ================= 渲染 ================= */
 
     private void render() {
-        JSONArray tokens = store.tokens();
         list.removeAllViews();
-        int n = tokens.length();
-
-        if (n == 0) {
-            LinearLayout empty = card();
+        JSONArray sites = new Store(this).sites();
+        if (sites == null || sites.length() == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("还没有站点\n\n点右上角「＋ 添加站点」\n填入任意 new-api 中转站地址即可");
+            empty.setTextColor(SUB); empty.setTextSize(15);
             empty.setGravity(Gravity.CENTER);
-            empty.setPadding(dp(24), dp(40), dp(24), dp(40));
-            TextView big = label("还没有账号", C_TEXT, 18, true);
-            big.setGravity(Gravity.CENTER);
-            TextView tip = label("点击下方「添加账号」\n授权过程全自动，无需手动复制 token", C_SUB, 13, false);
-            tip.setGravity(Gravity.CENTER);
-            tip.setPadding(0, dp(10), 0, 0);
-            empty.addView(big);
-            empty.addView(tip);
+            empty.setPadding(0, 120, 0, 0);
             list.addView(empty);
-            subtitle.setText("添加后自动开始同步额度");
             return;
         }
-
-        for (int i = 0; i < n; i++) {
-            JSONObject tk = tokens.optJSONObject(i);
-            if (tk != null) list.addView(accountCard(tk));
+        for (int i = 0; i < sites.length(); i++) {
+            JSONObject site = sites.optJSONObject(i);
+            if (site != null) list.addView(siteCard(site));
         }
-        subtitle.setText(n + " 个账号 · 上次同步 " + fmtClock(lastRefresh));
     }
 
-    /** 单账号卡片（缓存即时渲染，额度有则显示） */
-    private LinearLayout accountCard(JSONObject tk) {
-        final String key = tk.optString("key");
-        LinearLayout c = card();
+    /** 站点卡片：站头 + 账号行 */
+    private View siteCard(JSONObject site) {
+        String siteKey = site.optString("key");
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(36, 32, 36, 28);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = 28;
+        card.setLayoutParams(lp);
+        GradientDrawable bgd = new GradientDrawable();
+        bgd.setColor(CARD); bgd.setCornerRadius(40);
+        card.setBackground(bgd);
+        card.setElevation(6);
 
-        /* 行1：别名 + 状态 chip */
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.setGravity(Gravity.CENTER_VERTICAL);
-        TextView name = label(tk.optString("alias", key), C_TEXT, 17, true);
-        row1.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+        /* 站头 */
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout headL = new LinearLayout(this);
+        headL.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(site.optString("name", siteKey));
+        name.setTextColor(TXT); name.setTextSize(17); name.setTypeface(Typeface.DEFAULT_BOLD);
+        TextView url = new TextView(this);
+        url.setText(site.optString("baseUrl", "") + " · " +
+                ("manual".equals(site.optString("checkinType")) ? "手动签到" : "登录即签到"));
+        url.setTextColor(SUB); url.setTextSize(12);
+        headL.addView(name); headL.addView(url);
+        View stretch = new View(this);
+        stretch.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
+        TextView addAcc = ghost(this, "＋账号", ACCENT);
+        addAcc.setOnClickListener(v -> promptAddAccount(site));
+        TextView refresh = ghost(this, "⟳ 刷新", ACCENT);
+        refresh.setOnClickListener(v -> refreshSite(site));
+        TextView more = ghost(this, "⋯", SUB);
+        more.setOnClickListener(v -> siteMenu(site));
+        head.addView(headL, new LinearLayout.LayoutParams(0, -2, 1f));
+        head.addView(addAcc); head.addView(sp(this, 18));
+        head.addView(refresh); head.addView(sp(this, 18));
+        head.addView(more);
+        card.addView(head);
 
-        boolean hasToken = !tk.optString("token", "").isEmpty();
-        boolean expired = false;
-        JSONObject cached = tk.optJSONObject("lastStatus");
-        if (cached != null && cached.has("authorized")) expired = !cached.optBoolean("authorized");
-
-        TextView chip = label(hasToken ? (expired ? "已过期" : "已授权") : "待授权",
-                hasToken ? (expired ? 0xFFB91C1C : 0xFF15803D) : C_SUB, 11, true);
-        chip.setPadding(dp(10), dp(4), dp(10), dp(4));
-        GradientDrawable chipBg = new GradientDrawable();
-        chipBg.setColor(hasToken ? (expired ? 0xFFFEE2E2 : C_CHIP_OK) : C_CHIP_WAIT);
-        chipBg.setCornerRadius(dp(20));
-        chip.setBackground(chipBg);
-        row1.addView(chip);
-        c.addView(row1);
-
-        /* 行2：站点 · GitHub 用户名 */
-        String sub = siteName(tk.optString("siteKey"));
-        String gh = tk.optString("githubAccount", "");
-        if (!gh.isEmpty()) sub += "  ·  @" + gh;
-        TextView subT = label(sub, C_SUB, 12, false);
-        subT.setPadding(0, dp(3), 0, 0);
-        c.addView(subT);
-
-        /* 行3：额度大字（缓存优先） */
-        LinearLayout quotaRow = new LinearLayout(this);
-        quotaRow.setOrientation(LinearLayout.HORIZONTAL);
-        quotaRow.setGravity(Gravity.BOTTOM);
-        quotaRow.setPadding(0, dp(14), 0, dp(4));
-        if (cached != null && cached.optBoolean("ok") && cached.optBoolean("authorized", true)) {
-            TextView avail = label("$" + fmtUsd(cached.optDouble("availableUSD", 0)), C_GREEN, 30, true);
-            quotaRow.addView(avail, new LinearLayout.LayoutParams(0, -2, 1f));
-            LinearLayout side = new LinearLayout(this);
-            side.setOrientation(LinearLayout.VERTICAL);
-            TextView used = label("已用 $" + fmtUsd(cached.optDouble("usedUSD", 0)), C_ORANGE, 12, true);
-            used.setGravity(Gravity.RIGHT);
-            side.addView(used);
-            if (cached.has("todayUsed")) {
-                TextView today = label("今日 $" + fmtUsd(cached.optDouble("todayUsed", 0)), C_PURPLE, 12, false);
-                today.setGravity(Gravity.RIGHT);
-                today.setPadding(0, dp(2), 0, 0);
-                side.addView(today);
-            }
-            quotaRow.addView(side, new LinearLayout.LayoutParams(-2, -2));
+        /* 账号列表 */
+        JSONArray accs = site.optJSONArray("accounts");
+        if (accs == null || accs.length() == 0) {
+            TextView t = new TextView(this);
+            t.setText("该站点下还没有账号，点上方「＋账号」添加");
+            t.setTextColor(SUB); t.setTextSize(13);
+            t.setPadding(0, 24, 0, 4);
+            card.addView(t);
         } else {
-            String ph = hasToken ? "额度同步中…" : "完成授权后显示额度";
-            TextView phT = label(ph, 0xFF94A3B8, 15, false);
-            quotaRow.addView(phT, new LinearLayout.LayoutParams(0, -2, 1f));
-        }
-        c.addView(quotaRow);
-
-        /* 授权过期提示 */
-        if (expired) {
-            TextView warn = label("⚠ 授权已过期，请点击「重新授权」", C_RED, 12, false);
-            warn.setPadding(0, dp(6), 0, 0);
-            c.addView(warn);
-        }
-
-        /* 行4：操作按钮组 */
-        LinearLayout btns = new LinearLayout(this);
-        btns.setOrientation(LinearLayout.HORIZONTAL);
-        btns.setPadding(0, dp(10), 0, 0);
-        TextView checkin = ghostButton(hasToken ? "立即签到" : "一键授权");
-        checkin.setOnClickListener(v -> {
-            if (hasToken) doCheckin(key); else startAuth(key, tk.optString("alias", key));
-        });
-        btns.addView(checkin, new LinearLayout.LayoutParams(0, dp(34), 1f));
-        btns.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
-
-        if (hasToken) {
-            if (expired) {
-                TextView reauth = ghostButton("重新授权");
-                reauth.setOnClickListener(v -> startAuth(key, tk.optString("alias", key)));
-                btns.addView(reauth, new LinearLayout.LayoutParams(0, dp(34), 1f));
-                btns.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
+            for (int i = 0; i < accs.length(); i++) {
+                JSONObject a = accs.optJSONObject(i);
+                if (a != null) card.addView(accountRow(site, a, i == accs.length() - 1));
             }
-            TextView logB = ghostButton("日志");
-            logB.setOnClickListener(v -> showLogs(key));
-            btns.addView(logB, new LinearLayout.LayoutParams(0, dp(34), 1f));
-            btns.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
         }
-
-        TextView del = ghostButton("删除");
-        del.setOnClickListener(v -> confirmDelete(key, tk.optString("alias", key)));
-        btns.addView(del, new LinearLayout.LayoutParams(0, dp(34), 1f));
-        c.addView(btns);
-
-        return c;
+        return card;
     }
 
-    private String siteName(String siteKey) {
+    /** 账号行 */
+    private View accountRow(JSONObject site, JSONObject acc, boolean last) {
+        String key = acc.optString("key");
+        String token = acc.optString("token", "");
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, 28, 0, 24);
+        if (!last) {
+            View line = new View(this);
+            line.setBackgroundColor(0xFFE2E8F0);
+            row.addView(line, new LinearLayout.LayoutParams(-1, 2));
+        }
+
+        /* 行1：别名 + 状态chip + GitHub */
+        LinearLayout l1 = new LinearLayout(this);
+        l1.setOrientation(LinearLayout.HORIZONTAL);
+        l1.setGravity(Gravity.CENTER_VERTICAL);
+        TextView alias = new TextView(this);
+        alias.setText(acc.optString("alias", key));
+        alias.setTextColor(TXT); alias.setTextSize(15); alias.setTypeface(Typeface.DEFAULT_BOLD);
+        TextView chip = chip(this, chipText(acc), chipColor(acc));
+        TextView gh = new TextView(this);
+        gh.setText(acc.optString("githubAccount", "").isEmpty() ? "未授权" : "@" + acc.optString("githubAccount"));
+        gh.setTextColor(token.isEmpty() ? ORANGE : SUB); gh.setTextSize(12);
+        View st = new View(this);
+        st.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
+        l1.addView(alias); l1.addView(sp(this, 14)); l1.addView(chip); l1.addView(sp(this, 14));
+        l1.addView(gh); l1.addView(st);
+        row.addView(l1);
+
+        /* 行2：额度（来自 lastStatus 缓存） */
+        JSONObject stt = acc.optJSONObject("lastStatus");
+        LinearLayout l2 = new LinearLayout(this);
+        l2.setOrientation(LinearLayout.HORIZONTAL);
+        l2.setGravity(Gravity.CENTER_VERTICAL);
+        if (stt != null && stt.optBoolean("ok")) {
+            TextView avail = new TextView(this);
+            avail.setText("$" + fmt(stt.optDouble("availableUSD", 0)));
+            avail.setTextColor(GREEN); avail.setTextSize(28); avail.setTypeface(Typeface.DEFAULT_BOLD);
+            TextView used = new TextView(this);
+            used.setText("已用 $" + fmt(stt.optDouble("usedUSD", 0)));
+            used.setTextColor(ORANGE); used.setTextSize(13);
+            TextView today = new TextView(this);
+            today.setText("今日 $" + (stt.has("todayUsed") && !stt.isNull("todayUsed")
+                    ? fmt(stt.optDouble("todayUsed", 0)) : "-"));
+            today.setTextColor(PURPLE); today.setTextSize(13);
+            l2.addView(avail); l2.addView(sp(this, 24));
+            l2.addView(used); l2.addView(sp(this, 24));
+            l2.addView(today);
+        } else {
+            TextView t = new TextView(this);
+            t.setText(token.isEmpty() ? "尚未授权，请先授权获取额度" : "点「⟳ 刷新」获取额度");
+            t.setTextColor(SUB); t.setTextSize(13);
+            l2.addView(t);
+        }
+        row.addView(l2, lpTop(28));
+
+        /* 行3：操作按钮 */
+        LinearLayout l3 = new LinearLayout(this);
+        l3.setOrientation(LinearLayout.HORIZONTAL);
+        TextView sign = ghost(this, "立即签到", ACCENT);
+        sign.setOnClickListener(v -> doCheckin(key));
+        TextView auth = ghost(this, token.isEmpty() ? "GitHub 授权" : "重新授权", token.isEmpty() ? GREEN : SUB);
+        auth.setOnClickListener(v -> startAuth(site, acc));
+        TextView logs = ghost(this, "日志", SUB);
+        logs.setOnClickListener(v -> showLogs(key));
+        TextView del = ghost(this, "删除", 0xFFDC2626);
+        del.setOnClickListener(v -> confirmRemoveAccount(acc));
+        l3.addView(sign); l3.addView(sp(this, 26));
+        l3.addView(auth); l3.addView(sp(this, 26));
+        l3.addView(logs); l3.addView(sp(this, 26));
+        l3.addView(del);
+        row.addView(l3, lpTop(24));
+        return row;
+    }
+
+    /* ================= 操作 ================= */
+
+    private void promptAddSite() {
+        LinearLayout box = form(this);
+        final EditText name = field(this, "站点名称，如：小学生公益站");
+        final EditText url = field(this, "API 地址，如：https://api.xxx.com");
+        url.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        box.addView(name); box.addView(url);
+        new AlertDialog.Builder(this)
+                .setTitle("添加站点")
+                .setView(scrollViewOf(box))
+                .setPositiveButton("保存", (d, w) -> {
+                    String n = name.getText().toString().trim();
+                    String u = url.getText().toString().trim().replaceAll("/+$", "");
+                    if (u.isEmpty() || !u.startsWith("http")) { toast("API 地址无效"); return; }
+                    JSONObject site = new JSONObject();
+                    try {
+                        site.put("key", Store.siteKeyOf(u));
+                        site.put("name", n.isEmpty() ? Store.siteKeyOf(u) : n);
+                        site.put("baseUrl", u);
+                        site.put("checkinType", "login");
+                        site.put("accounts", new JSONArray());
+                        new Store(this).upsertSite(site);
+                        render();
+                        toast("站点已添加");
+                    } catch (Exception ignored) {}
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void siteMenu(JSONObject site) {
+        String[] items = {"编辑站点", "签到方式: " + ("manual".equals(site.optString("checkinType")) ? "手动签到（点击切换为登录即签到）" : "登录即签到（点击切换为手动签到）"), "删除站点"};
+        new AlertDialog.Builder(this)
+                .setTitle(site.optString("name", site.optString("key")))
+                .setItems(items, (d, w) -> {
+                    if (w == 0) editSite(site);
+                    else if (w == 1) toggleCheckinType(site);
+                    else confirmRemoveSite(site);
+                }).show();
+    }
+
+    private void editSite(JSONObject site) {
+        LinearLayout box = form(this);
+        final EditText name = field(this, "站点名称");
+        name.setText(site.optString("name"));
+        final EditText url = field(this, "API 地址");
+        url.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        url.setText(site.optString("baseUrl"));
+        box.addView(name); box.addView(url);
+        new AlertDialog.Builder(this)
+                .setTitle("编辑站点")
+                .setView(scrollViewOf(box))
+                .setPositiveButton("保存", (d, w) -> {
+                    String n = name.getText().toString().trim();
+                    String u = url.getText().toString().trim().replaceAll("/+$", "");
+                    if (u.isEmpty() || !u.startsWith("http")) { toast("API 地址无效"); return; }
+                    try {
+                        site.put("name", n.isEmpty() ? site.optString("key") : n);
+                        site.put("baseUrl", u);
+                        new Store(this).upsertSite(site);
+                        render();
+                    } catch (Exception ignored) {}
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void toggleCheckinType(JSONObject site) {
         try {
-            JSONArray sites = store.config().optJSONArray("sites");
-            if (sites != null) for (int i = 0; i < sites.length(); i++) {
-                JSONObject s = sites.optJSONObject(i);
-                if (s != null && siteKey != null && siteKey.equals(s.optString("key"))) return s.optString("name", siteKey);
-            }
+            site.put("checkinType", "manual".equals(site.optString("checkinType")) ? "login" : "manual");
+            new Store(this).upsertSite(site);
+            render();
         } catch (Exception ignored) {}
-        return siteKey == null ? "" : siteKey;
     }
 
-    /* ================= 数据刷新 ================= */
+    private void confirmRemoveSite(JSONObject site) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除站点")
+                .setMessage("删除「" + site.optString("name") + "」及其下所有账号？（不影响站点本身账号）")
+                .setPositiveButton("删除", (d, w) -> {
+                    new Store(this).removeSite(site.optString("key"));
+                    render();
+                })
+                .setNegativeButton("取消", null).show();
+    }
 
-    private void refresh(boolean manual) {
-        if (refreshing) return;
-        refreshing = true;
-        if (manual) subtitle.setText("正在刷新…");
-        JSONArray tokens = store.tokens();
-        final int total = tokens.length();
-        if (total == 0) {
-            refreshing = false;
-            lastRefresh = System.currentTimeMillis();
-            render();
-            return;
-        }
-        final int[] done = {0};
-        for (int i = 0; i < total; i++) {
-            JSONObject tk = tokens.optJSONObject(i);
-            if (tk == null || tk.optString("token", "").isEmpty()) {
-                if (++done[0] == total) h.post(() -> onRefreshDone(manual));
-                continue;
-            }
-            final String key = tk.optString("key");
-            new Thread(() -> {
-                try {
-                    JSONObject r = engine.status(key);
-                    if (r.optBoolean("ok")) {
-                        unitCache.put(key, r.optLong("unit", 500000L));
-                        JSONObject tk2 = store.findToken(key);
-                        if (tk2 != null) {
-                            tk2.put("lastStatus", r);
-                            store.upsertToken(tk2);
+    private void promptAddAccount(JSONObject site) {
+        LinearLayout box = form(this);
+        final EditText alias = field(this, "账号别名（用于区分，如：主号 / 小号）");
+        box.addView(alias);
+        new AlertDialog.Builder(this)
+                .setTitle("添加账号 · " + site.optString("name", site.optString("key")))
+                .setView(scrollViewOf(box))
+                .setPositiveButton("下一步", (d, w) -> {
+                    String al = alias.getText().toString().trim();
+                    if (al.isEmpty()) { toast("请填写别名"); return; }
+                    // 同名复用（重新授权）；否则新建
+                    JSONArray accs = site.optJSONArray("accounts");
+                    if (accs != null) for (int i = 0; i < accs.length(); i++) {
+                        JSONObject a = accs.optJSONObject(i);
+                        if (a != null && al.equals(a.optString("alias"))) {
+                            startAuth(site, a);
+                            return;
                         }
                     }
-                } catch (Exception ignored) {}
-                h.post(() -> { if (++done[0] == total) onRefreshDone(manual); });
-            }).start();
-        }
-    }
-
-    private void onRefreshDone(boolean manual) {
-        refreshing = false;
-        lastRefresh = System.currentTimeMillis();
-        render();
-        if (manual) Toast.makeText(this, "已同步最新额度", Toast.LENGTH_SHORT).show();
-    }
-
-    private static String fmtUsd(double v) {
-        double a = Math.abs(v);
-        if (a >= 1000) return String.format(Locale.US, "%.0f", v);
-        if (a >= 100) return String.format(Locale.US, "%.1f", v);
-        return String.format(Locale.US, "%.2f", v);
-    }
-
-    private static String fmtClock(long ms) {
-        if (ms <= 0) return "—";
-        return new java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(new java.util.Date(ms));
-    }
-
-    private static String fmtLogTime(String raw) {
-        try {
-            if (raw != null && raw.matches("\\d{10,13}")) {
-                long t = Long.parseLong(raw);
-                if (raw.length() == 13) t /= 1000;
-                return new java.text.SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(new java.util.Date(t * 1000));
-            }
-        } catch (Exception ignored) {}
-        return raw == null ? "" : raw;
-    }
-
-    /* ================= 交互 ================= */
-
-    /** 添加账号：输入别名 → 直接进授权 */
-    private void addAccountDialog() {
-        final EditText input = new EditText(this);
-        input.setHint("账号别名，如：主号 / 小号");
-        input.setInputType(InputType.TYPE_CLASS_TEXT);
-        input.setTextSize(15);
-        int p = dp(20);
-        FrameLayout box = new FrameLayout(this);
-        box.setPadding(p, dp(8), p, 0);
-        box.addView(input, new FrameLayout.LayoutParams(-1, -2));
-
-        new AlertDialog.Builder(this)
-                .setTitle("添加账号")
-                .setMessage("下一步将打开 GitHub 授权页，\n登录后自动返回，全程无需复制粘贴。")
-                .setView(box)
-                .setPositiveButton("开始授权", (d, w) -> {
-                    String alias = input.getText().toString().trim();
-                    if (alias.isEmpty()) alias = "账号" + (store.tokens().length() + 1);
-                    startAuth(newAliasKey(alias), alias);
+                    try {
+                        JSONObject acc = new JSONObject()
+                                .put("key", "acc_" + System.currentTimeMillis())
+                                .put("alias", al).put("siteKey", site.optString("key"));
+                        new Store(this).upsertAccount(site.optString("key"), acc);
+                        render();
+                        JSONObject created = new Store(this).findAccount(acc.optString("key"));
+                        if (created != null) startAuth(site, created);
+                    } catch (Exception ignored) {}
                 })
-                .setNegativeButton("取消", null)
-                .show();
+                .setNegativeButton("取消", null).show();
     }
 
-    /** 别名 → 唯一 key（同别名复用同一条记录，实现"重新授权"） */
-    private String newAliasKey(String alias) {
-        JSONArray a = store.tokens();
-        for (int i = 0; i < a.length(); i++) {
-            JSONObject o = a.optJSONObject(i);
-            if (o != null && alias.equals(o.optString("alias"))) return o.optString("key");
-        }
-        return "acc_" + System.currentTimeMillis();
+    private void confirmRemoveAccount(JSONObject acc) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除账号")
+                .setMessage("删除「" + acc.optString("alias", acc.optString("key")) + "」？")
+                .setPositiveButton("删除", (d, w) -> {
+                    new Store(this).removeAccount(acc.optString("key"));
+                    render();
+                })
+                .setNegativeButton("取消", null).show();
     }
 
-    private void startAuth(String key, String alias) {
-        // 先占位，授权回来前卡片即可见
-        try {
-            JSONObject rec = store.findToken(key);
-            if (rec == null) {
-                rec = new JSONObject().put("key", key).put("alias", alias);
-                store.upsertToken(rec);
-            } else if (alias != null && !alias.isEmpty()) {
-                rec.put("alias", alias);
-                store.upsertToken(rec);
-            }
-        } catch (Exception ignored) {}
+    private void startAuth(JSONObject site, JSONObject acc) {
         Intent it = new Intent(this, AuthActivity.class);
-        it.putExtra("siteKey", "justworker");
-        it.putExtra("accountKey", key);
+        it.putExtra("siteKey", site.optString("key"));
+        it.putExtra("accountKey", acc.optString("key"));
+        it.putExtra("alias", acc.optString("alias"));
         startActivityForResult(it, REQ_AUTH);
     }
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req != REQ_AUTH) return;
-        render();
-        if (res == RESULT_OK) {
-            String user = data == null ? "" : data.getStringExtra("user");
-            Toast.makeText(this, "授权成功 " + (user == null || user.isEmpty() ? "" : "@" + user) + "，正在同步额度", Toast.LENGTH_LONG).show();
-            refresh(false);
-        } else {
-            String err = data == null ? "已取消" : data.getStringExtra("error");
-            Toast.makeText(this, err == null ? "授权未完成" : err, Toast.LENGTH_SHORT).show();
+        if (req == REQ_AUTH) {
+            if (res == RESULT_OK) { toast("授权成功"); render(); }
+            else {
+                String err = data == null ? "" : data.getStringExtra("error");
+                if (err != null && !err.isEmpty()) toast(err);
+                render();
+            }
         }
     }
 
-    /** 立即签到（login 型站点自动转为"刷新保活"） */
-    private void doCheckin(String key) {
-        AlertDialog wait = new AlertDialog.Builder(this).setMessage("正在签到…").show();
+    private void refreshSite(JSONObject site) {
+        JSONArray accs = site.optJSONArray("accounts");
+        if (accs == null) return;
+        for (int i = 0; i < accs.length(); i++) {
+            JSONObject a = accs.optJSONObject(i);
+            if (a != null) refreshOne(a);
+        }
+        toast("正在刷新 " + accs.length() + " 个账号…");
+    }
+
+    private void refreshOne(JSONObject acc) {
+        final String key = acc.optString("key");
         new Thread(() -> {
-            String msg;
             try {
-                JSONObject r = engine.checkin(key);
-                if (r.optBoolean("skipped")) msg = r.optString("message", "该站点登录即签到，已为你刷新保活");
-                else msg = "签到完成 (http " + r.optInt("http") + ")";
-            } catch (Exception e) { msg = "签到失败: " + e.getMessage(); }
-            String finalMsg = msg;
-            h.post(() -> {
-                wait.dismiss();
-                refresh(false);
-                new AlertDialog.Builder(this)
-                        .setTitle("签到")
-                        .setMessage(finalMsg)
-                        .setPositiveButton("好的", null)
-                        .show();
-            });
+                JSONObject st = engine.status(key);
+                Store store = new Store(this);
+                JSONObject rec = store.findAccount(key);
+                if (rec != null) { rec.put("lastStatus", st); store.upsertAccount(store.siteOfAccount(key).optString("key"), rec); }
+                h.post(this::render);
+            } catch (Exception e) {
+                h.post(() -> toast(key + " 刷新失败: " + e.getMessage()));
+            }
         }).start();
     }
 
-    /** 站点日志（含最近一次签到奖励高亮） */
+    private void doCheckin(String key) {
+        new Thread(() -> {
+            try {
+                JSONObject r = engine.checkin(key);
+                h.post(() -> {
+                    if (r.optBoolean("skipped")) toast(r.optString("message", "登录即签到，无需操作"));
+                    else toast("签到完成");
+                    render();
+                });
+            } catch (Exception e) {
+                h.post(() -> toast("签到失败: " + e.getMessage()));
+            }
+        }).start();
+    }
+
     private void showLogs(String key) {
-        AlertDialog wait = new AlertDialog.Builder(this).setMessage("正在拉取日志…").show();
         new Thread(() -> {
             String text;
             try {
-                JSONObject r = engine.logs(key, "system", 20);
                 StringBuilder sb = new StringBuilder();
-                JSONObject bonus = r.optJSONObject("lastBonus");
-                if (bonus != null) {
-                    sb.append("🎁 最近签到奖励\n  ").append(fmtLogTime(bonus.optString("time")));
-                    long q = bonus.optLong("quota", 0);
-                    if (q > 0) {
-                        Long unit = unitCache.get(key);
-                        sb.append("  +$").append(fmtUsd(q / (unit == null ? 500000L : unit)));
-                    }
-                    sb.append("\n\n");
-                }
+                JSONObject r = engine.logs(key, "系统", 20);
                 JSONArray rows = r.optJSONArray("rows");
-                int shown = 0;
-                if (rows != null) {
-                    for (int i = rows.length() - 1; i >= 0 && shown < 10; i--, shown++) {
-                        JSONObject o = rows.optJSONObject(i);
-                        if (o == null) continue;
-                        sb.append(fmtLogTime(o.optString("time"))).append("  ").append(o.optString("text", "")).append('\n');
-                    }
+                JSONObject lb = r.optJSONObject("lastBonus");
+                if (lb != null) sb.append("最近签到奖励: $").append(fmt(lb.optDouble("quota", 0) / 500000d)).append("\n\n");
+                if (rows == null || rows.length() == 0) sb.append("暂无日志");
+                else for (int i = 0; i < rows.length(); i++) {
+                    JSONObject o = rows.optJSONObject(i);
+                    if (o == null) continue;
+                    sb.append(o.optString("time", "").replace('T', ' '));
+                    String t = o.optString("text", "");
+                    if (!t.isEmpty()) sb.append("  ").append(t.length() > 40 ? t.substring(0, 40) : t);
+                    sb.append('\n');
                 }
-                if (shown == 0 && bonus == null) sb.append("暂无系统日志记录");
                 text = sb.toString();
-            } catch (Exception e) { text = "日志拉取失败: " + e.getMessage(); }
-            String finalText = text;
-            h.post(() -> {
-                wait.dismiss();
-                TextView tv = new TextView(this);
-                tv.setText(finalText);
-                tv.setTextSize(13);
-                tv.setTextColor(C_TEXT);
-                tv.setTypeface(Typeface.MONOSPACE);
-                int p = dp(20);
-                ScrollView sv = new ScrollView(this);
-                sv.addView(tv, new ScrollView.LayoutParams(-1, -2));
-                FrameLayout box = new FrameLayout(this);
-                box.setPadding(p, dp(10), p, dp(4));
-                box.addView(sv, new FrameLayout.LayoutParams(-1, dp(360)));
-                new AlertDialog.Builder(this)
-                        .setTitle("系统日志")
-                        .setView(box)
-                        .setPositiveButton("关闭", null)
-                        .show();
-            });
+            } catch (Exception e) { text = "日志获取失败: " + e.getMessage(); }
+            final String msg = text;
+            h.post(() -> new AlertDialog.Builder(this)
+                    .setTitle("账号日志（最近 20 条系统记录）")
+                    .setMessage(msg)
+                    .setPositiveButton("关闭", null).show());
         }).start();
     }
 
-    private void confirmDelete(final String key, String alias) {
+    private void showSettings() {
+        Store store = new Store(this);
+        JSONObject cfg = store.config();
+        JSONObject proxy = cfg.optJSONObject("proxy");
+        LinearLayout box = form(this);
+        final EditText host = field(this, "SOCKS5 地址（如 127.0.0.1，留空=直连）");
+        final EditText port = field(this, "SOCKS5 端口（如 10808）");
+        port.setInputType(InputType.TYPE_CLASS_NUMBER);
+        if (proxy != null && proxy.optBoolean("enabled")) {
+            host.setText(proxy.optString("host"));
+            port.setText(String.valueOf(proxy.optInt("port")));
+        }
+        box.addView(host); box.addView(port);
         new AlertDialog.Builder(this)
-                .setTitle("删除账号")
-                .setMessage("确定删除「" + alias + "」吗？\n仅删除本地记录，不影响站点账号。")
-                .setPositiveButton("删除", (d, w) -> {
-                    store.removeToken(key);
-                    render();
-                    Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show();
+                .setTitle("设置 · 代理")
+                .setView(scrollViewOf(box))
+                .setPositiveButton("保存", (d, w) -> {
+                    try {
+                        String hh = host.getText().toString().trim();
+                        String pp = port.getText().toString().trim();
+                        if (hh.isEmpty() || pp.isEmpty()) {
+                            proxy.put("enabled", false);
+                        } else {
+                            proxy.put("enabled", true).put("host", hh).put("port", Integer.parseInt(pp));
+                        }
+                        cfg.put("proxy", proxy);
+                        store.saveConfig(cfg);
+                        render();
+                        toast("已保存");
+                    } catch (Exception ignored) {}
                 })
-                .setNegativeButton("取消", null)
-                .show();
+                .setNegativeButton("取消", null).show();
     }
 
-    @Override public void onBackPressed() {
-        // 常驻后台应用：返回键回到桌面而非退出（WorkManager 持续保活签到）
+    private void goHome() {
         Intent home = new Intent(Intent.ACTION_MAIN);
         home.addCategory(Intent.CATEGORY_HOME);
+        home.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(home);
+    }
+
+    /* ================= 小工具 ================= */
+
+    private static String chipText(JSONObject acc) {
+        String token = acc.optString("token", "");
+        if (token.isEmpty()) return "待授权";
+        JSONObject st = acc.optJSONObject("lastStatus");
+        if (st != null && !st.optBoolean("ok")) return "异常";
+        if (st != null && st.optBoolean("ok")) return "正常";
+        return "已授权";
+    }
+    private static int chipColor(JSONObject acc) {
+        String t = chipText(acc);
+        return "正常".equals(t) ? GREEN : ("异常".equals(t) ? 0xFFDC2626 : (t.equals("已授权") ? ACCENT : ORANGE));
+    }
+    private static String fmt(double d) {
+        if (d >= 1000) return String.format(java.util.Locale.US, "%.0f", d);
+        return String.format(java.util.Locale.US, "%.2f", d);
+    }
+    private static LinearLayout.LayoutParams lpTop(int px) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.topMargin = px;
+        return lp;
+    }
+
+    private static View sp(Context c, int px) {
+        View v = new View(c);
+        v.setLayoutParams(new LinearLayout.LayoutParams(px, 1));
+        return v;
+    }
+
+    private static LinearLayout form(Context c) {
+        LinearLayout box = new LinearLayout(c);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (c.getResources().getDisplayMetrics().density * 20);
+        box.setPadding(pad, pad / 2, pad, 0);
+        return box;
+    }
+
+    private static EditText field(Context c, String hint) {
+        EditText e = new EditText(c);
+        e.setHint(hint);
+        e.setTextSize(14);
+        e.setSingleLine(true);
+        return e;
+    }
+
+    private View scrollViewOf(View v) {
+        ScrollView sv = new ScrollView(this);
+        sv.addView(v);
+        return sv;
+    }
+
+    private static TextView ghost(Context c, String text, int color) {
+        TextView t = new TextView(c);
+        t.setText(text);
+        t.setTextColor(color);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setPadding(10, 16, 10, 16);
+        t.setClickable(true);
+        t.setFocusable(true);
+        GradientDrawable ripple = new GradientDrawable();
+        ripple.setColor(0x0F000000);
+        ripple.setCornerRadius(16);
+        t.setBackground(ripple);
+        return t;
+    }
+
+    private static TextView chip(Context c, String text, int color) {
+        TextView t = new TextView(c);
+        t.setText(text);
+        t.setTextColor(color);
+        t.setTextSize(11);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        GradientDrawable bgd = new GradientDrawable();
+        bgd.setColor((color & 0x00FFFFFF) | 0x18000000);
+        bgd.setCornerRadius(24);
+        t.setBackground(bgd);
+        t.setPadding(18, 6, 18, 6);
+        return t;
     }
 }
