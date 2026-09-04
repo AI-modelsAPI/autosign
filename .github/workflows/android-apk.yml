@@ -27,11 +27,6 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: 拷贝 Web UI 到 assets
-        run: |
-          mkdir -p android/app/src/main/assets
-          cp src/index.html android/app/src/main/assets/index.html
-
       - name: 构建 Debug APK（debug 签名，下载即可安装）
         run: |
           cd android

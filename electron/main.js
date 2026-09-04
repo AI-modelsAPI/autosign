@@ -3,15 +3,16 @@
  *
  * 职责：
  *   1. 启动内置引擎（src/server.js → http://127.0.0.1:7300）
- *   2. 主窗口加载引擎 UI（点关闭=隐藏到后台，调度不停）
- *   3. IPC 授权桥：弹出真实（非无头）授权窗口 → GitHub OAuth →
- *      轮询读 localStorage['new-api:auth-session'] → 落盘 tokens.json
+ *   2. 主窗口加载原生桌面风格 UI（electron/desktop.html，本地文件直载）
+ *   3. IPC 授权桥：两步 OAuth（POST /api/oauth/state 拿 flow_token →
+ *      GitHub authorize?state=flow_token）→ 轮询 localStorage['new-api:auth-session']
+ *      → 落盘 tokens.json
  *
  * 关键点：授权窗口是 Electron 自带完整 Chromium，真实浏览器指纹，
  *         可通过 Cloudflare Turnstile 人机验证（headless 过不了的它过得去）。
- *         授权完成后浏览器即关闭，之后走纯 HTTP 接口，永不再弹窗。
+ *         授权完成后窗口即关闭，之后走纯 HTTP 接口，永不再弹窗。
  */
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, net, session } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -45,14 +46,15 @@ async function startEngine() {
   throw new Error('引擎 server.js 加载失败');
 }
 
-/* ---------- 主窗口 ---------- */
+/* ---------- 主窗口（本地桌面风格 UI） ---------- */
 function createMain() {
   mainWin = new BrowserWindow({
-    width: 1180, height: 780, minWidth: 860, minHeight: 560,
+    width: 1180, height: 780, minWidth: 940, minHeight: 600,
     title: '公益AI中转站 · 自动签到台',
+    backgroundColor: '#f8fafc',
     webPreferences: { preload: join(__dir, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
-  mainWin.loadURL('http://127.0.0.1:7300');
+  mainWin.loadFile(join(__dir, 'desktop.html'));
   // 点关闭 = 隐藏到后台，引擎继续跑（全后台原则）
   mainWin.on('close', (e) => {
     if (!quitting) { e.preventDefault(); mainWin.hide(); }
@@ -68,17 +70,81 @@ function createMain() {
   Menu.setApplicationMenu(menu);
 }
 
-/* ---------- 授权桥（真实浏览器窗口，非无头，过 Turnstile） ---------- */
-async function runAuth(siteKey, accountKey) {
+/* ---------- SOCKS5 代理（授权 state 请求直连站点时用，与引擎 client.js 同源配置） ----------
+ * 用 Electron net.fetch + 专用 session（Chromium 原生 SOCKS5 支持），
+ * 不用 socks-proxy-agent：Node fetch(undici) 的 dispatcher 不接受 http.Agent。
+ */
+let authSession = null;
+async function getAuthSession(cfg) {
+  if (authSession) return authSession;
+  authSession = session.fromPartition('justsign-auth-state');
+  const p = cfg.proxy;
+  if (p && p.enabled) {
+    try { await authSession.setProxy({ mode: 'fixed_servers', protocol: 'socks5', host: p.host || '127.0.0.1', port: p.port || 10808 }); }
+    catch (_) {}
+  }
+  return authSession;
+}
+
+/* ---------- 授权桥：两步 OAuth（新版 new-api） ----------
+ *  1. POST {baseUrl}/api/oauth/state {provider:'github',intent:'login'} → data = flow_token
+ *  2. 打开 https://github.com/login/oauth/authorize?client_id=..&state=flow_token&scope=user:email
+ *  3. GitHub 回调站点 /oauth/github?code=..&state=..，站点前端自动交换并写 localStorage
+ *  4. 轮询读 session → 落盘 tokens.json → 关窗
+ */
+async function runAuth(siteKey, accountKey, alias) {
   await ensureMods();
   const cfg = cfgM.loadConfig();
   const { load, save, appendLog } = dbM;
   const site = (cfg.sites || []).find(s => s.key === siteKey);
   if (!site) return { ok: false, error: '站点不存在: ' + siteKey };
+  const base = site.baseUrl.replace(/\/+$/, '');
+
+  /* 第 0 步：账号记录先占位（别名），授权失败也不丢 */
+  const tokens0 = load('tokens.json') || [];
+  let rec0 = tokens0.find(t => t.key === accountKey);
+  if (!rec0) {
+    rec0 = { key: accountKey, siteKey, alias: alias || accountKey };
+    tokens0.push(rec0);
+    save('tokens.json', tokens0);
+  } else if (alias) {
+    rec0.alias = alias;
+    save('tokens.json', tokens0);
+  }
+
+  /* 第 1 步：拿 flow_token（服务端 state） */
+  let flowToken = null;
+  try {
+    const sess = await getAuthSession(cfg);
+    const resp = await net.fetch(base + '/api/oauth/state', {
+      method: 'POST',
+      session: sess,
+      headers: {
+        'User-Agent': cfg.UA || 'Mozilla/5.0',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({ provider: 'github', intent: 'login' })
+    });
+    const j = await resp.json().catch(() => ({}));
+    if (resp.status === 200 && j.success) {
+      flowToken = typeof j.data === 'string' ? j.data : (j.data && j.data.flow_token);
+    }
+    if (!flowToken) {
+      return { ok: false, error: 'state 获取失败: ' + (j.message || ('http ' + resp.status)) };
+    }
+  } catch (e) {
+    return { ok: false, error: 'state 请求异常: ' + e.message };
+  }
+
+  /* 第 2 步：开真实浏览器窗口走 GitHub 官方授权 */
+  const clientId = cfg.github_client_id || 'Ov23liBGecTYSePKpXQC';
+  const authUrl = 'https://github.com/login/oauth/authorize?client_id=' + encodeURIComponent(clientId)
+    + '&state=' + encodeURIComponent(flowToken) + '&scope=user:email';
 
   const auth = new BrowserWindow({
-    width: 500, height: 780, parent: mainWin, modal: true,
-    title: 'GitHub 授权 — ' + site.name,
+    width: 520, height: 820, parent: mainWin, modal: true,
+    title: 'GitHub 授权 — ' + (site.name || siteKey),
     webPreferences: {
       contextIsolation: true,
       // 每个账号独立持久会话：同机多 GitHub 账号互不串扰
@@ -87,7 +153,7 @@ async function runAuth(siteKey, accountKey) {
   });
   const wc = auth.webContents;
   try { wc.setUserAgent(cfg.UA); } catch (_) {}
-  await auth.loadURL(site.baseUrl.replace(/\/+$/, '') + '/api/oauth/github');
+  await auth.loadURL(authUrl);
 
   return await new Promise((resolve) => {
     let done = false;
@@ -105,6 +171,7 @@ async function runAuth(siteKey, accountKey) {
         const s = JSON.parse(raw);
         const token = s.access_token || s.accessToken;
         if (!token) return finish({ ok: false, error: 'session 中无 access_token' });
+        const login = s.user?.username || s.user?.login || null; // 新版 username / 老版 login
         let cookie = '';
         try { cookie = await wc.executeJavaScript('document.cookie', true); } catch (_) {}
         const tokens = load('tokens.json') || [];
@@ -112,14 +179,15 @@ async function runAuth(siteKey, accountKey) {
         const rec = i >= 0 ? tokens[i] : { key: accountKey, siteKey };
         Object.assign(rec, {
           siteKey,
-          githubAccount: s.user?.login || rec.githubAccount || null,
+          alias: rec.alias || alias || accountKey,
+          githubAccount: login || rec.githubAccount || null,
           token, cookie,
           updatedAt: new Date().toISOString()
         });
         if (i < 0) tokens.push(rec);
         save('tokens.json', tokens);
-        appendLog({ site: siteKey, account: accountKey, event: 'auth', detail: { via: 'electron', user: s.user?.login || null } });
-        finish({ ok: true, account: accountKey, user: s.user?.login || null });
+        appendLog({ site: siteKey, account: accountKey, event: 'auth', detail: { via: 'electron', user: login } });
+        finish({ ok: true, account: accountKey, user: login });
       } catch (_) { /* 页面跳转瞬间读取失败，下一轮再试 */ }
     }, AUTH_POLL_MS);
     auth.on('closed', () => finish({ ok: false, error: '授权窗口已关闭' }));
@@ -127,7 +195,8 @@ async function runAuth(siteKey, accountKey) {
   });
 }
 
-ipcMain.handle('justsign:auth', (_e, p) => runAuth(p?.siteKey, p?.accountKey));
+/* ---------- IPC ---------- */
+ipcMain.handle('justsign:auth', (_e, p) => runAuth(p?.siteKey, p?.accountKey, p?.alias));
 ipcMain.handle('justsign:accounts', async () => { await ensureMods(); return dbM.load('tokens.json') || []; });
 ipcMain.handle('justsign:version', () => ({ app: app.getVersion(), electron: process.versions.electron }));
 

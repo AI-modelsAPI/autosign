@@ -1,6 +1,6 @@
 {
   "name": "justsign-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "main.js",
@@ -24,7 +24,7 @@
     "appId": "icu.justwoker.justsign",
     "productName": "justsign",
     "directories": { "output": "dist" },
-    "files": ["main.js", "preload.js", "src/**/*", "package.json"],
+    "files": ["main.js", "preload.js", "desktop.html", "src/**/*", "package.json"],
     "mac": {
       "target": [{ "target": "dmg", "arch": ["x64"] }],
       "category": "public.app-category.utilities",
