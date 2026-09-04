@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -21,6 +22,10 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+
+import androidx.webkit.ProxyConfig;
+import androidx.webkit.ProxyController;
+import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
 
@@ -50,9 +55,12 @@ public class AuthActivity extends Activity {
     private TextView bootText;
     private TextView tip;
     private FrameLayout root;
+    private LinearLayout errorLayer;
+    private TextView errMsg;
     private String siteKey, accountKey, alias, baseUrl, siteHost;
     private final Handler h = new Handler(Looper.getMainLooper());
     private volatile boolean done = false;
+    private boolean proxyApplied = false;
 
     /** JS ↔ Java 桥：回调页注入脚本通过它回传交换结果 */
     public class Bridge {
@@ -99,6 +107,16 @@ public class AuthActivity extends Activity {
             @Override public void onPageFinished(WebView v, String url) {
                 maybeExchange(v, url);
             }
+            @Override public void onReceivedError(WebView v, WebResourceRequest req, android.webkit.WebResourceError err) {
+                if (req == null || !req.isForMainFrame()) return; // 子资源失败不提示
+                String d = err != null ? String.valueOf(err.getDescription()) : "unknown";
+                h.post(() -> showLoadError("net::" + d));
+            }
+            @Override public void onReceivedHttpError(WebView v, WebResourceRequest req, android.webkit.WebResourceResponse rsp) {
+                if (req == null || !req.isForMainFrame()) return;
+                int code = rsp != null ? rsp.getStatusCode() : 0;
+                h.post(() -> showLoadError("HTTP " + code));
+            }
         });
         wv.setVisibility(View.GONE);
         root.addView(wv, new FrameLayout.LayoutParams(-1, -1));
@@ -128,6 +146,41 @@ public class AuthActivity extends Activity {
         boot.addView(wrap, new LinearLayout.LayoutParams(-2, -2));
         root.addView(boot, new FrameLayout.LayoutParams(-1, -1));
 
+        /* ---- 失败重试层（v0.1.5）：GitHub 页加载失败时给出明确错误与重试入口 ---- */
+        errorLayer = new LinearLayout(this);
+        errorLayer.setOrientation(LinearLayout.VERTICAL);
+        errorLayer.setGravity(Gravity.CENTER);
+        errorLayer.setBackgroundColor(Color.WHITE);
+        errorLayer.setVisibility(View.GONE);
+        TextView errTitle = new TextView(this);
+        errTitle.setText("页面加载失败");
+        errTitle.setTextColor(0xFF0F172A); errTitle.setTextSize(16); errTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        errTitle.setGravity(Gravity.CENTER);
+        errMsg = new TextView(this);
+        errMsg.setTextColor(0xFFDC2626); errMsg.setTextSize(13); errMsg.setGravity(Gravity.CENTER);
+        errMsg.setPadding(60, 24, 60, 0);
+        TextView retry = new TextView(this);
+        retry.setText("重试");
+        retry.setTextColor(Color.WHITE); retry.setTextSize(15); retry.setTypeface(Typeface.DEFAULT_BOLD);
+        retry.setGravity(Gravity.CENTER);
+        retry.setPadding(80, 26, 80, 26);
+        GradientDrawable rbg = new GradientDrawable();
+        rbg.setColor(0xFF2563EB); rbg.setCornerRadius(30);
+        retry.setBackground(rbg);
+        retry.setOnClickListener(v -> { if (errorLayer != null) errorLayer.setVisibility(View.GONE); startAuthFlow(); });
+        TextView backTip = new TextView(this);
+        backTip.setText("返回键退出");
+        backTip.setTextColor(0xFF64748B); backTip.setTextSize(12);
+        backTip.setPadding(0, 30, 0, 0);
+        LinearLayout ew = new LinearLayout(this);
+        ew.setOrientation(LinearLayout.VERTICAL);
+        ew.setGravity(Gravity.CENTER_HORIZONTAL);
+        ew.addView(errTitle); ew.addView(errMsg);
+        ew.addView(retry, new LinearLayout.LayoutParams(-2, -2)); ((LinearLayout.LayoutParams) retry.getLayoutParams()).topMargin = 46;
+        ew.addView(backTip);
+        errorLayer.addView(ew, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        root.addView(errorLayer, new FrameLayout.LayoutParams(-1, -1));
+
         /* ---- 底部提示条（放下方，不遮挡站点页面内容） ---- */
         tip = new TextView(this);
         tip.setText("  GitHub 授权中 · 已登录 GitHub 将自动完成，成功后本窗口自动关闭  ");
@@ -143,6 +196,60 @@ public class AuthActivity extends Activity {
 
     private void showTip(String text) {
         h.post(() -> { if (tip != null) tip.setText("  " + text + "  "); });
+    }
+
+    /** WebView 主帧加载失败：展示明确错误 + 重试按钮（v0.1.5） */
+    private void showLoadError(String detail) {
+        if (done) return;
+        h.post(() -> {
+            if (boot != null) boot.setVisibility(View.GONE);
+            if (wv != null) wv.setVisibility(View.GONE);
+            if (errMsg != null) errMsg.setText(detail + "\n\n常见原因：本地代理（127.0.0.1:10808）未开启，\n或代理未放行本应用。请开启后点重试。");
+            if (errorLayer != null) errorLayer.setVisibility(View.VISIBLE);
+            showTip("GitHub 页面加载失败 · 请检查代理后重试");
+        });
+    }
+
+    /** WebView 挂本地 SOCKS 代理（系统 WebView 不吃 OkHttp 代理；github.com 直连会被墙断连 ERR_CONNECTION_ABORTED） */
+    private void applyProxy() {
+        if (proxyApplied) return;
+        proxyApplied = true;
+        try {
+            JSONObject proxy = new Store(this).config().optJSONObject("proxy");
+            final boolean enabled = proxy != null && proxy.optBoolean("enabled");
+            final String host = proxy != null ? proxy.optString("host", "127.0.0.1") : "127.0.0.1";
+            final int port = proxy != null ? proxy.optInt("port", 10808) : 10808;
+            new Thread(() -> {
+                boolean reachable = false;
+                if (enabled) {
+                    try { // 探测本地代理端口，避免挂上死代理全断
+                        java.net.Socket s = new java.net.Socket();
+                        s.connect(new java.net.InetSocketAddress(host, port), 1500);
+                        reachable = true; s.close();
+                    } catch (Exception ignored) {}
+                }
+                final boolean use = reachable;
+                h.post(() -> {
+                    try {
+                        if (use && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                            ProxyConfig pc = new ProxyConfig.Builder().addProxyRule("socks5://" + host + ":" + port).build();
+                            ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {});
+                            showTip("  已挂载本地代理 " + host + ":" + port + " · GitHub 授权中  ");
+                        } else if (!use) {
+                            showTip("  未检测到本地代理 · 若加载失败请开启 VPN 后重试  ");
+                        }
+                    } catch (Exception ignored) {}
+                });
+            }).start();
+        } catch (Exception ignored) {}
+    }
+
+    /** 加载 GitHub authorize 页（先挂代理再加载） */
+    private void loadAuthUrl(String clientId, String state) {
+        applyProxy();
+        String authUrl = "https://github.com/login/oauth/authorize?client_id=" + urlEncode(clientId)
+                + "&state=" + urlEncode(state) + "&scope=user:email";
+        wv.loadUrl(authUrl);
     }
 
     /** 第一步：拿 clientId + flow_token；第二步：打开官方 authorize URL */
@@ -186,7 +293,7 @@ public class AuthActivity extends Activity {
                 h.post(() -> {
                     if (done || isFinishing()) return;
                     if (st2 == null) {
-                        bootText.setText("准备失败: " + er + "\n返回可重试");
+                        showLoadError("state 获取失败: " + er + "（多为代理未通或站点不可达）");
                         return;
                     }
                     boot.setVisibility(View.GONE);
@@ -194,13 +301,11 @@ public class AuthActivity extends Activity {
                     AlphaAnimation a = new AlphaAnimation(0f, 1f);
                     a.setDuration(220);
                     wv.startAnimation(a);
-                    String authUrl = "https://github.com/login/oauth/authorize?client_id=" + urlEncode(cid)
-                            + "&state=" + urlEncode(st2) + "&scope=user:email";
-                    wv.loadUrl(authUrl);
+                    loadAuthUrl(cid, st2);
                 });
             } catch (Exception e) {
                 final String er = "state 请求异常: " + e.getMessage();
-                h.post(() -> { if (!isFinishing()) bootText.setText("准备失败: " + er + "\n返回可重试"); });
+                h.post(() -> { if (!isFinishing()) showLoadError(er); });
             }
         }).start();
     }
@@ -262,6 +367,14 @@ public class AuthActivity extends Activity {
             rec.put("token", token);
             rec.put("updatedAt", System.currentTimeMillis());
             store.upsertAccount(siteKey, rec);
+            /* GitHub 用户名全局持久化（v0.1.5）：添加其他站点账号时自动预填，免重复手输 */
+            if (login != null && !login.isEmpty()) {
+                try {
+                    JSONObject cfg = store.config();
+                    cfg.put("lastGithubUser", login);
+                    store.saveConfig(cfg);
+                } catch (Exception ignored) {}
+            }
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
 
             Intent out = new Intent();

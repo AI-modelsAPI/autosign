@@ -215,6 +215,8 @@ public class MainActivity extends Activity {
         TextView gh = new TextView(this);
         gh.setText(acc.optString("githubAccount", "").isEmpty() ? "未授权" : "@" + acc.optString("githubAccount"));
         gh.setTextColor(token.isEmpty() ? ORANGE : SUB); gh.setTextSize(12);
+        /* 未授权 → 文案本身作为授权入口，点击直接发起（v0.1.5） */
+        if (token.isEmpty()) { gh.setClickable(true); gh.setFocusable(true); gh.setOnClickListener(v -> startAuth(site, acc)); }
         View st = new View(this);
         st.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
         l1.addView(alias); l1.addView(sp(this, 14)); l1.addView(chip); l1.addView(sp(this, 14));
@@ -371,6 +373,9 @@ public class MainActivity extends Activity {
     private void promptAddAccount(JSONObject site) {
         LinearLayout box = form(this);
         final EditText alias = field(this, "账号别名（用于区分，如：主号 / 小号）");
+        /* GitHub 用户名全局记忆（v0.1.5）：上次授权过的账号名自动预填，免重复手输 */
+        String lastUser = new Store(this).config().optString("lastGithubUser", "");
+        if (!lastUser.isEmpty()) alias.setText(lastUser);
         box.addView(alias);
         new AlertDialog.Builder(this)
                 .setTitle("添加账号 · " + site.optString("name", site.optString("key")))
