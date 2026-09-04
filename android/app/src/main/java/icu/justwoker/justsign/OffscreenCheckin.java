@@ -95,12 +95,24 @@ public final class OffscreenCheckin {
         /** 进程级 WebView 代理（与 AuthActivity/CheckinActivity 同款；幂等） */
         private void applyProxy(Store store) {
             JSONObject p = store.config().optJSONObject("proxy");
-            if (p != null && p.optBoolean("enabled") && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-                ProxyConfig pc = new ProxyConfig.Builder()
-                        .addProxyRule("socks5://" + p.optString("host", "127.0.0.1") + ":" + p.optInt("port", 10808))
-                        .build();
-                ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {});
-            }
+            if (p == null || !p.optBoolean("enabled") || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) return;
+            final String host = p.optString("host", "127.0.0.1");
+            final int port = p.optInt("port", 10808);
+            new Thread(() -> {
+                boolean alive = false;
+                try { /* 探测代理端口，防挂死代理全断（同 CheckinActivity） */
+                    java.net.Socket sk = new java.net.Socket();
+                    sk.connect(new java.net.InetSocketAddress(host, port), 1500);
+                    alive = true; sk.close();
+                } catch (Exception ignored) {}
+                if (!alive) return;
+                main.post(() -> {
+                    try {
+                        ProxyConfig pc = new ProxyConfig.Builder().addProxyRule("socks5://" + host + ":" + port).build();
+                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {});
+                    } catch (Exception ignored) {}
+                });
+            }).start();
         }
 
         private String token() {
