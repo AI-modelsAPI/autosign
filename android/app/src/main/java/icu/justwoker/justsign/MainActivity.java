@@ -520,6 +520,10 @@ public class MainActivity extends Activity {
         return lp;
     }
 
+    private void toast(String s) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+
     private static View sp(Context c, int px) {
         View v = new View(c);
         v.setLayoutParams(new LinearLayout.LayoutParams(px, 1));
