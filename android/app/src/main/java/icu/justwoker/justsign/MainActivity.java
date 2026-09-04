@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,15 +25,17 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+
 /**
- * MainActivity — 纯原生 M3 UI（v0.1.2，站点→账号两级）：
+ * MainActivity — 纯原生 M3 UI（v0.1.3，站点→账号两级）：
  *   顶部：标题 + ＋添加站点 / ⚙设置
- *   站点卡片（每站点一张）：
- *     站点名 · 签到方式 | 右侧 ⟳刷新 ＋账号 ⋯(编辑/删除站点)
- *     └ 账号行 ×N：别名 [状态chip] @GitHub
+ *   站点卡片（每站点一张，内置清单下拉添加，站名可点击跳转站点主页）：
+ *     站点名 · 签到方式 | [今日已签✓] | 右侧 ⟳刷新 ＋账号 ⋯(编辑/删除站点)
+ *     └ 账号行 ×N：别名 [状态chip] [今日已签] @GitHub
  *                  $可用(绿) 已用(橙) 今日(紫)
- *                  [立即签到] [授权/重新授权] [日志] [删除]
- *   所有状态缓存在账号记录 lastStatus（秒开）。
+ *                  [立即签到(已签置灰)] [授权/重新授权] [日志] [删除]
+ *   所有状态缓存在账号记录 lastStatus / lastCheckin（秒开）。
  */
 public class MainActivity extends Activity {
     private static final int BG = 0xFFF1F5F9, CARD = 0xFFFFFFFF, ACCENT = 0xFF2563EB;
@@ -59,7 +62,7 @@ public class MainActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(40, 44, 40, 24);
         TextView title = new TextView(this);
-        title.setText("JustSign");
+        title.setText("AutoSgin");
         title.setTextColor(TXT); title.setTextSize(22); title.setTypeface(Typeface.DEFAULT_BOLD);
         TextView spacer = new TextView(this);
         spacer.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
@@ -92,7 +95,7 @@ public class MainActivity extends Activity {
         JSONArray sites = new Store(this).sites();
         if (sites == null || sites.length() == 0) {
             TextView empty = new TextView(this);
-            empty.setText("还没有站点\n\n点右上角「＋ 添加站点」\n填入任意 new-api 中转站地址即可");
+            empty.setText("还没有站点\n\n点右上角「＋ 添加站点」\n从内置公益站清单（15 站）下拉选择添加");
             empty.setTextColor(SUB); empty.setTextSize(15);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(0, 120, 0, 0);
@@ -128,11 +131,34 @@ public class MainActivity extends Activity {
         TextView name = new TextView(this);
         name.setText(site.optString("name", siteKey));
         name.setTextColor(TXT); name.setTextSize(17); name.setTypeface(Typeface.DEFAULT_BOLD);
+        /* 站名可点击 → 跳转站点主页（v0.1.3） */
+        name.setClickable(true);
+        name.setOnClickListener(v -> {
+            String home = site.optString("homeUrl", site.optString("baseUrl", ""));
+            if (!home.isEmpty()) {
+                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(home))); }
+                catch (Exception e) { toast("无法打开链接: " + e.getMessage()); }
+            }
+        });
         TextView url = new TextView(this);
         url.setText(site.optString("baseUrl", "") + " · " +
                 ("manual".equals(site.optString("checkinType")) ? "手动签到" : "登录即签到"));
         url.setTextColor(SUB); url.setTextSize(12);
         headL.addView(name); headL.addView(url);
+        /* 站点级「今日已签」徽章：该站有账号且全部已签才显示（v0.1.3） */
+        boolean siteAllChecked = false;
+        JSONArray accs0 = site.optJSONArray("accounts");
+        if (accs0 != null && accs0.length() > 0) {
+            siteAllChecked = true;
+            for (int i = 0; i < accs0.length(); i++) {
+                JSONObject a = accs0.optJSONObject(i);
+                if (a == null || !Engine.isCheckedToday(a)) { siteAllChecked = false; break; }
+            }
+        }
+        if (siteAllChecked) {
+            headL.addView(chip(this, "今日已签 ✓", GREEN), new LinearLayout.LayoutParams(-2, -2, 0));
+            ((LinearLayout.LayoutParams) ((LinearLayout) headL.getChildAt(0)).getLayoutParams()).topMargin = 6;
+        }
         View stretch = new View(this);
         stretch.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
         TextView addAcc = ghost(this, "＋账号", ACCENT);
@@ -177,7 +203,7 @@ public class MainActivity extends Activity {
             row.addView(line, new LinearLayout.LayoutParams(-1, 2));
         }
 
-        /* 行1：别名 + 状态chip + GitHub */
+        /* 行1：别名 + 状态chip + 今日已签徽章 + GitHub */
         LinearLayout l1 = new LinearLayout(this);
         l1.setOrientation(LinearLayout.HORIZONTAL);
         l1.setGravity(Gravity.CENTER_VERTICAL);
@@ -191,6 +217,9 @@ public class MainActivity extends Activity {
         View st = new View(this);
         st.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
         l1.addView(alias); l1.addView(sp(this, 14)); l1.addView(chip); l1.addView(sp(this, 14));
+        /* 「今日已签」徽章（v0.1.3）：lastCheckin.date == 今天 */
+        if (Engine.isCheckedToday(acc)) l1.addView(chip(this, "今日已签 ✓", GREEN));
+        l1.addView(sp(this, 14));
         l1.addView(gh); l1.addView(st);
         row.addView(l1);
 
@@ -221,11 +250,13 @@ public class MainActivity extends Activity {
         }
         row.addView(l2, lpTop(28));
 
-        /* 行3：操作按钮 */
+        /* 行3：操作按钮（已签今日 → 立即签到置灰不可点，v0.1.3） */
         LinearLayout l3 = new LinearLayout(this);
         l3.setOrientation(LinearLayout.HORIZONTAL);
-        TextView sign = ghost(this, "立即签到", ACCENT);
-        sign.setOnClickListener(v -> doCheckin(key));
+        boolean checked = Engine.isCheckedToday(acc) && !token.isEmpty();
+        TextView sign = ghost(this, checked ? "今日已签" : "立即签到", checked ? SUB : ACCENT);
+        if (checked) { sign.setClickable(false); sign.setFocusable(false); }
+        else sign.setOnClickListener(v -> doCheckin(key));
         TextView auth = ghost(this, token.isEmpty() ? "GitHub 授权" : "重新授权", token.isEmpty() ? GREEN : SUB);
         auth.setOnClickListener(v -> startAuth(site, acc));
         TextView logs = ghost(this, "日志", SUB);
@@ -242,32 +273,43 @@ public class MainActivity extends Activity {
 
     /* ================= 操作 ================= */
 
+    /** 添加站点：内置公益站清单下拉选择（v0.1.3，取消自定义输入） */
     private void promptAddSite() {
-        LinearLayout box = form(this);
-        final EditText name = field(this, "站点名称，如：小学生公益站");
-        final EditText url = field(this, "API 地址，如：https://api.xxx.com");
-        url.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-        box.addView(name); box.addView(url);
+        ArrayList<JSONObject> options = Catalog.all();
+        JSONArray existing = new Store(this).sites();
+        java.util.HashSet<String> added = new java.util.HashSet<>();
+        if (existing != null) for (int i = 0; i < existing.length(); i++) {
+            JSONObject s = existing.optJSONObject(i);
+            if (s != null) added.add(s.optString("key"));
+        }
+        ArrayList<String> labels = new ArrayList<>();
+        for (JSONObject c : options) {
+            boolean dup = added.contains(c.optString("key"));
+            labels.add(c.optString("name")
+                    + ("manual".equals(c.optString("checkinType")) ? " · 每日签到" : " · 登录即签")
+                    + (dup ? "（已添加）" : ""));
+        }
         new AlertDialog.Builder(this)
-                .setTitle("添加站点")
-                .setView(scrollViewOf(box))
-                .setPositiveButton("保存", (d, w) -> {
-                    String n = name.getText().toString().trim();
-                    String u = url.getText().toString().trim().replaceAll("/+$", "");
-                    if (u.isEmpty() || !u.startsWith("http")) { toast("API 地址无效"); return; }
-                    JSONObject site = new JSONObject();
-                    try {
-                        site.put("key", Store.siteKeyOf(u));
-                        site.put("name", n.isEmpty() ? Store.siteKeyOf(u) : n);
-                        site.put("baseUrl", u);
-                        site.put("checkinType", "login");
-                        site.put("accounts", new JSONArray());
-                        new Store(this).upsertSite(site);
-                        render();
-                        toast("站点已添加");
-                    } catch (Exception ignored) {}
-                })
+                .setTitle("添加站点 · 内置公益站清单")
+                .setItems(labels.toArray(new String[0]), (d, w) -> addCatalogSite(options.get(w)))
                 .setNegativeButton("取消", null).show();
+    }
+
+    private void addCatalogSite(JSONObject c) {
+        JSONObject site = new JSONObject();
+        try {
+            site.put("key", c.optString("key"))
+                    .put("name", c.optString("name"))
+                    .put("baseUrl", c.optString("homeUrl"))
+                    .put("homeUrl", c.optString("homeUrl"))
+                    .put("checkinType", c.optString("checkinType", "login"))
+                    .put("reward", c.optString("reward", ""))
+                    .put("note", c.optString("note", ""))
+                    .put("accounts", new JSONArray());
+            new Store(this).upsertSite(site);
+            render();
+            toast("站点已添加：" + c.optString("name"));
+        } catch (Exception ignored) {}
     }
 
     private void siteMenu(JSONObject site) {
@@ -417,9 +459,17 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 JSONObject r = engine.checkin(key);
+                double reward = r.optDouble("reward", 0);
                 h.post(() -> {
-                    if (r.optBoolean("skipped")) toast(r.optString("message", "登录即签到，无需操作"));
-                    else toast("签到完成");
+                    if (reward > 0) {
+                        toast("签到成功 🎉 本次奖励 +$" + fmt(reward));
+                    } else if (r.optBoolean("already")) {
+                        toast(r.optString("message", "今日已签到"));
+                    } else if (r.optBoolean("skipped")) {
+                        toast(r.optString("message", "已刷新保活"));
+                    } else {
+                        toast(r.optString("message", r.optBoolean("ok") ? "签到完成" : "签到失败"));
+                    }
                     render();
                 });
             } catch (Exception e) {

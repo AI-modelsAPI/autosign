@@ -133,12 +133,130 @@ public class Engine {
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
-        if (!"manual".equals(site.optString("checkinType")))
-            return new JSONObject().put("ok", true).put("skipped", true)
-                    .put("message", "该站点登录即签到，无需单独签到");
-        JSONObject r = call(site, tk.optString("token", null), "POST", "/api/user/checkin");
-        store.appendLog(site.optString("key"), key, "checkin", "http=" + r.optInt("http"));
-        return new JSONObject().put("ok", true).put("http", r.optInt("http")).put("data", r.opt("data"));
+        String token = tk.optString("token", null);
+        String type = site.optString("checkinType", "login");
+        JSONObject out = new JSONObject();
+
+        if ("manual".equals(type)) {
+            /* 手动签到型：真实 POST /api/user/checkin 领取奖励 */
+            JSONObject r = call(site, token, "POST", "/api/user/checkin");
+            int http = r.optInt("http");
+            JSONObject body = r.optJSONObject("data");
+            int code = body == null ? -1 : body.optInt("code", -1);
+            String message = body == null ? "" : body.optString("message", "");
+            boolean already = message.contains("已签") || message.contains("重复")
+                    || message.contains("已领") || message.toLowerCase().contains("already");
+            double reward = 0;
+            boolean success = http == 200 && !already && (code == 200 || body == null || body.optBoolean("success", code == -1 && body.has("data")));
+            if (success) reward = parseReward(body, dd(r));
+            store.appendLog(site.optString("key"), key, "checkin",
+                    "http=" + http + " code=" + code + (success ? " reward=" + reward : "") + (already ? " already" : ""));
+            out.put("ok", true).put("http", http).put("already", already && !success);
+            if (success) {
+                out.put("reward", reward);
+                markChecked(tk, reward);
+            } else if (already) {
+                /* 已签过：补查今日奖励记录并同样置为已签 */
+                JSONObject tb = null;
+                try { tb = todayBonus(key); } catch (Exception ignored) {}
+                if (tb != null) out.put("reward", tb.optDouble("quota", 0));
+                out.put("message", "今日已签到");
+                markChecked(tk, out.optDouble("reward", 0));
+            } else {
+                out.put("message", message.isEmpty() ? "签到失败（http " + http + "）" : message);
+            }
+            return out;
+        }
+
+        /* 登录即签到型：无独立签到接口 —— 查当日「签到」记录，取奖励展示 */
+        JSONObject tb = null;
+        try { tb = todayBonus(key); } catch (Exception ignored) {}
+        out.put("ok", true).put("skipped", false).put("already", true);
+        if (tb != null) {
+            out.put("reward", tb.optDouble("quota", 0))
+               .put("message", "登录即签到 · 今日奖励已到账");
+        } else {
+            try { call(site, token, "GET", "/api/user/self"); } catch (Exception ignored) {}
+            out.put("message", "登录即签到 · 每日额度自动发放（今日暂无签到记录）");
+        }
+        markChecked(tk, out.optDouble("reward", 0));
+        return out;
+    }
+
+    /** 从签到响应解析奖励（美元）：兼容 {data:{quota}} 单层与 {data:{data:{quota}}} 双层包裹 */
+    private static double parseReward(JSONObject body, JSONObject d) {
+        double unit = QUOTA_PER_UNIT_DEFAULT;
+        JSONObject cands[] = {d, body == null ? null : body.optJSONObject("data")};
+        for (JSONObject o : cands) {
+            if (o == null || !o.has("quota")) continue;
+            double q = o.optDouble("quota", 0);
+            if (q <= 0) continue;
+            /* 原始 quota 单位（如 12500000 = $25）折算；小于 1000 视为已是美元/积分数 */
+            return q >= 1000 ? Math.round(q / unit * 100.0) / 100.0 : q;
+        }
+        return 0;
+    }
+
+    /** 账号写入当日签到状态（支撑「今日已签」徽章与按钮置灰，次日自动失效） */
+    private void markChecked(JSONObject tk, double reward) {
+        try {
+            String key = tk.optString("key");
+            JSONObject rec = store.findAccount(key);
+            JSONObject site = store.siteOfAccount(key);
+            if (rec == null || site == null) return;
+            rec.put("lastCheckin", new JSONObject()
+                    .put("date", todayStr())
+                    .put("reward", reward)
+                    .put("time", System.currentTimeMillis()));
+            store.upsertAccount(site.optString("key"), rec);
+        } catch (Exception ignored) {}
+    }
+
+    /** 今日「签到」奖励记录（logs 里最后一条含“签到”且时间为今天的记录） */
+    public JSONObject todayBonus(String key) throws Exception {
+        JSONObject lg = logs(key, "系统", 30);
+        if (!lg.optBoolean("ok")) return null;
+        JSONObject lb = lg.optJSONObject("lastBonus");
+        if (lb == null || lb == JSONObject.NULL || !lb.has("time")) return null;
+        long t = parseTimeMs(lb.optString("time"));
+        return (t > 0 && isToday(t)) ? lb : null;
+    }
+
+    /** 日志时间解析：兼容 unix 秒 / 毫秒 / ISO 字符串 */
+    private static long parseTimeMs(String s) {
+        if (s == null || s.isEmpty()) return 0L;
+        try {
+            long v = Long.parseLong(s.trim());
+            if (v > 100000000000L) return v;
+            if (v > 1000000000L) return v * 1000L;
+        } catch (Exception ignored) {}
+        try {
+            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
+            f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
+            return f.parse(s).getTime();
+        } catch (Exception ignored) {}
+        return 0L;
+    }
+
+    public static boolean isToday(long ms) {
+        java.util.Calendar a = java.util.Calendar.getInstance();
+        a.setTimeInMillis(ms);
+        java.util.Calendar b = java.util.Calendar.getInstance();
+        return a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
+                && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR);
+    }
+
+    public static String todayStr() {
+        return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date());
+    }
+
+    /* ================= 当日签到状态（v0.1.3） ================= */
+
+    /** 账号今日是否已签到（lastCheckin.date == 今天，次日自动失效） */
+    public static boolean isCheckedToday(JSONObject acc) {
+        if (acc == null) return false;
+        JSONObject lc = acc.optJSONObject("lastCheckin");
+        return lc != null && todayStr().equals(lc.optString("date", ""));
     }
 
     public JSONObject logs(String key, String category, int limit) throws Exception {

@@ -4,7 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="公益签到"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.JustSign"
         android:allowBackup="true">
 
