@@ -46,6 +46,7 @@ public class MainActivity extends Activity {
     private Engine engine; // onCreate 中初始化（构造期 Context 尚未 attach，不可在此 new）
     private final Handler h = new Handler(Looper.getMainLooper());
     private static final int REQ_AUTH = 41;
+    private static final int REQ_CHECKIN = 42;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -426,6 +427,18 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_CHECKIN && res == RESULT_OK && data != null) {
+            /* 可见兜底页回传的签到结果 */
+            JSONObject r = new JSONObject();
+            try {
+                r.put("ok", data.getBooleanExtra("ok", false))
+                 .put("already", data.getBooleanExtra("already", false))
+                 .put("reward", data.getDoubleExtra("reward", 0))
+                 .put("message", data.getStringExtra("message") == null ? "" : data.getStringExtra("message"));
+            } catch (Exception ignored) {}
+            applyCheckinResult(r);
+            render();
+        }
         if (req == REQ_AUTH) {
             if (res == RESULT_OK) { toast("授权成功"); render(); }
             else {
@@ -472,28 +485,55 @@ public class MainActivity extends Activity {
     }
 
     private void doCheckin(String key) {
-        new Thread(() -> {
-            try {
-                JSONObject r = engine.checkin(key);
-                h.post(() -> {
-                    double reward = r.optDouble("reward", 0);
-                    if (r.optBoolean("already")) {
-                        String m = r.optString("message", "今日已签到");
-                        if (reward > 0) m += " · 今日奖励 $" + fmt(reward);
-                        toast(m);
-                    } else if (reward > 0) {
-                        toast("签到成功 🎉 本次奖励 +$" + fmt(reward));
-                    } else if (r.optBoolean("skipped")) {
-                        toast(r.optString("message", "已刷新保活"));
-                    } else {
-                        toast(r.optString("message", r.optBoolean("ok") ? "签到完成" : "签到失败"));
-                    }
-                    render();
-                });
-            } catch (Exception e) {
-                h.post(() -> toast("签到失败: " + e.getMessage()));
+        /* v0.1.6 纯后台优先：manual 型直接跑离屏 WebView（零 UI 零弹窗，人机验证无感自动完成），
+         * 后台失败才转 CheckinActivity 可见兜底（仍全自动）。login 型维持纯 API 逻辑。 */
+        String ct = "";
+        try { ct = new Store(this).siteOfAccount(key).optString("checkinType", ""); } catch (Exception ignored) {}
+        if (!"manual".equals(ct)) {
+            new Thread(() -> {
+                try {
+                    JSONObject r = engine.checkin(key);
+                    h.post(() -> { applyCheckinResult(r); render(); });
+                } catch (Exception e) {
+                    h.post(() -> toast("签到失败: " + e.getMessage()));
+                }
+            }).start();
+            return;
+        }
+        String sk0 = "";
+        try { sk0 = new Store(this).siteOfAccount(key).optString("key", ""); } catch (Exception ignored) {}
+        final String sk = sk0;
+        if (sk.isEmpty()) { toast("站点信息缺失，无法签到"); return; }
+        toast("正在后台签到…");
+        OffscreenCheckin.run(this, sk, key, 100, (ok, already, reward, msg) -> {
+            if (ok) {
+                JSONObject r = new JSONObject();
+                try { r.put("ok", true).put("already", already).put("reward", reward).put("message", msg == null ? "" : msg); } catch (Exception ignored) {}
+                applyCheckinResult(r);
+                render();
+            } else {
+                /* 后台失败（超时/异常）→ 可见兜底：真实 WebView，人机验证仍全自动 */
+                Intent it = new Intent(this, CheckinActivity.class);
+                it.putExtra("siteKey", sk);
+                it.putExtra("accountKey", key);
+                startActivityForResult(it, REQ_CHECKIN);
             }
-        }).start();
+        });
+    }
+
+    /** 统一处理签到结果文案（WebView 回传与纯 API 共用） */
+    private void applyCheckinResult(JSONObject r) {
+        double reward = r.optDouble("reward", 0);
+        if (r.optBoolean("already")) {
+            String m = r.optString("message", "今日已签到");
+            if (reward > 0) m += " · 今日奖励 $" + fmt(reward);
+            toast(m);
+        } else if (r.optBoolean("ok")) {
+            String m = reward > 0 ? "签到成功 🎉 本次奖励 +$" + fmt(reward) : r.optString("message", "签到成功");
+            toast(m);
+        } else {
+            toast(r.optString("message", "签到失败"));
+        }
     }
 
     private void showLogs(String key) {

@@ -21,6 +21,10 @@
         </activity>
 
         <activity
+            android:name=".CheckinActivity"
+            android:exported="false"
+            android:theme="@style/Theme.JustSign" />
+        <activity
             android:name=".AuthActivity"
             android:exported="false"
             android:theme="@style/Theme.JustSign.Auth" />

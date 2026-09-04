@@ -38,10 +38,11 @@ public class Engine {
     private static final String UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
 
     private final Store store;
+    private final android.content.Context ctx;
     private final OkHttpClient plain = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build();
 
-    public Engine(Context c) { store = new Store(c); }
+    public Engine(Context c) { store = new Store(c); ctx = c.getApplicationContext(); }
 
     /* ================= HTTP ================= */
 
@@ -109,6 +110,17 @@ public class Engine {
         JSONObject self = call(site, token, "GET", "/api/user/self");
         JSONObject stat = call(site, token, "GET", "/api/status");
         long unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT);
+        /* 缓存 Turnstile siteKey（v0.1.6）：CheckinActivity 签到时直接读账号记录，天然跟随站点配置 */
+        String tsk = dd(stat).optString("turnstile_site_key", "");
+        if (!tsk.isEmpty()) {
+            try {
+                JSONObject rec = store.findAccount(key);
+                if (rec != null && !tsk.equals(rec.optString("turnstileSiteKey", ""))) {
+                    rec.put("turnstileSiteKey", tsk);
+                    store.upsertAccount(site.optString("key"), rec);
+                }
+            } catch (Exception ignored) {}
+        }
         double quota = dd(self).optDouble("quota", 0);
         double used = dd(self).optDouble("used_quota", 0);
         String user = dd(self).optString("display_name", null);
@@ -125,63 +137,74 @@ public class Engine {
         if (dd(self).has("today_used_quota"))
             out.put("todayUsed", Math.round(dd(self).optDouble("today_used_quota") / unit * 10000.0) / 10000.0);
         store.appendLog(site.optString("key"), key, "status", "http=" + self.optInt("http"));
-        /* 跨设备已签鉴别：服务器日志里今天若有「签到」记录，无论哪台设备签的，本地同步为已签（v0.1.3.1） */
-        JSONObject probe = null;
-        try { probe = todayBonus(key); } catch (Exception ignored) {}
-        if (probe != null) {
+        /* 跨设备已签鉴别（v0.1.6）：官方签到状态接口 /api/user/checkin?month=YYYY-MM
+           （与站点前端同源同口径：stats.checked_in_today + records.checkin_date/quota_awarded），
+           接口不可用时回退当日日志探测 */
+        JSONObject cs = null;
+        try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
+        if (cs == null) {
+            JSONObject probe = null;
+            try { probe = todayBonus(key); } catch (Exception ignored) {}
+            if (probe != null) cs = new JSONObject().put("checked", true).put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
+        }
+        if (cs != null && cs.optBoolean("checked")) {
             out.put("todayChecked", true);
-            out.put("todayRewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
+            out.put("todayRewardUSD", cs.optDouble("rewardUSD", 0));
         } else {
             out.put("todayChecked", false);
         }
         return out;
     }
 
-    public JSONObject checkin(String key) throws Exception {
+    /** 官方签到状态接口（v0.1.6）：GET /api/user/checkin?month=YYYY-MM
+     *  返回 {checked, rewardUSD, checkedDate}；非 200 或结构不符返回 null */
+    public JSONObject checkinStatus(String key, long unit) throws Exception {
         JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
+        JSONObject r = call(site, tk.optString("token", null), "GET",
+                "/api/user/checkin?month=" + URLEncoder.encode(month, "UTF-8"));
+        if (r.optInt("http") != 200) return null;
+        JSONObject d = dd(r);
+        if (d == null || !d.has("stats")) return null;
+        JSONObject stats = d.optJSONObject("stats");
+        if (stats == null) return null;
+        String today = todayStr();
+        boolean checked = stats.optBoolean("checked_in_today", false);
+        double reward = 0;
+        JSONArray recs = stats.optJSONArray("records");
+        if (recs != null) for (int i = 0; i < recs.length(); i++) {
+            JSONObject o = recs.optJSONObject(i);
+            if (o != null && today.equals(o.optString("checkin_date", ""))) {
+                double raw = o.optDouble("quota_awarded", 0);
+                /* quota_awarded 为原始 quota 单位（官网价格渲染器同口径）：≥1000 折算美元 */
+                reward = raw >= 1000 ? Math.round(raw / (double) unit * 100.0) / 100.0 : raw;
+                break;
+            }
+        }
+        return new JSONObject().put("checked", checked)
+                .put("rewardUSD", reward)
+                .put("checkedDate", today);
+    }
+
+    public JSONObject checkin(String key) throws Exception {
+        JSONObject tk = store.findAccount(key);
+        JSONObject site = store.siteOfAccount(key);
+        if (tk == null || site == null) throw new Exception("账号或站点不存在");
         String token = tk.optString("token", null);
         String type = site.optString("checkinType", "login");
         JSONObject out = new JSONObject();
-
         if ("manual".equals(type)) {
-            /* 手动签到型：真实 POST /api/user/checkin 领取奖励 */
-            JSONObject r = call(site, token, "POST", "/api/user/checkin");
-            int http = r.optInt("http");
-            JSONObject body = r.optJSONObject("data");
-            int code = body == null ? -1 : body.optInt("code", -1);
-            String message = body == null ? "" : body.optString("message", "");
-            boolean already = message.contains("已签") || message.contains("重复")
-                    || message.contains("已领") || message.toLowerCase().contains("already");
-            double reward = 0;
-            boolean success = http == 200 && !already && (code == 200 || body == null || body.optBoolean("success", code == -1 && body.has("data")));
-            if (success) reward = parseReward(body, dd(r));
-            store.appendLog(site.optString("key"), key, "checkin",
-                    "http=" + http + " code=" + code + (success ? " reward=" + reward : "") + (already ? " already" : ""));
-            out.put("ok", true).put("http", http).put("already", already && !success);
-            if (success) {
-                out.put("reward", reward);
-                markChecked(tk, reward);
-            } else if (already) {
-                /* 已签过（含在其他设备签的）：从服务器日志取今日奖励，quota 需原始单位→美元换算 */
-                JSONObject tb = null;
-                try { tb = todayBonus(key); } catch (Exception ignored) {}
-                if (tb != null) {
-                    JSONObject stat = null;
-                    long unit = QUOTA_PER_UNIT_DEFAULT;
-                    try { stat = call(site, token, "GET", "/api/status"); unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT); } catch (Exception ignored) {}
-                    out.put("reward", quotaToUSD(tb.optLong("quota", 0), unit));
-                }
-                out.put("message", "今日已签到");
-                markChecked(tk, out.optDouble("reward", 0));
-            } else {
-                out.put("message", message.isEmpty() ? "签到失败（http " + http + "）" : message);
-            }
+            /* 手动签到型（v0.1.6）：服务器启用 Turnstile 人机验证，纯 API 无法通过。
+               交给 CheckinActivity（WebView 真实浏览器环境，验证无感自动完成），
+               签到结果由 onActivityResult 回传处理，这里只负责"不支持纯API"的信号。 */
+            out.put("ok", false)
+               .put("needWebview", true)
+               .put("message", "该站启用人机验证，需打开安全签到窗口");
             return out;
         }
-
         /* 登录即签到型：无独立签到接口 —— 查当日「签到」记录，取奖励展示 */
         JSONObject tb = null;
         try { tb = todayBonus(key); } catch (Exception ignored) {}
@@ -342,8 +365,13 @@ public class Engine {
                 String key = tk.optString("key");
                 try {
                     if ("manual".equals(site.optString("checkinType"))) {
-                        JSONObject r = call(site, tk.optString("token"), "POST", "/api/user/checkin");
-                        store.appendLog(site.optString("key"), key, "cron-checkin", "http=" + r.optInt("http"));
+                        /* v0.1.6: manual 型改走离屏 WebView 后台签到（Turnstile 站点纯 API POST 必 403） */
+                        final JSONObject fsite = site; final String fkey = key; final Store fst = store;
+                        OffscreenCheckin.run(ctx, fsite.optString("key"), fkey, 100, (ok, already, reward, msg) -> {
+                            String ev = ok ? (already ? "cron-checkin-already" : "cron-checkin-ok") : "cron-checkin-fail";
+                            String dt = ok ? (already ? (msg == null ? "今日已签" : msg) : ("奖励 $" + reward)) : (msg == null ? "" : msg);
+                            fst.appendLog(fsite.optString("key"), fkey, ev, dt);
+                        });
                     } else {
                         JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
                         store.appendLog(site.optString("key"), key, "cron-login-refresh", "http=" + r.optInt("http"));
