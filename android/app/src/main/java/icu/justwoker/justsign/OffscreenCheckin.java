@@ -2,7 +2,6 @@ package icu.justwoker.justsign;
 
 import android.content.Context;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.Looper;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
@@ -19,12 +18,25 @@ import org.json.JSONObject;
 
 /**
  * OffscreenCheckin - 纯后台无界面签到（用户核心目标：全后台、不弹窗）：
- *   在离屏 WebView（不 attach 任何窗口、零 UI、零通知）中执行与可见兑底完全相同的签到 JS，
+ *   在离屏 WebView（不 attach 任何窗口、零 UI、零通知）中执行与可见兜底完全相同的签到 JS，
  *   真实浏览器环境 + 官方 invisible Turnstile 无感通过（不伪造、不答题、指纹真实）。
- *   离屏 WebView 从不 onPause，页面 JS 与人机验证全速运行。
  * 使用方：
- *   - MainActivity 立即签到（后台跑完 toast 结果；失败自动转 CheckinActivity 可见兑底）
- *   - Engine.runAllOnce（WorkManager 12h 调度，纯后台，结果写运行日志）
+ *   - MainActivity 立即签到（后台跑完 toast 结果；失败自动转 CheckinActivity 可见兜底）
+ *   - Engine.runAllOnce（WorkManager 调度，纯后台，结果写运行日志）
+ *
+ * v0.1.8 修复（全量审计）：
+ *   1. WebView 生命周期全部锁死主线程（v0.1.7 已把创建搬回主线程，本版把 destroy/超时/回调统一到主线程）；
+ *      彻底移除 HandlerThread（WebView 在非 UI 线程 new 会抛 IllegalStateException 直接崩进程）。
+ *   2. 代理挂载改为「先探活、探活完成后再 loadUrl」：原实现探活在子线程、loadUrl 不等它，
+ *      导致代理还没挂上页面就已经开始加载 → GitHub/CF 资源直连被 RST。
+ *   3. onPageFinished 可能多次触发（重定向），fired 用 volatile + 单次判定；
+ *      并新增 onReceivedHttpError（主帧 5xx/403 也算失败，原来只处理 net error）。
+ *   4. token/siteKey 只读一次快照，避免签到过程中的库写入引起前后不一致。
+ *   5. siteKey 三级回退：站点 meta → 账号旧字段（兼容 v0.1.6 数据）→ JS 现场 /api/status；
+ *      JS 拿到后回传，Java 落库到站点 meta（站点级共享，新增账号无需重新刷新）。
+ *   6. 结果落库统一走 Store.patchAccount（锁内合并），不再整对象覆盖导致并发丢字段。
+ *   7. 徽章写入条件放宽：已签(already) 也写当日徽章（原来仅 reward>0 才写，导致"今日已签"不置灰）。
+ *   8. finish 幂等 + 超时看门狗 removeCallbacks，避免超时回调在成功后又触发一次。
  */
 public final class OffscreenCheckin {
 
@@ -32,8 +44,13 @@ public final class OffscreenCheckin {
 
     private OffscreenCheckin() {}
 
+    /** 线程安全入口：可从任意线程调用（内部自动切主线程） */
     public static void run(Context ctx0, String siteKey, String accountKey, int timeoutSec, Callback cb) {
-        new Runner(ctx0.getApplicationContext(), siteKey, accountKey, timeoutSec, cb).start();
+        if (ctx0 == null || cb == null) return;
+        final Context app = ctx0.getApplicationContext();
+        final int to = timeoutSec > 0 ? timeoutSec : 100;
+        new Handler(Looper.getMainLooper()).post(
+                () -> new Runner(app, siteKey, accountKey, to, cb).start());
     }
 
     private static final class Runner {
@@ -44,137 +61,192 @@ public final class OffscreenCheckin {
         private final int timeoutSec;
         private final Callback cb;
         private final Handler main = new Handler(Looper.getMainLooper());
-        private HandlerThread ht;
-        private Handler th;
+        private final Runnable timeoutTask;
+
         private WebView wv;
         private volatile boolean done = false;
-        private boolean fired = false;
+        private volatile boolean fired = false;
 
         Runner(Context ctx, String siteKey, String accountKey, int timeoutSec, Callback cb) {
             this.ctx = ctx; this.siteKey = siteKey; this.accountKey = accountKey;
             this.timeoutSec = timeoutSec; this.cb = cb;
+            this.timeoutTask = () -> finish(false, false, 0, "后台签到超时（人机验证未完成）");
         }
 
+        /** 必须在主线程调用 */
         void start() {
-            ht = new HandlerThread("offcheckin");
-            ht.start();
-            th = new Handler(ht.getLooper());
-            /* WebView 必须在主线程构造与操作；HandlerThread 仅用于超时看门狗 */
-            main.post(this::go);
-        }
-
-        private void go() {
+            if (Looper.myLooper() != Looper.getMainLooper()) { main.post(this::start); return; }
             try {
                 Store store = new Store(ctx);
                 JSONObject site = store.findSite(siteKey);
-                String base = site.optString("baseUrl").replaceAll("/+$", "");
+                if (site == null) { finish(false, false, 0, "站点不存在"); return; }
+                final String base = site.optString("baseUrl", "").replaceAll("/+$", "");
                 if (base.isEmpty()) { finish(false, false, 0, "站点 baseUrl 为空"); return; }
-                try { applyProxy(store); } catch (Exception ignored) {}
+                if (accountKey == null || accountKey.isEmpty()) { finish(false, false, 0, "账号缺失"); return; }
+
                 wv = new WebView(ctx); /* 离屏：不 attach 窗口，无 UI，JS 全速运行 */
                 WebSettings s = wv.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
                 s.setUserAgentString(UA);
+                /* 第三方 Cookie（Turnstile 需要 challenges.cloudflare.com 的 cookie） */
+                try { android.webkit.CookieManager.getInstance()
+                        .setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
                 wv.addJavascriptInterface(new Bridge(), "JustSign");
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return false; }
                     @Override public void onPageFinished(WebView v, String url) {
-                        if (!fired) { fired = true; v.evaluateJavascript(js(), null); }
+                        if (done || fired) return;
+                        /* 只在站点主页加载完成后注入（避免 about:blank / 跳转中间页触发） */
+                        if (url == null || url.startsWith("about:")) return;
+                        fired = true;
+                        try { v.evaluateJavascript(js(), null); }
+                        catch (Exception e) { finish(false, false, 0, "注入失败: " + e.getMessage()); }
                     }
                     @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                         if (r == null || !r.isForMainFrame()) return;
                         finish(false, false, 0, "net::" + (e != null ? String.valueOf(e.getDescription()) : "unknown"));
                     }
+                    @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
+                                                              android.webkit.WebResourceResponse rsp) {
+                        if (r == null || !r.isForMainFrame()) return;
+                        int code = rsp != null ? rsp.getStatusCode() : 0;
+                        if (code >= 400) finish(false, false, 0, "站点返回 HTTP " + code);
+                    }
                 });
-                th.postDelayed(() -> finish(false, false, 0, "后台签到超时（人机验证未完成）"), timeoutSec * 1000L);
-                wv.loadUrl(base + "/");
-            } catch (Exception e) {
-                finish(false, false, 0, "后台签到异常: " + e.getMessage());
+                main.postDelayed(timeoutTask, timeoutSec * 1000L);
+                /* 代理探活完成后才加载（v0.1.8 修复竞态：原来不等探活就 loadUrl） */
+                applyProxyThen(new Store(ctx), () -> {
+                    if (done) return;
+                    try { if (wv != null) wv.loadUrl(base + "/"); }
+                    catch (Exception e) { finish(false, false, 0, "加载失败: " + e.getMessage()); }
+                });
+            } catch (Throwable t) {
+                finish(false, false, 0, "后台签到异常: " + t.getMessage());
             }
         }
 
-        /** 进程级 WebView 代理（与 AuthActivity/CheckinActivity 同款；幂等） */
-        private void applyProxy(Store store) {
-            JSONObject p = store.config().optJSONObject("proxy");
-            if (p == null || !p.optBoolean("enabled") || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) return;
+        /**
+         * 进程级 WebView 代理（与 AuthActivity/CheckinActivity 同款）。
+         * 关键：探活在子线程，结果回主线程挂载，挂载完成（或跳过）后才执行 then。
+         */
+        private void applyProxyThen(Store store, Runnable then) {
+            JSONObject p;
+            try { p = store.config().optJSONObject("proxy"); } catch (Exception e) { p = null; }
+            final boolean enabled = p != null && p.optBoolean("enabled");
+            if (!enabled || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) { then.run(); return; }
             final String host = p.optString("host", "127.0.0.1");
             final int port = p.optInt("port", 10808);
             new Thread(() -> {
                 boolean alive = false;
-                try { /* 探测代理端口，防挂死代理全断（同 CheckinActivity） */
+                try { /* 探测代理端口，防挂死代理全断 */
                     java.net.Socket sk = new java.net.Socket();
                     sk.connect(new java.net.InetSocketAddress(host, port), 1500);
                     alive = true; sk.close();
                 } catch (Exception ignored) {}
-                if (!alive) return;
+                final boolean use = alive;
                 main.post(() -> {
+                    if (done) return;
+                    if (!use) { then.run(); return; }
                     try {
-                        ProxyConfig pc = new ProxyConfig.Builder().addProxyRule("socks5://" + host + ":" + port).build();
-                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {});
-                    } catch (Exception ignored) {}
+                        ProxyConfig pc = new ProxyConfig.Builder()
+                                .addProxyRule("socks5://" + host + ":" + port)
+                                /* 站点与 CF 挑战都走代理，本地回环直连 */
+                                .addDirect()
+                                .build();
+                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, then);
+                    } catch (Exception e) { then.run(); }
                 });
-            }).start();
+            }, "offcheckin-proxy").start();
         }
 
-        private String token() {
-            try { JSONObject r = new Store(ctx).findAccount(accountKey); return r == null ? "" : r.optString("token", ""); }
-            catch (Exception e) { return ""; }
+        /* ---------- 账号快照（只读一次，避免过程中被并发写入影响） ---------- */
+        private String snapToken, snapSiteKey;
+
+        private void loadSnapshot() {
+            if (snapToken != null) return;
+            String tk = "", sk = "";
+            try {
+                Store st = new Store(ctx);
+                JSONObject r = st.findAccount(accountKey);
+                if (r != null) {
+                    tk = r.optString("token", "");
+                    /* 兼容 v0.1.6 存在账号里的旧值 */
+                    sk = r.optString("turnstileSiteKey", "");
+                }
+                /* 站点级 meta 优先（v0.1.8 新增，账号间共享） */
+                String siteLevel = st.siteMeta(siteKey, "turnstileSiteKey", "");
+                if (siteLevel != null && !siteLevel.isEmpty()) sk = siteLevel;
+            } catch (Exception ignored) {}
+            snapToken = tk == null ? "" : tk;
+            snapSiteKey = sk == null ? "" : sk;
         }
-        private String sitekey() {
-            try { JSONObject r = new Store(ctx).findAccount(accountKey); return r == null ? "" : r.optString("turnstileSiteKey", ""); }
-            catch (Exception e) { return ""; }
+
+        private String js() {
+            loadSnapshot();
+            return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken);
         }
-        private String js() { String tk = token(); return CheckinJs.render(CheckinJs.extractSid(tk), sitekey(), tk); }
 
         private synchronized void finish(boolean ok, boolean already, double reward, String message) {
             if (done) return;
             done = true;
+            main.removeCallbacks(timeoutTask);
+
             final WebView w = wv; wv = null;
-            final HandlerThread theHt = ht;
-            /* destroy 必须与创建线程一致（WebView 已改在主线程创建），统一投回主线程 */
+            /* destroy 必须与创建线程一致（主线程） */
             main.post(() -> {
-                try { if (w != null) { w.loadUrl("about:blank"); w.destroy(); } } catch (Exception ignored) {}
+                try { if (w != null) { w.stopLoading(); w.loadUrl("about:blank"); w.removeJavascriptInterface("JustSign"); w.destroy(); } }
+                catch (Exception ignored) {}
             });
-            if (theHt != null) theHt.quitSafely();
-            /* 成功（非重复签）→ 写本地徽章（今日已签/置灰/站点徽章立即生效） */
-            if (ok && !already && reward > 0) {
+
+            /* 成功（含"今日已签"）→ 写本地当日徽章，置灰立即生效 */
+            if (ok) {
                 try {
-                    Store store = new Store(ctx);
-                    JSONObject rec = store.findAccount(accountKey);
-                    if (rec != null) {
-                        rec.put("lastCheckin", new JSONObject()
-                                .put("date", Engine.todayStr())
-                                .put("reward", reward)
-                                .put("time", System.currentTimeMillis()));
-                        store.upsertAccount(store.siteOfAccount(accountKey).optString("key"), rec);
-                    }
+                    JSONObject lc = new JSONObject()
+                            .put("date", Engine.todayStr())
+                            .put("reward", reward)
+                            .put("time", System.currentTimeMillis());
+                    new Store(ctx).patchAccount(accountKey, new JSONObject().put("lastCheckin", lc));
                 } catch (Exception ignored) {}
             }
-            final boolean fok = ok; final boolean fal = already; final double frw = reward; final String fmsg = message == null ? "" : message;
+
+            final boolean fok = ok, fal = already;
+            final double frw = reward;
+            final String fmsg = message == null ? "" : message;
             main.post(() -> { try { cb.onResult(fok, fal, frw, fmsg); } catch (Exception ignored) {} });
         }
 
-        /** JS 与 Java 的桥：结果回传 + 续期新 token 落库（解决 15 分钟短时 token） */
+        /** JS 与 Java 的桥：结果回传 + 续期新 token / 站点 siteKey 落库 */
         private class Bridge {
             @JavascriptInterface public void onProgress(String m) { /* 纯后台无 UI，忽略 */ }
+
             @JavascriptInterface public void onResult(String json) {
+                /* JS 桥回调在 WebView 内部线程，必须切主线程再动 WebView/Store */
                 main.post(() -> {
+                    if (done) return;
                     try {
                         JSONObject r = new JSONObject(json);
+                        Store store = new Store(ctx);
+
                         String newTk = r.optString("token", "");
-                        if (newTk != null && newTk.length() > 20) {
+                        if (newTk.length() > 20 && !newTk.equals(snapToken)) {
                             try {
-                                Store store = new Store(ctx);
-                                JSONObject rec = store.findAccount(accountKey);
-                                if (rec != null) {
-                                    rec.put("token", newTk).put("updatedAt", System.currentTimeMillis());
-                                    store.upsertAccount(store.siteOfAccount(accountKey).optString("key"), rec);
-                                }
+                                store.patchAccount(accountKey, new JSONObject()
+                                        .put("token", newTk)
+                                        .put("updatedAt", System.currentTimeMillis()));
                             } catch (Exception ignored) {}
                         }
+                        /* JS 现场从 /api/status 取到的 siteKey → 落库站点 meta（站点级共享） */
+                        String sk = r.optString("siteKey", "");
+                        if (!sk.isEmpty()) store.putSiteMeta(siteKey, "turnstileSiteKey", sk);
+                        long unit = r.optLong("unit", 0);
+                        if (unit > 0) store.putSiteMeta(siteKey, "quotaPerUnit", unit);
+
                         finish(r.optBoolean("ok", false), r.optBoolean("already", false),
                                 r.optDouble("reward", 0), r.optString("message", ""));
-                    } catch (Exception e) { finish(false, false, 0, "后台签到结果解析失败"); }
+                    } catch (Exception e) {
+                        finish(false, false, 0, "后台签到结果解析失败");
+                    }
                 });
             }
         }

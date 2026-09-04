@@ -8,9 +8,8 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Base64;
 import android.view.Gravity;
-import android.view.View;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -29,15 +28,22 @@ import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
 
 /**
- * CheckinActivity（v0.1.6）— WebView 真实浏览器环境签到：
+ * CheckinActivity（v0.1.8）— WebView 真实浏览器环境签到（后台失败时的可见兜底）：
  *   站点启用了 Cloudflare Turnstile 人机验证（turnstile_check=true），
  *   按用户要求：不伪造验证、不答题，用真实 WebView 无感自动完成（指纹真实）。
  * 流程：
- *   1. 挂 WebView SOCKS5 代理（与 AuthActivity 同款，探测端口可达后再挂，防死代理全断）
+ *   1. 挂 WebView SOCKS5 代理（探测端口可达后再挂，挂完才加载 —— v0.1.8 修复竞态）
  *   2. 加载站点主页建立会话（同源 + 真实 Cookie）
- *   3. 注入 JS：先尝试 POST /api/user/checkin（顺带用 Cookie+sid 续期拿新 token 存回）；
- *      若 message 含 "Turnstile" → 动态挂官方 invisible 挂件自动出 token → 带 token 重试
- *   4. 结果（reward/already/message/newToken）回传 MainActivity，进度实时提示
+ *   3. 注入 CheckinJs：续期 → 签到 →（需验证时）官方 invisible Turnstile → 带 token 重试
+ *   4. 结果（reward/already/message/newToken/siteKey）回传 MainActivity
+ *
+ * v0.1.8 修复：
+ *   - onPageFinished 过滤 about:blank 并单次触发；补 onReceivedHttpError（主帧 4xx/5xx 也算失败）
+ *   - siteKey 三级回退（站点 meta → 账号旧字段 → JS 现场 /api/status），并把结果落库站点 meta
+ *   - token/siteKey 落库改 patchAccount（锁内合并，不覆盖并发写入）
+ *   - 结果回传前先 removeCallbacks 看门狗，避免超时与成功双触发
+ *   - onDestroy 里 WebView 清理顺序修正（stopLoading → about:blank → remove 接口 → destroy）
+ *   - 删除未使用的 sessionSid()（重复实现，统一走 CheckinJs.extractSid）
  */
 public class CheckinActivity extends Activity {
     private Handler h;
@@ -45,6 +51,10 @@ public class CheckinActivity extends Activity {
     private TextView tip;
     private String baseUrl, accountKey, siteKey;
     private volatile boolean fired = false, finished = false;
+    private Runnable watchdog;
+
+    /* 账号快照：注入前读一次 */
+    private String snapToken = "", snapSiteKey = "";
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override protected void onCreate(Bundle b) {
@@ -52,9 +62,18 @@ public class CheckinActivity extends Activity {
         h = new Handler(Looper.getMainLooper());
         siteKey = getIntent().getStringExtra("siteKey");
         accountKey = getIntent().getStringExtra("accountKey");
-        JSONObject site = new Store(this).findSite(siteKey);
-        baseUrl = (site != null ? site.optString("baseUrl") : "").replaceAll("/+$", "");
+        if (siteKey == null || accountKey == null) { finishErr("参数缺失"); return; }
+
+        Store store = new Store(this);
+        JSONObject site = store.findSite(siteKey);
+        baseUrl = (site != null ? site.optString("baseUrl", "") : "").replaceAll("/+$", "");
         if (baseUrl.isEmpty()) { finishErr("站点不存在"); return; }
+
+        JSONObject acc = store.findAccount(accountKey);
+        snapToken = acc == null ? "" : acc.optString("token", "");
+        String accLevel = acc == null ? "" : acc.optString("turnstileSiteKey", "");
+        String siteLevel = store.siteMeta(siteKey, "turnstileSiteKey", "");
+        snapSiteKey = !siteLevel.isEmpty() ? siteLevel : accLevel;
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
@@ -63,21 +82,32 @@ public class CheckinActivity extends Activity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setUserAgentString("Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36");
+        try { CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
         wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                 return false; // 全部留在本 WebView
             }
             @Override public void onPageFinished(WebView v, String url) {
-                if (!fired) { fired = true; runCheckin(); }
+                if (finished || fired) return;
+                if (url == null || url.startsWith("about:")) return;
+                fired = true;
+                runCheckin();
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
                 if (req == null || !req.isForMainFrame()) return;
                 String d = err != null ? String.valueOf(err.getDescription()) : "unknown";
                 h.post(() -> finishErr("net::" + d));
             }
+            @Override public void onReceivedHttpError(WebView v, WebResourceRequest req,
+                                                      android.webkit.WebResourceResponse rsp) {
+                if (req == null || !req.isForMainFrame()) return;
+                int code = rsp != null ? rsp.getStatusCode() : 0;
+                if (code >= 400) h.post(() -> finishErr("站点返回 HTTP " + code));
+            }
         });
         root.addView(wv, new FrameLayout.LayoutParams(-1, -1)); // 底层：真实渲染，人机验证需要
+
         /* 顶层进度遮罩（白色不透明盖住 WebView，但 WebView 仍真实运行） */
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -100,93 +130,72 @@ public class CheckinActivity extends Activity {
         box.addView(tw, new LinearLayout.LayoutParams(-2, -2));
         root.addView(box, new FrameLayout.LayoutParams(-1, -1)); // 顶层遮罩
         setContentView(root);
-        /* 90 秒看门狗：人机验证卡死不至于永远挂着 */
-        h.postDelayed(() -> { if (!finished) finishErr("签到超时（人机验证未完成），请重试"); }, 90000);
-        applyProxy(() -> wv.loadUrl(baseUrl + "/"));
+
+        /* 100 秒看门狗：人机验证卡死不至于永远挂着 */
+        watchdog = () -> { if (!finished) finishErr("签到超时（人机验证未完成），请重试"); };
+        h.postDelayed(watchdog, 100000);
+        applyProxyThen(() -> { if (!finished && wv != null) wv.loadUrl(baseUrl + "/"); });
     }
 
-    /* ================= WebView 代理（同 AuthActivity） ================= */
-    private void applyProxy(Runnable then) {
-        try {
-            JSONObject proxy = new Store(this).config().optJSONObject("proxy");
-            final boolean enabled = proxy != null && proxy.optBoolean("enabled");
-            final String host = proxy != null ? proxy.optString("host", "127.0.0.1") : "127.0.0.1";
-            final int port = proxy != null ? proxy.optInt("port", 10808) : 10808;
-            new Thread(() -> {
-                boolean reachable = false;
-                if (enabled) {
-                    try { // 探测本地代理端口，避免挂上死代理全断
-                        java.net.Socket sk = new java.net.Socket();
-                        sk.connect(new java.net.InetSocketAddress(host, port), 1500);
-                        reachable = true; sk.close();
-                    } catch (Exception ignored) {}
-                }
-                final boolean use = reachable;
-                h.post(() -> {
-                    try {
-                        if (use && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-                            ProxyConfig pc = new ProxyConfig.Builder().addProxyRule("socks5://" + host + ":" + port).build();
-                            ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {});
-                        }
-                    } catch (Exception ignored) {}
-                    then.run();
-                });
-            }).start();
-        } catch (Exception e) { then.run(); }
+    /* ================= WebView 代理（挂载完成后才回调 then） ================= */
+    private void applyProxyThen(Runnable then) {
+        JSONObject proxy;
+        try { proxy = new Store(this).config().optJSONObject("proxy"); } catch (Exception e) { proxy = null; }
+        final boolean enabled = proxy != null && proxy.optBoolean("enabled");
+        if (!enabled || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) { then.run(); return; }
+        final String host = proxy.optString("host", "127.0.0.1");
+        final int port = proxy.optInt("port", 10808);
+        new Thread(() -> {
+            boolean reachable = false;
+            try { // 探测本地代理端口，避免挂上死代理全断
+                java.net.Socket sk = new java.net.Socket();
+                sk.connect(new java.net.InetSocketAddress(host, port), 1500);
+                reachable = true; sk.close();
+            } catch (Exception ignored) {}
+            final boolean use = reachable;
+            h.post(() -> {
+                if (finished) return;
+                if (!use) { then.run(); return; }
+                try {
+                    ProxyConfig pc = new ProxyConfig.Builder()
+                            .addProxyRule("socks5://" + host + ":" + port)
+                            .addDirect()
+                            .build();
+                    ProxyController.getInstance().setProxyOverride(pc, Runnable::run, then);
+                } catch (Exception e) { then.run(); }
+            });
+        }, "checkin-proxy").start();
     }
 
     /* ================= JS 注入签到 ================= */
     private void runCheckin() {
-        String tk = token();
-        String js = CheckinJs.render(CheckinJs.extractSid(tk), turnstileSiteKey() == null ? "" : turnstileSiteKey(), tk);
-        wv.evaluateJavascript(js, null);
-    }
-    /** 已存 access_token（seed token；过期由 JS 内 Cookie+sid 续期接管） */
-    private String token() {
-        try {
-            JSONObject rec = new Store(this).findAccount(accountKey);
-            return rec == null ? "" : rec.optString("token", "");
-        } catch (Exception e) { return ""; }
-    }
-
-    /** 从已存 JWT payload 解出会话 sid（X-Auth-Session 续期用） */
-    private String sessionSid() {
-        try {
-            JSONObject rec = new Store(this).findAccount(accountKey);
-            String tk = rec == null ? "" : rec.optString("token", "");
-            String[] p = tk.split("\\.");
-            if (p.length < 2) return "";
-            String pl = p[1];
-            int pad = (4 - pl.length() % 4) % 4;
-            for (int i = 0; i < pad; i++) pl += "=";
-            byte[] raw = Base64.decode(pl, Base64.URL_SAFE | Base64.NO_WRAP);
-            return new JSONObject(new String(raw, "UTF-8")).optString("sid", "");
-        } catch (Exception e) { return ""; }
-    }
-
-    /** /api/status 的 turnstile_site_key（添加站点时缓存或现场取） */
-    private String turnstileSiteKey() {
-        try {
-            JSONObject rec = new Store(this).findAccount(accountKey);
-            if (rec != null && rec.has("turnstileSiteKey")) return rec.optString("turnstileSiteKey", "");
-        } catch (Exception ignored) {}
-        return "";
+        if (wv == null || finished) return;
+        String js = CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken);
+        try { wv.evaluateJavascript(js, null); }
+        catch (Exception e) { finishErr("注入失败: " + e.getMessage()); }
     }
 
     private void finishErr(String msg) {
         if (finished) return;
         finished = true;
+        if (h != null && watchdog != null) h.removeCallbacks(watchdog);
         Intent out = new Intent();
         out.putExtra("ok", false);
-        out.putExtra("message", msg);
+        out.putExtra("message", msg == null ? "签到失败" : msg);
         setResult(RESULT_OK, out);
         finish();
     }
 
     @Override protected void onDestroy() {
+        finished = true;
+        if (h != null) h.removeCallbacksAndMessages(null);
         if (wv != null) {
-            wv.loadUrl("about:blank");
-            wv.destroy();
+            try {
+                wv.stopLoading();
+                wv.loadUrl("about:blank");
+                wv.removeJavascriptInterface("JustSign");
+                wv.destroy();
+            } catch (Exception ignored) {}
             wv = null;
         }
         super.onDestroy();
@@ -198,35 +207,57 @@ public class CheckinActivity extends Activity {
         public void onProgress(String msg) {
             h.post(() -> { if (tip != null && !finished) tip.setText(msg); });
         }
+
         @JavascriptInterface
         public void onResult(String json) {
             h.post(() -> {
                 if (finished) return;
                 finished = true;
+                if (watchdog != null) h.removeCallbacks(watchdog);
                 try {
                     JSONObject r = new JSONObject(json);
+                    Store store = new Store(CheckinActivity.this);
+
                     /* 续期到的新 token 存回账号（解决 15 分钟短时 token 过期问题） */
                     String newTk = r.optString("token", "");
-                    if (newTk != null && newTk.length() > 20) {
+                    if (newTk.length() > 20 && !newTk.equals(snapToken)) {
                         try {
-                            Store store = new Store(CheckinActivity.this);
-                            JSONObject rec = store.findAccount(accountKey);
-                            if (rec != null) {
-                                rec.put("token", newTk).put("updatedAt", System.currentTimeMillis());
-                                store.upsertAccount(siteKey, rec);
-                            }
+                            store.patchAccount(accountKey, new JSONObject()
+                                    .put("token", newTk)
+                                    .put("updatedAt", System.currentTimeMillis()));
                         } catch (Exception ignored) {}
                     }
+                    /* JS 现场取到的 turnstile siteKey / quota 单位 → 落库站点 meta（站点级共享） */
+                    String sk = r.optString("siteKey", "");
+                    if (!sk.isEmpty()) store.putSiteMeta(siteKey, "turnstileSiteKey", sk);
+                    long unit = r.optLong("unit", 0);
+                    if (unit > 0) store.putSiteMeta(siteKey, "quotaPerUnit", unit);
+
+                    boolean ok = r.optBoolean("ok", false);
+                    double reward = r.optDouble("reward", 0);
+                    /* 成功（含今日已签）→ 写当日徽章 */
+                    if (ok) {
+                        try {
+                            store.patchAccount(accountKey, new JSONObject().put("lastCheckin",
+                                    new JSONObject().put("date", Engine.todayStr())
+                                            .put("reward", reward)
+                                            .put("time", System.currentTimeMillis())));
+                        } catch (Exception ignored) {}
+                    }
+
                     Intent out = new Intent();
-                    out.putExtra("ok", r.optBoolean("ok", false));
+                    out.putExtra("ok", ok);
                     out.putExtra("already", r.optBoolean("already", false));
-                    out.putExtra("reward", r.optDouble("reward", 0));
+                    out.putExtra("reward", reward);
+                    out.putExtra("auth", r.optBoolean("auth", false));
                     out.putExtra("message", r.optString("message", ""));
                     setResult(RESULT_OK, out);
                     finish();
-                } catch (Exception e) { finishErr("结果解析失败"); }
+                } catch (Exception e) {
+                    finished = false;           // 允许 finishErr 正常走完
+                    finishErr("结果解析失败");
+                }
             });
         }
     }
-
 }

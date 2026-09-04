@@ -17,6 +17,7 @@ import org.json.JSONObject;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.URLEncoder;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.MediaType;
@@ -28,74 +29,108 @@ import okhttp3.Response;
 /**
  * Engine — 纯 HTTP 调度引擎（对齐 Node 版 client.js/server.js）：
  *   self      GET  /api/user/self
- *   status    GET  /api/status        （quota_per_unit / price）
+ *   status    GET  /api/status        （quota_per_unit / turnstile_site_key / price）
  *   logs      GET  /api/log/self      （找“签到”记录作为 lastBonus）
- *   checkin   POST /api/user/checkin  （仅 manual 型站点）
+ *   checkin   POST /api/user/checkin  （manual 型走 WebView，见 OffscreenCheckin）
  * 网络：SOCKS5 代理优先（127.0.0.1:10808，v2ray 用户），失败自动直连降级（普通用户）。
+ *
+ * v0.1.8 修复（全量审计）：
+ *   1. attempt() 吞掉了所有异常并返回 null → 上层只能报“均不可达”，看不到真实错误；
+ *      现在记录 lastError 并在抛错时带出（含状态码/异常类型），且 Response 显式 close 防泄漏。
+ *   2. call() 对 4xx/5xx 也返回，由业务判定；新增 http=429 的显式提示（站点限流，之前会被当成通用失败）。
+ *   3. status() 把 turnstile_site_key / quota_per_unit 写入「站点 meta」而不是账号 —— 修复新建账号
+ *      永远拿不到 siteKey、签到直接报「未配置 siteKey」的根因。
+ *   4. dd() 兼容单层包裹（部分接口返回 {data:{...}} 而非 {data:{data:{}}}），原实现单层时返回空对象。
+ *   5. 删除死代码 parseReward（v0.1.6 之后再无调用者）；未使用的私有 findSite 也移除。
+ *   6. runAllOnce 原来对每个 manual 账号异步 fire-and-forget，Worker 会在签到完成前返回 →
+ *      WorkManager 可能立刻回收进程导致后台签到全部失效。现在改为串行 + CountDownLatch 等待
+ *      （每个账号最多 110s），Worker 生命周期覆盖真实签到过程。
+ *   7. runAllOnce 跳过「今日已签」账号，避免每次调度重复跑 WebView 白耗电。
+ *   8. checkinStatus 的 records 从 stats 内改为兼容 data.records 与 stats.records 两种结构。
  */
 public class Engine {
     public static final long QUOTA_PER_UNIT_DEFAULT = 500000L;
     private static final String UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
 
     private final Store store;
-    private final android.content.Context ctx;
+    private final Context ctx;
     private final OkHttpClient plain = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build();
+
+    /** 最近一次网络失败原因（供错误提示带出真实原因） */
+    private volatile String lastError = "";
 
     public Engine(Context c) { store = new Store(c); ctx = c.getApplicationContext(); }
 
     /* ================= HTTP ================= */
 
-    /** 代理优先，IOException 时直连 fallback */
+    /** 代理优先，网络层失败时直连 fallback；HTTP 错误码不算失败（交业务判定） */
     private JSONObject call(JSONObject site, String token, String method, String path) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
-        String url = site.optString("baseUrl").replaceAll("/+$", "") + path;
+        String base = site.optString("baseUrl", "").replaceAll("/+$", "");
+        if (base.isEmpty()) throw new Exception("站点 baseUrl 为空");
+        String url = base + path;
 
+        lastError = "";
         JSONObject r = attempt(url, token, method, buildClient(useProxy, proxy));
         if (r == null && useProxy) r = attempt(url, token, method, plain);
-        if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）");
+        if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
+                + (lastError.isEmpty() ? "" : ": " + lastError));
         return r;
     }
 
     private OkHttpClient buildClient(boolean useProxy, JSONObject proxy) {
-        if (!useProxy) return plain;
-        return new OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-                .proxy(new Proxy(Proxy.Type.SOCKS,
-                        new InetSocketAddress(proxy.optString("host", "127.0.0.1"), proxy.optInt("port", 10808))))
-                .build();
+        if (!useProxy || proxy == null) return plain;
+        try {
+            return new OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+                    .proxy(new Proxy(Proxy.Type.SOCKS,
+                            new InetSocketAddress(proxy.optString("host", "127.0.0.1"), proxy.optInt("port", 10808))))
+                    .build();
+        } catch (Exception e) { return plain; }
     }
 
-    /** 返回 {http, data}；网络层异常返回 null（触发直连 fallback） */
+    /** 返回 {http, data}；网络层异常返回 null（触发直连 fallback），并记录 lastError */
     private JSONObject attempt(String url, String token, String method, OkHttpClient client) {
+        Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
                     .header("User-Agent", UA).header("Accept", "application/json");
             if (token != null && !token.isEmpty()) rb.header("Authorization", "Bearer " + token);
             if ("POST".equalsIgnoreCase(method))
                 rb.post(RequestBody.create("{}", MediaType.parse("application/json")));
-            Response resp = client.newCall(rb.build()).execute();
+            resp = client.newCall(rb.build()).execute();
             String txt = resp.body() != null ? resp.body().string() : "";
             JSONObject out = new JSONObject().put("http", resp.code());
             try { out.put("data", new JSONObject(txt)); }
             catch (Exception e) { out.put("data", new JSONObject()); }
             return out;
-        } catch (Exception e) { return null; }
-    }
-
-    /** resp.data.data（New API 响应包裹） */
-    private static JSONObject dd(JSONObject resp) {
-        try { return resp.getJSONObject("data").getJSONObject("data"); } catch (Exception e) { return new JSONObject(); }
-    }
-
-    private JSONObject findSite(String key) throws Exception {
-        JSONArray sites = store.config().optJSONArray("sites");
-        if (sites != null) for (int i = 0; i < sites.length(); i++) {
-            JSONObject s = sites.optJSONObject(i);
-            if (s != null && key.equals(s.optString("key"))) return s;
+        } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : (" " + e.getMessage()));
+            return null;
+        } finally {
+            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
         }
-        throw new Exception("站点不存在: " + key);
+    }
+
+    /** New API 响应包裹：优先 data.data，回退单层 data */
+    private static JSONObject dd(JSONObject resp) {
+        if (resp == null) return new JSONObject();
+        JSONObject d = resp.optJSONObject("data");
+        if (d == null) return new JSONObject();
+        JSONObject inner = d.optJSONObject("data");
+        return inner != null ? inner : d;
+    }
+
+    /** HTTP 码 → 可读原因（供 UI 提示） */
+    private static String httpHint(int code) {
+        if (code == 429) return "站点限流（429），请稍后再试";
+        if (code == 401) return "授权已过期（401），请重新授权";
+        if (code == 403) return "站点拒绝访问（403），可能触发人机验证";
+        if (code >= 500) return "站点服务异常（" + code + "）";
+        if (code == 0) return "网络不可达";
+        return "HTTP " + code;
     }
 
     /* ================= 业务 ================= */
@@ -105,82 +140,93 @@ public class Engine {
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        final String sKey = site.optString("key", "");
         String token = tk.optString("token", null);
 
         JSONObject self = call(site, token, "GET", "/api/user/self");
-        JSONObject stat = call(site, token, "GET", "/api/status");
+        int selfHttp = self.optInt("http");
+
+        JSONObject stat;
+        try { stat = call(site, token, "GET", "/api/status"); }
+        catch (Exception e) { stat = new JSONObject(); }
+
         long unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT);
-        /* 缓存 Turnstile siteKey（v0.1.6）：CheckinActivity 签到时直接读账号记录，天然跟随站点配置 */
-        String tsk = dd(stat).optString("turnstile_site_key", "");
-        if (!tsk.isEmpty()) {
-            try {
-                JSONObject rec = store.findAccount(key);
-                if (rec != null && !tsk.equals(rec.optString("turnstileSiteKey", ""))) {
-                    rec.put("turnstileSiteKey", tsk);
-                    store.upsertAccount(site.optString("key"), rec);
-                }
-            } catch (Exception ignored) {}
+        if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
+
+        /* v0.1.8：Turnstile siteKey / quota 单位缓存到「站点」而非账号
+         * （站点级属性，所有账号共享；否则新建账号必为空 → 签到报未配置 siteKey） */
+        if (!sKey.isEmpty()) {
+            String tsk = dd(stat).optString("turnstile_site_key", "");
+            if (!tsk.isEmpty()) store.putSiteMeta(sKey, "turnstileSiteKey", tsk);
+            store.putSiteMeta(sKey, "quotaPerUnit", unit);
         }
+
         double quota = dd(self).optDouble("quota", 0);
         double used = dd(self).optDouble("used_quota", 0);
         String user = dd(self).optString("display_name", null);
-        if (user == null) user = dd(self).optString("username", null);
+        if (user == null || user.isEmpty()) user = dd(self).optString("username", null);
 
         JSONObject out = new JSONObject()
-                .put("ok", true)
+                .put("ok", selfHttp == 200)
                 .put("account", key).put("site", site.optString("name"))
-                .put("http", self.optInt("http"))
-                .put("authorized", self.optInt("http") == 200)
+                .put("http", selfHttp)
+                .put("authorized", selfHttp == 200)
                 .put("availableUSD", Math.round(quota / unit * 100.0) / 100.0)
                 .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
-                .put("user", user == null ? JSONObject.NULL : user);
+                .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user);
+        if (selfHttp != 200) out.put("message", httpHint(selfHttp));
         if (dd(self).has("today_used_quota"))
             out.put("todayUsed", Math.round(dd(self).optDouble("today_used_quota") / unit * 10000.0) / 10000.0);
-        store.appendLog(site.optString("key"), key, "status", "http=" + self.optInt("http"));
-        /* 跨设备已签鉴别（v0.1.6）：官方签到状态接口 /api/user/checkin?month=YYYY-MM
-           （与站点前端同源同口径：stats.checked_in_today + records.checkin_date/quota_awarded），
-           接口不可用时回退当日日志探测 */
-        JSONObject cs = null;
-        try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
-        if (cs == null) {
-            JSONObject probe = null;
-            try { probe = todayBonus(key); } catch (Exception ignored) {}
-            if (probe != null) cs = new JSONObject().put("checked", true).put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
-        }
-        if (cs != null && cs.optBoolean("checked")) {
-            out.put("todayChecked", true);
-            out.put("todayRewardUSD", cs.optDouble("rewardUSD", 0));
-        } else {
-            out.put("todayChecked", false);
-        }
+        store.appendLog(sKey, key, "status", "http=" + selfHttp);
+
+        /* 跨设备已签鉴别：官方签到状态接口 /api/user/checkin?month=YYYY-MM，
+           不可用时回退当日日志探测。未授权时不必再查。 */
+        if (selfHttp == 200) {
+            JSONObject cs = null;
+            try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
+            if (cs == null) {
+                JSONObject probe = null;
+                try { probe = todayBonus(key); } catch (Exception ignored) {}
+                if (probe != null) cs = new JSONObject().put("checked", true)
+                        .put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
+            }
+            if (cs != null && cs.optBoolean("checked")) {
+                out.put("todayChecked", true);
+                out.put("todayRewardUSD", cs.optDouble("rewardUSD", 0));
+            } else out.put("todayChecked", false);
+        } else out.put("todayChecked", false);
         return out;
     }
 
-    /** 官方签到状态接口（v0.1.6）：GET /api/user/checkin?month=YYYY-MM
+    /** 官方签到状态接口：GET /api/user/checkin?month=YYYY-MM
      *  返回 {checked, rewardUSD, checkedDate}；非 200 或结构不符返回 null */
     public JSONObject checkinStatus(String key, long unit) throws Exception {
         JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
         JSONObject r = call(site, tk.optString("token", null), "GET",
                 "/api/user/checkin?month=" + URLEncoder.encode(month, "UTF-8"));
         if (r.optInt("http") != 200) return null;
         JSONObject d = dd(r);
-        if (d == null || !d.has("stats")) return null;
         JSONObject stats = d.optJSONObject("stats");
         if (stats == null) return null;
         String today = todayStr();
         boolean checked = stats.optBoolean("checked_in_today", false);
         double reward = 0;
+        /* records 可能挂 stats 下，也可能挂 data 下（不同版本） */
         JSONArray recs = stats.optJSONArray("records");
+        if (recs == null) recs = d.optJSONArray("records");
         if (recs != null) for (int i = 0; i < recs.length(); i++) {
             JSONObject o = recs.optJSONObject(i);
-            if (o != null && today.equals(o.optString("checkin_date", ""))) {
-                double raw = o.optDouble("quota_awarded", 0);
-                /* quota_awarded 为原始 quota 单位（官网价格渲染器同口径）：≥1000 折算美元 */
+            if (o == null) continue;
+            String date = o.optString("checkin_date", o.optString("date", ""));
+            if (today.equals(date)) {
+                double raw = o.optDouble("quota_awarded", o.optDouble("quota", 0));
                 reward = raw >= 1000 ? Math.round(raw / (double) unit * 100.0) / 100.0 : raw;
+                if (!checked) checked = true;   // 有当日记录即视为已签
                 break;
             }
         }
@@ -189,71 +235,60 @@ public class Engine {
                 .put("checkedDate", today);
     }
 
+    /**
+     * 签到（非 manual 型）。manual 型必须走 WebView（Turnstile），
+     * 由 MainActivity / runAllOnce 调用 OffscreenCheckin，这里只回信号。
+     */
     public JSONObject checkin(String key) throws Exception {
         JSONObject tk = store.findAccount(key);
         JSONObject site = store.siteOfAccount(key);
         if (tk == null || site == null) throw new Exception("账号或站点不存在");
         String token = tk.optString("token", null);
+        if (token == null || token.isEmpty()) throw new Exception("账号未授权，请先完成 GitHub 授权");
         String type = site.optString("checkinType", "login");
         JSONObject out = new JSONObject();
         if ("manual".equals(type)) {
-            /* 手动签到型（v0.1.6）：服务器启用 Turnstile 人机验证，纯 API 无法通过。
-               交给 CheckinActivity（WebView 真实浏览器环境，验证无感自动完成），
-               签到结果由 onActivityResult 回传处理，这里只负责"不支持纯API"的信号。 */
             out.put("ok", false)
                .put("needWebview", true)
-               .put("message", "该站启用人机验证，需打开安全签到窗口");
+               .put("message", "该站启用人机验证，需在后台签到窗口完成");
             return out;
         }
         /* 登录即签到型：无独立签到接口 —— 查当日「签到」记录，取奖励展示 */
+        long unit = store.siteMetaLong(site.optString("key", ""), "quotaPerUnit", QUOTA_PER_UNIT_DEFAULT);
         JSONObject tb = null;
         try { tb = todayBonus(key); } catch (Exception ignored) {}
         out.put("ok", true).put("skipped", false).put("already", true);
         if (tb != null) {
-            long unit = QUOTA_PER_UNIT_DEFAULT;
-            try { JSONObject stat = call(site, token, "GET", "/api/status"); unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT); } catch (Exception ignored) {}
             out.put("reward", quotaToUSD(tb.optLong("quota", 0), unit))
                .put("message", "登录即签到 · 今日奖励已到账");
         } else {
-            try { call(site, token, "GET", "/api/user/self"); } catch (Exception ignored) {}
+            JSONObject self = null;
+            try { self = call(site, token, "GET", "/api/user/self"); } catch (Exception ignored) {}
+            int code = self == null ? 0 : self.optInt("http");
+            if (code != 200) {
+                out.put("ok", false).put("already", false).put("message", httpHint(code));
+                return out;
+            }
             out.put("message", "登录即签到 · 每日额度自动发放（今日暂无签到记录）");
         }
-        markChecked(tk, out.optDouble("reward", 0));
+        markChecked(key, out.optDouble("reward", 0));
         return out;
-    }
-
-    /** 从签到响应解析奖励（美元）：兼容 {data:{quota}} 单层与 {data:{data:{quota}}} 双层包裹 */
-    private static double parseReward(JSONObject body, JSONObject d) {
-        double unit = QUOTA_PER_UNIT_DEFAULT;
-        JSONObject cands[] = {d, body == null ? null : body.optJSONObject("data")};
-        for (JSONObject o : cands) {
-            if (o == null || !o.has("quota")) continue;
-            double q = o.optDouble("quota", 0);
-            if (q <= 0) continue;
-            /* 原始 quota 单位（如 12500000 = $25）折算；小于 1000 视为已是美元/积分数 */
-            return q >= 1000 ? Math.round(q / unit * 100.0) / 100.0 : q;
-        }
-        return 0;
     }
 
     /** 原始 quota → 美元（日志记录里的 quota 是原始单位，如 12500000 = $25） */
     private static double quotaToUSD(long q, long unit) {
         if (q <= 0) return 0;
+        if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         return q >= 1000 ? Math.round(q / (double) unit * 100.0) / 100.0 : q;
     }
 
     /** 账号写入当日签到状态（支撑「今日已签」徽章与按钮置灰，次日自动失效） */
-    private void markChecked(JSONObject tk, double reward) {
+    private void markChecked(String accountKey, double reward) {
         try {
-            String key = tk.optString("key");
-            JSONObject rec = store.findAccount(key);
-            JSONObject site = store.siteOfAccount(key);
-            if (rec == null || site == null) return;
-            rec.put("lastCheckin", new JSONObject()
-                    .put("date", todayStr())
-                    .put("reward", reward)
-                    .put("time", System.currentTimeMillis()));
-            store.upsertAccount(site.optString("key"), rec);
+            store.patchAccount(accountKey, new JSONObject().put("lastCheckin",
+                    new JSONObject().put("date", todayStr())
+                            .put("reward", reward)
+                            .put("time", System.currentTimeMillis())));
         } catch (Exception ignored) {}
     }
 
@@ -262,7 +297,7 @@ public class Engine {
         JSONObject lg = logs(key, "系统", 30);
         if (!lg.optBoolean("ok")) return null;
         JSONObject lb = lg.optJSONObject("lastBonus");
-        if (lb == null || lb == JSONObject.NULL || !lb.has("time")) return null;
+        if (lb == null || !lb.has("time")) return null;
         long t = parseTimeMs(lb.optString("time"));
         return (t > 0 && isToday(t)) ? lb : null;
     }
@@ -275,11 +310,15 @@ public class Engine {
             if (v > 100000000000L) return v;
             if (v > 1000000000L) return v * 1000L;
         } catch (Exception ignored) {}
-        try {
-            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
-            f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
-            return f.parse(s).getTime();
-        } catch (Exception ignored) {}
+        String[] pats = { "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss" };
+        for (String p : pats) {
+            try {
+                java.text.SimpleDateFormat f = new java.text.SimpleDateFormat(p, java.util.Locale.US);
+                f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
+                java.util.Date d = f.parse(s.length() > 19 ? s.substring(0, 19) : s);
+                if (d != null) return d.getTime();
+            } catch (Exception ignored) {}
+        }
         return 0L;
     }
 
@@ -295,7 +334,7 @@ public class Engine {
         return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date());
     }
 
-    /* ================= 当日签到状态（v0.1.3） ================= */
+    /* ================= 当日签到状态 ================= */
 
     /** 账号今日是否已签到（lastCheckin.date == 今天，次日自动失效） */
     public static boolean isCheckedToday(JSONObject acc) {
@@ -309,19 +348,23 @@ public class Engine {
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        if (limit <= 0 || limit > 200) limit = 20;
         String path = "/api/log/self?category=" + URLEncoder.encode(category, "UTF-8")
                 + "&limit=" + limit + "&page=1";
         JSONObject r = call(site, tk.optString("token", null), "GET", path);
-        JSONObject out = new JSONObject().put("ok", true).put("http", r.optInt("http"));
+        int code = r.optInt("http");
+        JSONObject out = new JSONObject().put("ok", code == 200).put("http", code);
+        if (code != 200) out.put("message", httpHint(code));
         JSONArray rows = new JSONArray();
         JSONObject lastBonus = null;
-        if (r.optInt("http") == 200) {
-            JSONArray list = null;
+        if (code == 200) {
             JSONObject d = dd(r);
-            if (d.has("items")) list = d.optJSONArray("items");
-            else if (d.has("list")) list = d.optJSONArray("list");
+            JSONArray list = d.optJSONArray("items");
+            if (list == null) list = d.optJSONArray("list");
+            if (list == null) list = d.optJSONArray("data");
             if (list == null) {
-                try { list = r.getJSONObject("data").getJSONArray("data"); } catch (Exception ignored) {}
+                JSONObject wrap = r.optJSONObject("data");
+                if (wrap != null) list = wrap.optJSONArray("data");
             }
             if (list != null) for (int i = 0; i < list.length(); i++) {
                 JSONObject o = list.optJSONObject(i);
@@ -350,34 +393,52 @@ public class Engine {
                 .put("http", r.optInt("http")).put("ms", System.currentTimeMillis() - t0);
     }
 
-    /** cron 等价：manual 站点签到，login 站点刷新保活 */
+    /**
+     * cron 等价：manual 站点走离屏 WebView 签到，login 站点刷新保活。
+     * v0.1.8：串行 + 等待完成（Worker 生命周期必须覆盖签到全过程，否则进程被回收后台签到全废）。
+     */
     public void runAllOnce() {
         JSONArray sites = store.config().optJSONArray("sites");
         if (sites == null) return;
         for (int i = 0; i < sites.length(); i++) {
             JSONObject site = sites.optJSONObject(i);
             if (site == null) continue;
+            final String sKey = site.optString("key", "");
             JSONArray accs = site.optJSONArray("accounts");
             if (accs == null) continue;
+            boolean manual = "manual".equals(site.optString("checkinType"));
             for (int j = 0; j < accs.length(); j++) {
                 JSONObject tk = accs.optJSONObject(j);
                 if (tk == null || tk.optString("token", "").isEmpty()) continue;
-                String key = tk.optString("key");
+                final String key = tk.optString("key");
+                if (key.isEmpty()) continue;
+                /* 今日已签则跳过（省电、避免重复跑 WebView） */
+                if (isCheckedToday(tk)) {
+                    store.appendLog(sKey, key, "cron-skip", "今日已签");
+                    continue;
+                }
                 try {
-                    if ("manual".equals(site.optString("checkinType"))) {
-                        /* v0.1.6: manual 型改走离屏 WebView 后台签到（Turnstile 站点纯 API POST 必 403） */
-                        final JSONObject fsite = site; final String fkey = key; final Store fst = store;
-                        OffscreenCheckin.run(ctx, fsite.optString("key"), fkey, 100, (ok, already, reward, msg) -> {
-                            String ev = ok ? (already ? "cron-checkin-already" : "cron-checkin-ok") : "cron-checkin-fail";
-                            String dt = ok ? (already ? (msg == null ? "今日已签" : msg) : ("奖励 $" + reward)) : (msg == null ? "" : msg);
-                            fst.appendLog(fsite.optString("key"), fkey, ev, dt);
+                    if (manual) {
+                        final CountDownLatch latch = new CountDownLatch(1);
+                        final String[] ev = { "cron-checkin-fail" };
+                        final String[] dt = { "未返回" };
+                        OffscreenCheckin.run(ctx, sKey, key, 100, (ok, already, reward, msg) -> {
+                            ev[0] = ok ? (already ? "cron-checkin-already" : "cron-checkin-ok") : "cron-checkin-fail";
+                            dt[0] = ok ? (already ? (msg == null ? "今日已签" : msg) : ("奖励 $" + reward))
+                                       : (msg == null ? "" : msg);
+                            latch.countDown();
                         });
+                        /* 等待签到真正跑完（离屏 WebView 看门狗 100s，这里给 110s 余量） */
+                        if (!latch.await(110, TimeUnit.SECONDS)) { ev[0] = "cron-checkin-fail"; dt[0] = "等待超时"; }
+                        store.appendLog(sKey, key, ev[0], dt[0]);
                     } else {
                         JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
-                        store.appendLog(site.optString("key"), key, "cron-login-refresh", "http=" + r.optInt("http"));
+                        store.appendLog(sKey, key, "cron-login-refresh", "http=" + r.optInt("http"));
                     }
                 } catch (Exception e) {
-                    store.appendLog(site.optString("key"), key, "cron-error", e.getMessage());
+                    store.appendLog(sKey, key, "cron-error", String.valueOf(e.getMessage()));
+                } catch (Throwable t) {
+                    store.appendLog(sKey, key, "cron-error", "fatal: " + t);
                 }
             }
         }
@@ -388,7 +449,8 @@ public class Engine {
     public static class CheckWorker extends Worker {
         public CheckWorker(@NonNull Context c, @NonNull WorkerParameters p) { super(c, p); }
         @NonNull @Override public Result doWork() {
-            try { new Engine(getApplicationContext()).runAllOnce(); } catch (Exception ignored) {}
+            try { new Engine(getApplicationContext()).runAllOnce(); }
+            catch (Throwable t) { return Result.retry(); }
             return Result.success();
         }
     }

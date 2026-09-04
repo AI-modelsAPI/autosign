@@ -434,6 +434,7 @@ public class MainActivity extends Activity {
                 r.put("ok", data.getBooleanExtra("ok", false))
                  .put("already", data.getBooleanExtra("already", false))
                  .put("reward", data.getDoubleExtra("reward", 0))
+                 .put("auth", data.getBooleanExtra("auth", false))
                  .put("message", data.getStringExtra("message") == null ? "" : data.getStringExtra("message"));
             } catch (Exception ignored) {}
             applyCheckinResult(r);
@@ -465,18 +466,17 @@ public class MainActivity extends Activity {
             try {
                 JSONObject st = engine.status(key);
                 Store store = new Store(this);
-                JSONObject rec = store.findAccount(key);
-                if (rec != null) {
-                    rec.put("lastStatus", st);
-                    /* 跨设备已签同步：服务器确认今天有签到记录（无论哪台设备签的）→ 写入本地已签状态，徽章与置灰立即生效（v0.1.3.1） */
-                    if (st.optBoolean("todayChecked", false)) {
-                        rec.put("lastCheckin", new JSONObject()
-                                .put("date", Engine.todayStr())
-                                .put("reward", st.optDouble("todayRewardUSD", 0))
-                                .put("time", System.currentTimeMillis()));
-                    }
-                    store.upsertAccount(store.siteOfAccount(key).optString("key"), rec);
+                JSONObject patch = new JSONObject();
+                patch.put("lastStatus", st);
+                /* 跨设备已签同步：服务器确认今天有签到记录（无论哪台设备签的）→ 写入本地已签状态，徽章与置灰立即生效（v0.1.3.1） */
+                if (st.optBoolean("todayChecked", false)) {
+                    patch.put("lastCheckin", new JSONObject()
+                            .put("date", Engine.todayStr())
+                            .put("reward", st.optDouble("todayRewardUSD", 0))
+                            .put("time", System.currentTimeMillis()));
                 }
+                /* v0.1.8：patchAccount 锁内合并，避免与签到线程互相覆盖字段 */
+                store.patchAccount(key, patch);
                 h.post(this::render);
             } catch (Exception e) {
                 h.post(() -> toast(key + " 刷新失败: " + e.getMessage()));
@@ -484,40 +484,54 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private volatile boolean checkinBusy = false;
+
     private void doCheckin(String key) {
         /* v0.1.6 纯后台优先：manual 型直接跑离屏 WebView（零 UI 零弹窗，人机验证无感自动完成），
          * 后台失败才转 CheckinActivity 可见兜底（仍全自动）。login 型维持纯 API 逻辑。 */
-        String ct = "";
-        try { ct = new Store(this).siteOfAccount(key).optString("checkinType", ""); } catch (Exception ignored) {}
+        if (checkinBusy) { toast("签到进行中，请稍候…"); return; }
+        /* v0.1.8：siteOfAccount 可能为 null，改用不会 NPE 的 siteKeyOfAccount */
+        Store store = new Store(this);
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) { toast("站点信息缺失，无法签到"); return; }
+        final String sk = site.optString("key", "");
+        final String ct = site.optString("checkinType", "");
+        if (sk.isEmpty()) { toast("站点信息缺失，无法签到"); return; }
+
         if (!"manual".equals(ct)) {
+            checkinBusy = true;
             new Thread(() -> {
                 try {
                     JSONObject r = engine.checkin(key);
-                    h.post(() -> { applyCheckinResult(r); render(); });
+                    h.post(() -> { checkinBusy = false; applyCheckinResult(r); render(); });
                 } catch (Exception e) {
-                    h.post(() -> toast("签到失败: " + e.getMessage()));
+                    h.post(() -> { checkinBusy = false; toast("签到失败: " + e.getMessage()); });
                 }
             }).start();
             return;
         }
-        String sk0 = "";
-        try { sk0 = new Store(this).siteOfAccount(key).optString("key", ""); } catch (Exception ignored) {}
-        final String sk = sk0;
-        if (sk.isEmpty()) { toast("站点信息缺失，无法签到"); return; }
+        checkinBusy = true;
         toast("正在后台签到…");
         OffscreenCheckin.run(this, sk, key, 100, (ok, already, reward, msg) -> {
+            checkinBusy = false;
             if (ok) {
                 JSONObject r = new JSONObject();
                 try { r.put("ok", true).put("already", already).put("reward", reward).put("message", msg == null ? "" : msg); } catch (Exception ignored) {}
                 applyCheckinResult(r);
                 render();
-            } else {
-                /* 后台失败（超时/异常）→ 可见兜底：真实 WebView，人机验证仍全自动 */
-                Intent it = new Intent(this, CheckinActivity.class);
-                it.putExtra("siteKey", sk);
-                it.putExtra("accountKey", key);
-                startActivityForResult(it, REQ_CHECKIN);
+                return;
             }
+            final String m = msg == null ? "" : msg;
+            /* v0.1.8：只有「环境类失败」才升级到可见兜底。
+             * 授权过期 / siteKey 缺失 / 服务端明确拒绝，可见页跑的是同一套 JS，结果必然相同 —— 不再白弹窗。 */
+            boolean envFail = m.startsWith("net::") || m.contains("超时")
+                    || m.contains("HTTP") || m.contains("加载失败") || m.contains("注入失败")
+                    || m.contains("人机验证未通过");
+            if (!envFail) { toast(m.isEmpty() ? "签到失败" : m); render(); return; }
+            Intent it = new Intent(this, CheckinActivity.class);
+            it.putExtra("siteKey", sk);
+            it.putExtra("accountKey", key);
+            startActivityForResult(it, REQ_CHECKIN);
         });
     }
 
@@ -531,6 +545,9 @@ public class MainActivity extends Activity {
         } else if (r.optBoolean("ok")) {
             String m = reward > 0 ? "签到成功 🎉 本次奖励 +$" + fmt(reward) : r.optString("message", "签到成功");
             toast(m);
+        } else if (r.optBoolean("auth")) {
+            /* v0.1.8：授权过期给明确指引，不再只丢一句“签到失败” */
+            toast("授权已过期，请点「重新授权」");
         } else {
             toast(r.optString("message", "签到失败"));
         }
