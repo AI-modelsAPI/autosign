@@ -40,12 +40,13 @@ public class MainActivity extends Activity {
     private static final int TXT = 0xFF0F172A, SUB = 0xFF64748B;
 
     private LinearLayout list;
-    private final Engine engine = new Engine(this);
+    private Engine engine; // onCreate 中初始化（构造期 Context 尚未 attach，不可在此 new）
     private final Handler h = new Handler(Looper.getMainLooper());
     private static final int REQ_AUTH = 41;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        engine = new Engine(this);
         Engine.schedule(this);
 
         LinearLayout root = new LinearLayout(this);
