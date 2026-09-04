@@ -156,8 +156,9 @@ public class MainActivity extends Activity {
             }
         }
         if (siteAllChecked) {
-            headL.addView(chip(this, "今日已签 ✓", GREEN), new LinearLayout.LayoutParams(-2, -2, 0));
-            ((LinearLayout.LayoutParams) ((LinearLayout) headL.getChildAt(0)).getLayoutParams()).topMargin = 6;
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2, 0);
+            clp.topMargin = 6;
+            headL.addView(chip(this, "今日已签 ✓", GREEN), clp);
         }
         View stretch = new View(this);
         stretch.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
@@ -447,7 +448,17 @@ public class MainActivity extends Activity {
                 JSONObject st = engine.status(key);
                 Store store = new Store(this);
                 JSONObject rec = store.findAccount(key);
-                if (rec != null) { rec.put("lastStatus", st); store.upsertAccount(store.siteOfAccount(key).optString("key"), rec); }
+                if (rec != null) {
+                    rec.put("lastStatus", st);
+                    /* 跨设备已签同步：服务器确认今天有签到记录（无论哪台设备签的）→ 写入本地已签状态，徽章与置灰立即生效（v0.1.3.1） */
+                    if (st.optBoolean("todayChecked", false)) {
+                        rec.put("lastCheckin", new JSONObject()
+                                .put("date", Engine.todayStr())
+                                .put("reward", st.optDouble("todayRewardUSD", 0))
+                                .put("time", System.currentTimeMillis()));
+                    }
+                    store.upsertAccount(store.siteOfAccount(key).optString("key"), rec);
+                }
                 h.post(this::render);
             } catch (Exception e) {
                 h.post(() -> toast(key + " 刷新失败: " + e.getMessage()));
@@ -459,12 +470,14 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 JSONObject r = engine.checkin(key);
-                double reward = r.optDouble("reward", 0);
                 h.post(() -> {
-                    if (reward > 0) {
+                    double reward = r.optDouble("reward", 0);
+                    if (r.optBoolean("already")) {
+                        String m = r.optString("message", "今日已签到");
+                        if (reward > 0) m += " · 今日奖励 $" + fmt(reward);
+                        toast(m);
+                    } else if (reward > 0) {
                         toast("签到成功 🎉 本次奖励 +$" + fmt(reward));
-                    } else if (r.optBoolean("already")) {
-                        toast(r.optString("message", "今日已签到"));
                     } else if (r.optBoolean("skipped")) {
                         toast(r.optString("message", "已刷新保活"));
                     } else {

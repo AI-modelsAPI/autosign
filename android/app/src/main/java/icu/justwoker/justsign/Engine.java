@@ -125,6 +125,15 @@ public class Engine {
         if (dd(self).has("today_used_quota"))
             out.put("todayUsed", Math.round(dd(self).optDouble("today_used_quota") / unit * 10000.0) / 10000.0);
         store.appendLog(site.optString("key"), key, "status", "http=" + self.optInt("http"));
+        /* 跨设备已签鉴别：服务器日志里今天若有「签到」记录，无论哪台设备签的，本地同步为已签（v0.1.3.1） */
+        JSONObject probe = null;
+        try { probe = todayBonus(key); } catch (Exception ignored) {}
+        if (probe != null) {
+            out.put("todayChecked", true);
+            out.put("todayRewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
+        } else {
+            out.put("todayChecked", false);
+        }
         return out;
     }
 
@@ -156,10 +165,15 @@ public class Engine {
                 out.put("reward", reward);
                 markChecked(tk, reward);
             } else if (already) {
-                /* 已签过：补查今日奖励记录并同样置为已签 */
+                /* 已签过（含在其他设备签的）：从服务器日志取今日奖励，quota 需原始单位→美元换算 */
                 JSONObject tb = null;
                 try { tb = todayBonus(key); } catch (Exception ignored) {}
-                if (tb != null) out.put("reward", tb.optDouble("quota", 0));
+                if (tb != null) {
+                    JSONObject stat = null;
+                    long unit = QUOTA_PER_UNIT_DEFAULT;
+                    try { stat = call(site, token, "GET", "/api/status"); unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT); } catch (Exception ignored) {}
+                    out.put("reward", quotaToUSD(tb.optLong("quota", 0), unit));
+                }
                 out.put("message", "今日已签到");
                 markChecked(tk, out.optDouble("reward", 0));
             } else {
@@ -173,7 +187,9 @@ public class Engine {
         try { tb = todayBonus(key); } catch (Exception ignored) {}
         out.put("ok", true).put("skipped", false).put("already", true);
         if (tb != null) {
-            out.put("reward", tb.optDouble("quota", 0))
+            long unit = QUOTA_PER_UNIT_DEFAULT;
+            try { JSONObject stat = call(site, token, "GET", "/api/status"); unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT); } catch (Exception ignored) {}
+            out.put("reward", quotaToUSD(tb.optLong("quota", 0), unit))
                .put("message", "登录即签到 · 今日奖励已到账");
         } else {
             try { call(site, token, "GET", "/api/user/self"); } catch (Exception ignored) {}
@@ -195,6 +211,12 @@ public class Engine {
             return q >= 1000 ? Math.round(q / unit * 100.0) / 100.0 : q;
         }
         return 0;
+    }
+
+    /** 原始 quota → 美元（日志记录里的 quota 是原始单位，如 12500000 = $25） */
+    private static double quotaToUSD(long q, long unit) {
+        if (q <= 0) return 0;
+        return q >= 1000 ? Math.round(q / (double) unit * 100.0) / 100.0 : q;
     }
 
     /** 账号写入当日签到状态（支撑「今日已签」徽章与按钮置灰，次日自动失效） */
