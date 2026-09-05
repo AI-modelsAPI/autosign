@@ -141,7 +141,9 @@ public class Engine {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
         final String sKey = site.optString("key", "");
-        String token = tk.optString("token", null);
+        /* v0.2.0：先确保 token 新鲜（该站 JWT TTL 仅 15 分钟，不续期必然 401 变红） */
+        String token = TokenKeeper.ensureFresh(ctx, store, site, key);
+        if (token.isEmpty()) token = tk.optString("token", null);
 
         JSONObject self = call(site, token, "GET", "/api/user/self");
         int selfHttp = self.optInt("http");
@@ -175,9 +177,22 @@ public class Engine {
                 .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user);
         if (selfHttp != 200) out.put("message", httpHint(selfHttp));
-        if (dd(self).has("today_used_quota"))
-            out.put("todayUsed", Math.round(dd(self).optDouble("today_used_quota") / unit * 10000.0) / 10000.0);
+        /* 今日消耗（v0.1.9）：/api/user/self 不返回今日字段（实测确认），
+           改用 /api/data/self?start_timestamp=今日0点&end_timestamp=now 累加 quota */
+        double todayUsed = -1;
+        if (selfHttp == 200) {
+            try { todayUsed = todayUsage(site, token, unit); } catch (Exception ignored) {}
+        }
+        if (todayUsed >= 0) out.put("todayUsed", Math.round(todayUsed * 100.0) / 100.0);
         store.appendLog(sKey, key, "status", "http=" + selfHttp);
+        /* v0.2.0 操作日志：刷新结果（成功与失败都记） */
+        if (selfHttp == 200) {
+            store.opLog(sKey, key, "刷新", "ok", "额度已更新",
+                    "可用 $" + Ui.usd(Math.round(quota / unit * 100.0) / 100.0)
+                            + (todayUsed >= 0 ? (" · 今日消耗 $" + Ui.usd(todayUsed)) : ""), "user");
+        } else {
+            store.opLog(sKey, key, "刷新", "err", httpHint(selfHttp), "GET /api/user/self", "user");
+        }
 
         /* 跨设备已签鉴别：官方签到状态接口 /api/user/checkin?month=YYYY-MM，
            不可用时回退当日日志探测。未授权时不必再查。 */
@@ -207,7 +222,9 @@ public class Engine {
         if (site == null) throw new Exception("站点不存在");
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
-        JSONObject r = call(site, tk.optString("token", null), "GET",
+        String tok = TokenKeeper.ensureFresh(ctx, store, site, key);
+        if (tok.isEmpty()) tok = tk.optString("token", null);
+        JSONObject r = call(site, tok, "GET",
                 "/api/user/checkin?month=" + URLEncoder.encode(month, "UTF-8"));
         if (r.optInt("http") != 200) return null;
         JSONObject d = dd(r);
@@ -273,6 +290,34 @@ public class Engine {
         }
         markChecked(key, out.optDouble("reward", 0));
         return out;
+    }
+
+    /** 今日消耗（v0.1.9）：GET /api/data/self?start_timestamp&end_timestamp 累加 quota → 美元。
+     *  失败或无数据返回 -1（UI 显示为 "—"），0 条记录返回 0。 */
+    private double todayUsage(JSONObject site, String token, long unit) {
+        try {
+            java.util.Calendar c = java.util.Calendar.getInstance();
+            c.set(java.util.Calendar.HOUR_OF_DAY, 0);
+            c.set(java.util.Calendar.MINUTE, 0);
+            c.set(java.util.Calendar.SECOND, 0);
+            c.set(java.util.Calendar.MILLISECOND, 0);
+            long start = c.getTimeInMillis() / 1000L;
+            long end = System.currentTimeMillis() / 1000L;
+            JSONObject r = call(site, token, "GET",
+                    "/api/data/self?start_timestamp=" + start + "&end_timestamp=" + end + "&default_time=hour");
+            if (r.optInt("http") != 200) return -1;
+            JSONArray list = null;
+            JSONObject wrap = r.optJSONObject("data");
+            if (wrap != null) list = wrap.optJSONArray("data");
+            if (list == null) return -1;
+            double sum = 0;
+            for (int i = 0; i < list.length(); i++) {
+                JSONObject o = list.optJSONObject(i);
+                if (o != null) sum += o.optDouble("quota", 0);
+            }
+            if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
+            return sum / unit;
+        } catch (Exception e) { return -1; }
     }
 
     /** 原始 quota → 美元（日志记录里的 quota 是原始单位，如 12500000 = $25） */
@@ -398,6 +443,10 @@ public class Engine {
      * v0.1.8：串行 + 等待完成（Worker 生命周期必须覆盖签到全过程，否则进程被回收后台签到全废）。
      */
     public void runAllOnce() {
+        if (!scheduleAllowsToday()) {
+            store.opLog("", "", "定时签到", "info", "今日跳过（仅工作日执行）", "", "cron");
+            return;
+        }
         JSONArray sites = store.config().optJSONArray("sites");
         if (sites == null) return;
         for (int i = 0; i < sites.length(); i++) {
@@ -431,14 +480,21 @@ public class Engine {
                         /* 等待签到真正跑完（离屏 WebView 看门狗 100s，这里给 110s 余量） */
                         if (!latch.await(110, TimeUnit.SECONDS)) { ev[0] = "cron-checkin-fail"; dt[0] = "等待超时"; }
                         store.appendLog(sKey, key, ev[0], dt[0]);
+                        store.opLog(sKey, key, "定时签到",
+                                ev[0].endsWith("fail") ? "err" : "ok", dt[0], "", "cron");
                     } else {
                         JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
                         store.appendLog(sKey, key, "cron-login-refresh", "http=" + r.optInt("http"));
+                        store.opLog(sKey, key, "定时刷新",
+                                r.optInt("http") == 200 ? "ok" : "err",
+                                r.optInt("http") == 200 ? "登录保活成功" : httpHint(r.optInt("http")), "", "cron");
                     }
                 } catch (Exception e) {
                     store.appendLog(sKey, key, "cron-error", String.valueOf(e.getMessage()));
+                    store.opLog(sKey, key, "定时任务", "err", "执行异常", String.valueOf(e.getMessage()), "cron");
                 } catch (Throwable t) {
                     store.appendLog(sKey, key, "cron-error", "fatal: " + t);
+                    store.opLog(sKey, key, "定时任务", "err", "严重异常", String.valueOf(t), "cron");
                 }
             }
         }
@@ -456,11 +512,57 @@ public class Engine {
     }
 
     public static void schedule(Context c) {
-        PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(CheckWorker.class, 12, TimeUnit.HOURS)
+        JSONObject sch;
+        try { sch = new Store(c).schedule(); } catch (Exception e) { sch = new JSONObject(); }
+        boolean enabled = sch.optBoolean("enabled", true);
+        WorkManager wm = WorkManager.getInstance(c);
+        if (!enabled) { wm.cancelUniqueWork("justsign-check"); return; }
+
+        String mode = sch.optString("mode", "daily");
+        long periodMin;
+        long initialDelayMin = 0;
+        if ("interval".equals(mode)) {
+            int h = Math.max(1, Math.min(24, sch.optInt("intervalHours", 12)));
+            periodMin = h * 60L;
+        } else {
+            /* daily / weekday：周期 24h，首次延迟到下一个指定时刻
+               （WorkManager 无法精确定时，最小周期 15min；weekday 由 runAllOnce 前置判断跳过周末） */
+            periodMin = 24 * 60L;
+            initialDelayMin = minutesUntil(sch.optInt("hour", 8), sch.optInt("minute", 30));
+        }
+        if (periodMin < 15) periodMin = 15;
+
+        PeriodicWorkRequest.Builder b = new PeriodicWorkRequest.Builder(
+                CheckWorker.class, periodMin, TimeUnit.MINUTES)
                 .setConstraints(new Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .build();
-        WorkManager.getInstance(c).enqueueUniquePeriodicWork("justsign-check",
-                ExistingPeriodicWorkPolicy.KEEP, req);
+                        .setRequiredNetworkType(NetworkType.CONNECTED).build());
+        if (initialDelayMin > 0) b.setInitialDelay(initialDelayMin, TimeUnit.MINUTES);
+
+        /* 配置可能变化 → REPLACE 让新周期立即生效 */
+        wm.enqueueUniquePeriodicWork("justsign-check",
+                ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, b.build());
+    }
+
+    /** 距离下一个 hh:mm 还有多少分钟（含跨天） */
+    private static long minutesUntil(int hour, int minute) {
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        java.util.Calendar t = java.util.Calendar.getInstance();
+        t.set(java.util.Calendar.HOUR_OF_DAY, Math.max(0, Math.min(23, hour)));
+        t.set(java.util.Calendar.MINUTE, Math.max(0, Math.min(59, minute)));
+        t.set(java.util.Calendar.SECOND, 0);
+        t.set(java.util.Calendar.MILLISECOND, 0);
+        if (!t.after(now)) t.add(java.util.Calendar.DAY_OF_YEAR, 1);
+        long diff = (t.getTimeInMillis() - now.getTimeInMillis()) / 60000L;
+        return Math.max(1, diff);
+    }
+
+    /** 定时任务执行前的日期判定（weekday 模式跳过周六日） */
+    private boolean scheduleAllowsToday() {
+        try {
+            JSONObject sch = store.schedule();
+            if (!"weekday".equals(sch.optString("mode", "daily"))) return true;
+            int dow = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_WEEK);
+            return dow != java.util.Calendar.SATURDAY && dow != java.util.Calendar.SUNDAY;
+        } catch (Exception e) { return true; }
     }
 }

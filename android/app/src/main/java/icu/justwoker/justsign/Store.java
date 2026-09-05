@@ -331,6 +331,8 @@ public class Store {
         }
     }
 
+    /* ---------- 运行日志（兼容旧调用；系统级事件） ---------- */
+
     public void appendLog(String site, String account, String event, String detail) {
         synchronized (LOCK) {
             try {
@@ -346,5 +348,283 @@ public class Store {
                 sp.edit().putString("logs", a.toString()).commit();
             } catch (Exception ignored) {}
         }
+    }
+
+    /* ---------- UI 偏好（v0.2.0） ---------- */
+
+    public boolean uiPref(String key, boolean def) {
+        try {
+            JSONObject u = config().optJSONObject("uiPrefs");
+            return u == null ? def : u.optBoolean(key, def);
+        } catch (Exception e) { return def; }
+    }
+
+    public void setUiPref(String key, boolean val) {
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                JSONObject u = cfg.optJSONObject("uiPrefs");
+                if (u == null) { u = new JSONObject(); cfg.put("uiPrefs", u); }
+                u.put(key, val);
+                saveConfigLocked(cfg);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /* ---------- 定时签到配置（v0.2.0，可设置周期） ----------
+     * schedule = { enabled, mode: daily|weekday|interval, hour, minute, intervalHours } */
+
+    public JSONObject schedule() {
+        JSONObject s = config().optJSONObject("schedule");
+        if (s == null) s = new JSONObject();
+        try {
+            if (!s.has("enabled")) s.put("enabled", true);
+            if (!s.has("mode")) s.put("mode", "daily");
+            if (!s.has("hour")) s.put("hour", 8);
+            if (!s.has("minute")) s.put("minute", 30);
+            if (!s.has("intervalHours")) s.put("intervalHours", 12);
+        } catch (Exception ignored) {}
+        return s;
+    }
+
+    public void saveSchedule(JSONObject sch) {
+        if (sch == null) return;
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                cfg.put("schedule", sch);
+                saveConfigLocked(cfg);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /* ---------- 全局账号凭据库（v0.2.0） ----------
+     * credential = { id, alias, githubUser, siteAccount, password(enc), twofa(enc), note }
+     * 站点账号只存 credentialId 引用；密码/2FA 落盘前经 Crypto 加密。 */
+
+    public JSONArray credentials() {
+        JSONArray a = config().optJSONArray("credentials");
+        return a == null ? new JSONArray() : a;
+    }
+
+    public JSONObject findCredential(String id) {
+        if (id == null || id.isEmpty()) return null;
+        JSONArray a = credentials();
+        for (int i = 0; i < a.length(); i++) {
+            JSONObject c = a.optJSONObject(i);
+            if (c != null && id.equals(c.optString("id"))) return c;
+        }
+        return null;
+    }
+
+    /** 凭据里的密码明文（解密）；空串表示未设置 */
+    public String credPassword(String id) {
+        JSONObject c = findCredential(id);
+        return c == null ? "" : Crypto.dec(c.optString("password", ""));
+    }
+
+    /** 凭据里的 2FA 当前可用验证码；空串表示该账号没有 2FA（授权流程不跳转） */
+    public String credTwofaCode(String id) {
+        JSONObject c = findCredential(id);
+        if (c == null) return "";
+        String raw = Crypto.dec(c.optString("twofa", ""));
+        return Crypto.totpOrLiteral(raw);
+    }
+
+    /** 该凭据是否配置了 2FA（决定授权流程要不要跳 2FA 步骤） */
+    public boolean credHasTwofa(String id) {
+        JSONObject c = findCredential(id);
+        if (c == null) return false;
+        return !c.optString("twofa", "").isEmpty();
+    }
+
+    /**
+     * 新增/更新凭据。password/twofa 传明文，内部加密后落盘；
+     * 传 null 表示"不修改该字段"，传空串表示"清除该字段"。
+     * 返回 false = Keystore 不可用且传入了敏感字段（拒绝明文落盘）。
+     */
+    public boolean upsertCredential(String id, String alias, String githubUser, String siteAccount,
+                                    String passwordPlain, String twofaPlain, String note) {
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                JSONArray arr = cfg.optJSONArray("credentials");
+                if (arr == null) { arr = new JSONArray(); cfg.put("credentials", arr); }
+                JSONObject target = null;
+                int at = -1;
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c != null && id != null && id.equals(c.optString("id"))) { target = c; at = i; break; }
+                }
+                boolean isNew = target == null;
+                if (isNew) {
+                    target = new JSONObject();
+                    target.put("id", (id == null || id.isEmpty()) ? ("cred_" + System.currentTimeMillis()) : id);
+                }
+                if (alias != null) target.put("alias", alias);
+                if (githubUser != null) target.put("githubUser", githubUser);
+                if (siteAccount != null) target.put("siteAccount", siteAccount);
+                if (note != null) target.put("note", note);
+
+                if (passwordPlain != null) {
+                    if (passwordPlain.isEmpty()) target.put("password", "");
+                    else {
+                        String enc = Crypto.enc(passwordPlain);
+                        if (enc == null) return false;      // 绝不明文落盘
+                        target.put("password", enc);
+                    }
+                }
+                if (twofaPlain != null) {
+                    if (twofaPlain.isEmpty()) target.put("twofa", "");
+                    else {
+                        String enc = Crypto.enc(twofaPlain);
+                        if (enc == null) return false;
+                        target.put("twofa", enc);
+                    }
+                }
+                target.put("updatedAt", System.currentTimeMillis());
+
+                if (isNew) arr.put(target);
+                else if (at >= 0) arr.put(at, target);
+                saveConfigLocked(cfg);
+                return true;
+            } catch (Exception e) { return false; }
+        }
+    }
+
+    public void removeCredential(String id) {
+        if (id == null) return;
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                JSONArray arr = cfg.optJSONArray("credentials");
+                if (arr == null) return;
+                JSONArray out = new JSONArray();
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c != null && !id.equals(c.optString("id"))) out.put(c);
+                }
+                cfg.put("credentials", out);
+                /* 解除站点账号对它的引用 */
+                JSONArray sites = cfg.optJSONArray("sites");
+                if (sites != null) for (int i = 0; i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONArray accs = s.optJSONArray("accounts");
+                    if (accs == null) continue;
+                    for (int j = 0; j < accs.length(); j++) {
+                        JSONObject a = accs.optJSONObject(j);
+                        if (a != null && id.equals(a.optString("credentialId", ""))) a.remove("credentialId");
+                    }
+                }
+                saveConfigLocked(cfg);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /** 该凭据已绑定几个站点账号（凭据库列表展示用） */
+    public int credentialUseCount(String id) {
+        if (id == null) return 0;
+        int n = 0;
+        JSONArray sites = config().optJSONArray("sites");
+        if (sites != null) for (int i = 0; i < sites.length(); i++) {
+            JSONObject s = sites.optJSONObject(i);
+            if (s == null) continue;
+            JSONArray accs = s.optJSONArray("accounts");
+            if (accs == null) continue;
+            for (int j = 0; j < accs.length(); j++) {
+                JSONObject a = accs.optJSONObject(j);
+                if (a != null && id.equals(a.optString("credentialId", ""))) n++;
+            }
+        }
+        return n;
+    }
+
+    /* ---------- 操作日志（v0.2.0，用户操作结果，成功与报错都记） ----------
+     * opLog = { time, siteKey, siteName, accountKey, alias, action, ok, level, summary, detail, source } */
+
+    private static final int OPLOG_MAX = 500;
+
+    public JSONArray opLogs() {
+        synchronized (LOCK) {
+            try { return new JSONArray(sp.getString("opLogs", "[]")); }
+            catch (Exception e) { return new JSONArray(); }
+        }
+    }
+
+    /**
+     * 记一条操作日志。
+     * level：ok / err / info（决定浮窗里的颜色与状态点）
+     * source：user / cron / auto（触发源，日志副行展示）
+     */
+    public void opLog(String siteKey, String accountKey, String action,
+                      String level, String summary, String detail, String source) {
+        synchronized (LOCK) {
+            try {
+                JSONArray a;
+                try { a = new JSONArray(sp.getString("opLogs", "[]")); }
+                catch (Exception e) { a = new JSONArray(); }
+                String siteName = siteKey, alias = accountKey;
+                try {
+                    JSONObject s = findSiteObj(config(), siteKey);
+                    if (s != null) siteName = s.optString("name", siteKey);
+                    JSONObject acc = findAccount(accountKey);
+                    if (acc != null) alias = acc.optString("alias", accountKey);
+                } catch (Exception ignored) {}
+                JSONObject e = new JSONObject()
+                        .put("time", System.currentTimeMillis())
+                        .put("siteKey", siteKey == null ? "" : siteKey)
+                        .put("siteName", siteName == null ? "" : siteName)
+                        .put("accountKey", accountKey == null ? "" : accountKey)
+                        .put("alias", alias == null ? "" : alias)
+                        .put("action", action == null ? "" : action)
+                        .put("level", level == null ? "info" : level)
+                        .put("summary", summary == null ? "" : summary)
+                        .put("detail", detail == null ? "" : detail)
+                        .put("source", source == null ? "user" : source);
+                a.put(e);
+                while (a.length() > OPLOG_MAX) a.remove(0);
+                sp.edit().putString("opLogs", a.toString()).commit();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public void clearOpLogs() {
+        synchronized (LOCK) {
+            try { sp.edit().putString("opLogs", "[]").commit(); } catch (Exception ignored) {}
+        }
+    }
+
+    /* ---------- 统计（顶栏摘要用） ---------- */
+
+    /** 返回 {sites, accounts, checked, pending, totalUSD} */
+    public JSONObject summary() {
+        int nSite = 0, nAcc = 0, nChecked = 0;
+        double total = 0;
+        try {
+            JSONArray sites = config().optJSONArray("sites");
+            if (sites != null) {
+                nSite = sites.length();
+                for (int i = 0; i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONArray accs = s.optJSONArray("accounts");
+                    if (accs == null) continue;
+                    for (int j = 0; j < accs.length(); j++) {
+                        JSONObject a = accs.optJSONObject(j);
+                        if (a == null) continue;
+                        nAcc++;
+                        if (Engine.isCheckedToday(a)) nChecked++;
+                        JSONObject st = a.optJSONObject("lastStatus");
+                        if (st != null && st.optBoolean("ok")) total += st.optDouble("availableUSD", 0);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        try {
+            return new JSONObject().put("sites", nSite).put("accounts", nAcc)
+                    .put("checked", nChecked).put("pending", Math.max(0, nAcc - nChecked))
+                    .put("totalUSD", Math.round(total * 100.0) / 100.0);
+        } catch (Exception e) { return new JSONObject(); }
     }
 }

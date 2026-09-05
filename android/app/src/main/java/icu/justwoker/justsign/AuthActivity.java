@@ -5,7 +5,6 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -39,58 +38,53 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /**
- * AuthActivity — GitHub 授权桥（新版 new-api）：
- *   1. GET /api/status → github_client_id（按站点动态）
- *   2. POST /api/oauth/state {provider:github,intent:login} → flow_token
- *   3. WebView 打开 github.com/login/oauth/authorize?client_id&state=flow_token&scope=user:email
- *   4. GitHub 回调 站点/oauth/github?code&state —— onPageFinished 检测到站点域 /oauth/ 路径后，
- *      注入脚本直接 GET /api/oauth/github?code&state 拿完整 bundle（access_token+user.username），
- *      通过 @JavascriptInterface 回传落盘 → 关窗。
+ * AuthActivity（v0.2.0）— GitHub 授权桥 + 凭据自动填充。
  *
- * v0.1.8 修复（全量审计）：
- *   1. state 请求失败不再只报 "End of ..."：区分 HTTP 429 限流 / 401 / 5xx / 网络异常，
- *      并对空响应体做保护（原来 new JSONObject("") 直接抛 "End of input at character 0"，
- *      正是你截图里那条报错的真实来源 —— 站点在限流我们，body 是空的）。
- *   2. 429 自动退避重试（读 Retry-After，最多等 8s ×2 次），仍失败给出人话提示。
- *   3. state 请求也走「代理探活 → 挂代理」，与 WebView 一致；探活失败直连（不再默认必挂代理）。
- *   4. proxyApplied 竞态修复：applyProxy 挂载完成后才 loadUrl（原来不等挂载完成）。
- *   5. Response 显式 close，避免连接泄漏。
- *   6. 授权成功后立刻拉一次 /api/status 缓存站点 turnstileSiteKey（新建账号即可直接后台签到，
- *      不必先手动点刷新 —— 这是「新账号签到报未配置 siteKey」的第二道保险）。
- *   7. onBackPressed / onDestroy 与 done 标志统一，回调不再在 Activity 销毁后写 UI。
+ * 【v0.2.0 修复 state 竞速（第二次授权必失败的根因）】
+ * 实测：首次授权时 WebView 缓存冷，站点 3.4MB SPA 加载慢，我们延迟注入的脚本抢先消费
+ * flow_token → 成功；第二次资源已缓存，SPA 秒起并**自己先消费掉单次有效的 flow_token**
+ * → 我们再调 /api/oauth/github 得到「State parameter is empty or mismatched」。
+ * 修法：shouldOverrideUrlLoading 拦截站点 /oauth/ 回调 URL 并 return true（页面根本不加载），
+ * 由 OkHttp 直接完成 code 交换。SPA 没有机会启动，不再赛跑。
+ *
+ * 【自动填充】GitHub 登录页 / 站点登录页出现账号密码框时注入 AuthFillJs 填入凭据。
+ *   2FA：凭据配了才填并聚焦；没配则完全跳过（用户明确要求）。
  */
 public class AuthActivity extends Activity {
+
     private WebView wv;
-    private LinearLayout boot;
-    private TextView bootText;
-    private TextView tip;
+    private LinearLayout boot, errorLayer;
+    private TextView bootText, tip, errMsg;
     private FrameLayout root;
-    private LinearLayout errorLayer;
-    private TextView errMsg;
-    private String siteKey, accountKey, alias, baseUrl, siteHost;
+
+    private String siteKey, accountKey, alias, credentialId, baseUrl, siteHost;
     private final Handler h = new Handler(Looper.getMainLooper());
     private volatile boolean done = false;
     private volatile boolean proxyApplied = false;
+    private volatile boolean exchanging = false;
+    private volatile boolean filled = false;
 
-    /** JS ↔ Java 桥：回调页注入脚本通过它回传交换结果 */
+    /* 凭据快照（用于自动填充） */
+    private String credAccount = "", credPassword = "", credOtp = "";
+    private boolean credHasOtp = false;
+
+    /** JS ↔ Java 桥 */
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
             if (done) return;
+            h.post(() -> handleBundle(json));
+        }
+        @JavascriptInterface public void onFill(String json) {
             h.post(() -> {
-                if (done) return;
                 try {
-                    JSONObject resp = new JSONObject(json);
-                    boolean ok = resp.optBoolean("success");
-                    JSONObject d = resp.optJSONObject("data");
-                    if (ok && d != null) {
-                        String token = d.optString("access_token", d.optString("accessToken", ""));
-                        if (!token.isEmpty()) { finishOk(d, token); return; }
-                    }
-                    String msg = resp.optString("message", "交换失败");
-                    showTip("授权交换失败: " + msg);
-                } catch (Exception e) {
-                    showTip("授权交换失败: 响应解析异常");
-                }
+                    JSONObject r = new JSONObject(json);
+                    if (!r.optBoolean("ok")) return;
+                    Object f = r.opt("filled");
+                    String what = f == null ? "" : String.valueOf(f);
+                    showTip("已自动填充 " + what.replace("[", "").replace("]", "").replace("\"", ""));
+                    new Store(AuthActivity.this).opLog(siteKey, accountKey, "自动填充", "ok",
+                            "已填充 " + what, credHasOtp ? "含 2FA 动态码" : "该账号无 2FA", "auto");
+                } catch (Exception ignored) {}
             });
         }
     }
@@ -98,10 +92,14 @@ public class AuthActivity extends Activity {
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Ui.initIcons(this);
         siteKey = getIntent().getStringExtra("siteKey");
         accountKey = getIntent().getStringExtra("accountKey");
         alias = getIntent().getStringExtra("alias");
-        JSONObject site = new Store(this).findSite(siteKey);
+        credentialId = getIntent().getStringExtra("credentialId");
+
+        Store store = new Store(this);
+        JSONObject site = store.findSite(siteKey);
         baseUrl = (site != null ? site.optString("baseUrl", "") : "").replaceAll("/+$", "");
         if (baseUrl.isEmpty()) {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "站点不存在或 baseUrl 为空"));
@@ -110,10 +108,25 @@ public class AuthActivity extends Activity {
         }
         try { siteHost = new java.net.URL(baseUrl).getHost(); } catch (Exception e) { siteHost = ""; }
 
+        /* 凭据快照：账号 / 密码 / 2FA（没配 2FA 则 credOtp 为空串，脚本整体跳过） */
+        if (credentialId == null || credentialId.isEmpty()) {
+            JSONObject acc = store.findAccount(accountKey);
+            if (acc != null) credentialId = acc.optString("credentialId", "");
+        }
+        if (credentialId != null && !credentialId.isEmpty()) {
+            JSONObject c = store.findCredential(credentialId);
+            if (c != null) {
+                credAccount = c.optString("siteAccount", "");
+                if (credAccount.isEmpty()) credAccount = c.optString("githubUser", "");
+                credPassword = store.credPassword(credentialId);
+                credHasOtp = store.credHasTwofa(credentialId);
+                credOtp = credHasOtp ? store.credTwofaCode(credentialId) : "";
+            }
+        }
+
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
 
-        /* ---- WebView ---- */
         wv = new WebView(this);
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
@@ -122,14 +135,18 @@ public class AuthActivity extends Activity {
         try { CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
         wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
+            /* 关键：拦截站点 /oauth/ 回调，不让 SPA 加载抢消费 flow_token */
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
-                return false; // GitHub ↔ 站点 全部留在本 WebView
+                if (req == null || req.getUrl() == null) return false;
+                return interceptCallback(req.getUrl().toString());
             }
             @Override public void onPageFinished(WebView v, String url) {
-                maybeExchange(v, url);
+                maybeFill(url);
+                /* 兜底：若拦截未命中（部分重定向不过 shouldOverride），页面已落地时再交换一次 */
+                if (url != null) interceptCallback(url);
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest req, android.webkit.WebResourceError err) {
-                if (req == null || !req.isForMainFrame()) return; // 子资源失败不提示
+                if (req == null || !req.isForMainFrame()) return;
                 String d = err != null ? String.valueOf(err.getDescription()) : "unknown";
                 h.post(() -> showLoadError("net::" + d));
             }
@@ -142,179 +159,193 @@ public class AuthActivity extends Activity {
         wv.setVisibility(View.GONE);
         root.addView(wv, new FrameLayout.LayoutParams(-1, -1));
 
-        /* ---- 启动层：获取 state 中 ---- */
-        boot = new LinearLayout(this);
-        boot.setOrientation(LinearLayout.VERTICAL);
+        /* 启动层 */
+        boot = Ui.col(this);
         boot.setGravity(Gravity.CENTER);
         boot.setBackgroundColor(Color.WHITE);
-        ProgressBar pb = new ProgressBar(this);
-        TextView title = new TextView(this);
-        title.setText("正在准备 GitHub 授权…");
-        title.setTextColor(0xFF0F172A); title.setTextSize(16); title.setTypeface(Typeface.DEFAULT_BOLD);
-        bootText = new TextView(this);
-        bootText.setText("与站点建立安全会话");
-        bootText.setTextColor(0xFF64748B); bootText.setTextSize(13);
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setGravity(Gravity.CENTER_HORIZONTAL);
-        wrap.addView(pb, new LinearLayout.LayoutParams(-2, -2));
-        LinearLayout pt = new LinearLayout(this);
-        pt.setOrientation(LinearLayout.VERTICAL);
-        pt.setGravity(Gravity.CENTER_HORIZONTAL);
-        pt.setPadding(0, 36, 0, 0);
-        pt.addView(title); pt.addView(bootText);
-        wrap.addView(pt);
-        boot.addView(wrap, new LinearLayout.LayoutParams(-2, -2));
+        boot.addView(new ProgressBar(this));
+        TextView title = Ui.tv(this, "正在准备 GitHub 授权…", 16, Ui.TXT, true);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+        tlp.topMargin = Ui.dp(this, 18);
+        boot.addView(title, tlp);
+        bootText = Ui.tv(this, "与站点建立安全会话", 13, Ui.SUB);
+        boot.addView(bootText);
         root.addView(boot, new FrameLayout.LayoutParams(-1, -1));
 
-        /* ---- 失败重试层：GitHub 页加载失败时给出明确错误与重试入口 ---- */
-        errorLayer = new LinearLayout(this);
-        errorLayer.setOrientation(LinearLayout.VERTICAL);
+        /* 错误层 */
+        errorLayer = Ui.col(this);
         errorLayer.setGravity(Gravity.CENTER);
         errorLayer.setBackgroundColor(Color.WHITE);
         errorLayer.setVisibility(View.GONE);
-        TextView errTitle = new TextView(this);
-        errTitle.setText("页面加载失败");
-        errTitle.setTextColor(0xFF0F172A); errTitle.setTextSize(16); errTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        errTitle.setGravity(Gravity.CENTER);
-        errMsg = new TextView(this);
-        errMsg.setTextColor(0xFFDC2626); errMsg.setTextSize(13); errMsg.setGravity(Gravity.CENTER);
-        errMsg.setPadding(60, 24, 60, 0);
-        TextView retry = new TextView(this);
-        retry.setText("重试");
-        retry.setTextColor(Color.WHITE); retry.setTextSize(15); retry.setTypeface(Typeface.DEFAULT_BOLD);
-        retry.setGravity(Gravity.CENTER);
-        retry.setPadding(80, 26, 80, 26);
-        GradientDrawable rbg = new GradientDrawable();
-        rbg.setColor(0xFF2563EB); rbg.setCornerRadius(30);
-        retry.setBackground(rbg);
+        errorLayer.addView(Ui.tv(this, "授权准备失败", 16, Ui.TXT, true));
+        errMsg = Ui.tv(this, "", 13, Ui.RED);
+        errMsg.setGravity(Gravity.CENTER);
+        errMsg.setPadding(Ui.dp(this, 30), Ui.dp(this, 12), Ui.dp(this, 30), 0);
+        errorLayer.addView(errMsg);
+        TextView retry = Ui.btn(this, "重试", 15, Ui.white(), Ui.BLUE, 40, 12);
         retry.setOnClickListener(v -> {
-            if (errorLayer != null) errorLayer.setVisibility(View.GONE);
-            if (boot != null) boot.setVisibility(View.VISIBLE);
+            errorLayer.setVisibility(View.GONE);
+            boot.setVisibility(View.VISIBLE);
             startAuthFlow();
         });
-        TextView backTip = new TextView(this);
-        backTip.setText("返回键退出");
-        backTip.setTextColor(0xFF64748B); backTip.setTextSize(12);
-        backTip.setPadding(0, 30, 0, 0);
-        LinearLayout ew = new LinearLayout(this);
-        ew.setOrientation(LinearLayout.VERTICAL);
-        ew.setGravity(Gravity.CENTER_HORIZONTAL);
-        ew.addView(errTitle); ew.addView(errMsg);
-        ew.addView(retry, new LinearLayout.LayoutParams(-2, -2));
-        ((LinearLayout.LayoutParams) retry.getLayoutParams()).topMargin = 46;
-        ew.addView(backTip);
-        errorLayer.addView(ew, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-2, -2);
+        rlp.topMargin = Ui.dp(this, 22);
+        errorLayer.addView(retry, rlp);
+        TextView backTip = Ui.tv(this, "返回键退出", 12, Ui.SUB);
+        LinearLayout.LayoutParams blp2 = new LinearLayout.LayoutParams(-2, -2);
+        blp2.topMargin = Ui.dp(this, 14);
+        errorLayer.addView(backTip, blp2);
         root.addView(errorLayer, new FrameLayout.LayoutParams(-1, -1));
 
-        /* ---- 底部提示条 ---- */
-        tip = new TextView(this);
-        tip.setText("  GitHub 授权中 · 已登录 GitHub 将自动完成，成功后本窗口自动关闭  ");
-        tip.setTextColor(Color.WHITE);
-        tip.setTextSize(12);
+        /* 底部提示条 */
+        tip = Ui.tv(this, "  GitHub 授权中 · 已登录将自动完成  ", 12, Color.WHITE);
         tip.setBackgroundColor(0xE6111827);
-        tip.setPadding(20, 24, 20, 24);
+        tip.setPadding(Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10));
         root.addView(tip, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
         setContentView(root);
         startAuthFlow();
     }
 
-    private void showTip(String text) {
-        h.post(() -> { if (tip != null) tip.setText("  " + text + "  "); });
+    /* ================= 回调拦截（修 state 竞速） ================= */
+
+    /** @return true = 已拦截（阻止页面加载并自行交换） */
+    private boolean interceptCallback(String url) {
+        if (done || exchanging || url == null) return false;
+        try {
+            java.net.URL u = new java.net.URL(url);
+            if (siteHost == null || siteHost.isEmpty()) return false;
+            if (!u.getHost().equalsIgnoreCase(siteHost)) return false;
+            String path = u.getPath();
+            if (path == null || !path.startsWith("/oauth/")) return false;
+            String provider = path.substring("/oauth/".length());
+            if (provider.contains("/")) provider = provider.substring(0, provider.indexOf('/'));
+            if (!provider.matches("[a-zA-Z0-9_-]{1,32}")) return false;
+
+            String q = u.getQuery();
+            String code = param(q, "code"), state = param(q, "state");
+            if (code.isEmpty()) return false;
+
+            exchanging = true;
+            showTip("正在交换授权凭证…");
+            final String fp = provider, fc = code, fs = state;
+            new Thread(() -> exchange(fp, fc, fs), "oauth-exchange").start();
+            return true;    // 阻止 WebView 加载该 URL —— SPA 不会启动，不会抢消费 flow_token
+        } catch (Exception e) { return false; }
     }
 
-    /** WebView 主帧加载失败 / 前置请求失败：展示明确错误 + 重试按钮 */
-    private void showLoadError(String detail) {
-        if (done || isFinishing()) return;
+    private static String param(String query, String key) {
+        if (query == null) return "";
+        for (String kv : query.split("&")) {
+            int i = kv.indexOf('=');
+            if (i <= 0) continue;
+            if (kv.substring(0, i).equals(key)) {
+                try { return java.net.URLDecoder.decode(kv.substring(i + 1), "UTF-8"); }
+                catch (Exception e) { return kv.substring(i + 1); }
+            }
+        }
+        return "";
+    }
+
+    /** OkHttp 直接换 bundle（带上 WebView 的站点 Cookie，等价于同源 fetch） */
+    private void exchange(String provider, String code, String state) {
+        Response resp = null;
+        String err = null;
+        try {
+            OkHttpClient c = withProxy(new OkHttpClient.Builder()
+                    .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build(),
+                    new Store(this).config().optJSONObject("proxy"));
+            Request.Builder rb = new Request.Builder()
+                    .url(baseUrl + "/api/oauth/" + provider
+                            + "?code=" + URLEncoder.encode(code, "UTF-8")
+                            + "&state=" + URLEncoder.encode(state == null ? "" : state, "UTF-8"))
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 16) Mobile Safari/537.36");
+            String ck = cookieOf(baseUrl);
+            if (!ck.isEmpty()) rb.header("Cookie", ck);
+            resp = c.newCall(rb.build()).execute();
+            int http = resp.code();
+            String body = resp.body() != null ? resp.body().string() : "";
+            if (body.trim().isEmpty()) err = "站点返回空响应（HTTP " + http + "）";
+            else {
+                final String fb = body;
+                h.post(() -> handleBundle(fb));
+                return;
+            }
+        } catch (Exception e) {
+            err = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : (": " + e.getMessage()));
+        } finally {
+            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
+        }
+        final String fe = err;
         h.post(() -> {
-            if (done || isFinishing()) return;
-            if (boot != null) boot.setVisibility(View.GONE);
-            if (wv != null) wv.setVisibility(View.GONE);
-            if (errMsg != null) errMsg.setText(detail
-                    + "\n\n常见原因：\n· 站点限流（429），稍等几分钟再试\n· 本地代理未开启或未放行本应用\n· GitHub 直连被阻断（需开 VPN）");
-            if (errorLayer != null) errorLayer.setVisibility(View.VISIBLE);
-            showTip("授权准备失败 · 可点重试");
+            exchanging = false;
+            showLoadError("授权交换失败: " + fe);
         });
     }
 
-    /** WebView 挂本地 SOCKS 代理；挂载完成（或跳过）后回调 then */
-    private void applyProxyThen(Runnable then) {
-        if (proxyApplied) { then.run(); return; }
-        JSONObject proxy;
-        try { proxy = new Store(this).config().optJSONObject("proxy"); } catch (Exception e) { proxy = null; }
-        final boolean enabled = proxy != null && proxy.optBoolean("enabled");
-        if (!enabled || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            proxyApplied = true;
-            showTip("未启用代理 · 若 GitHub 打不开请到设置里配代理");
-            then.run();
-            return;
+    private void handleBundle(String json) {
+        if (done) return;
+        try {
+            JSONObject r = new JSONObject(json);
+            JSONObject d = r.optJSONObject("data");
+            if (r.optBoolean("success") && d != null) {
+                String token = d.optString("access_token", d.optString("accessToken", ""));
+                if (!token.isEmpty()) { finishOk(d, token); return; }
+            }
+            String msg = r.optString("message", "交换失败");
+            exchanging = false;
+            showLoadError("授权失败: " + msg);
+        } catch (Exception e) {
+            exchanging = false;
+            showLoadError("授权响应解析失败");
         }
-        final String host = proxy.optString("host", "127.0.0.1");
-        final int port = proxy.optInt("port", 10808);
-        new Thread(() -> {
-            boolean reachable = false;
-            try { // 探测本地代理端口，避免挂上死代理全断
-                java.net.Socket sk = new java.net.Socket();
-                sk.connect(new java.net.InetSocketAddress(host, port), 1500);
-                reachable = true; sk.close();
-            } catch (Exception ignored) {}
-            final boolean use = reachable;
-            h.post(() -> {
-                if (done || isFinishing()) return;
-                proxyApplied = true;
-                if (!use) {
-                    showTip("未检测到本地代理 " + host + ":" + port + " · 若加载失败请开 VPN 后重试");
-                    then.run();
-                    return;
-                }
-                try {
-                    ProxyConfig pc = new ProxyConfig.Builder()
-                            .addProxyRule("socks5://" + host + ":" + port)
-                            .addDirect()
-                            .build();
-                    ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {
-                        showTip("已挂载本地代理 " + host + ":" + port + " · GitHub 授权中");
-                        then.run();
-                    });
-                } catch (Exception e) { then.run(); }
-            });
-        }, "auth-proxy").start();
     }
 
-    /** 加载 GitHub authorize 页 */
-    private void loadAuthUrl(String clientId, String state) {
-        String authUrl = "https://github.com/login/oauth/authorize?client_id=" + urlEncode(clientId)
-                + "&state=" + urlEncode(state) + "&scope=user:email";
-        if (wv != null) wv.loadUrl(authUrl);
+    /* ================= 自动填充 ================= */
+
+    private void maybeFill(String url) {
+        if (done || filled || url == null || url.startsWith("about:")) return;
+        if (credAccount.isEmpty() && credPassword.isEmpty()) return;   // 无凭据不注入
+        /* 只在登录相关页注入（GitHub 登录/2FA 页、站点登录页） */
+        String u = url.toLowerCase(java.util.Locale.US);
+        boolean loginish = u.contains("github.com/login") || u.contains("/sessions")
+                || u.contains("two-factor") || u.contains("/login") || u.contains("/signin")
+                || u.contains("/register") || u.contains("/oauth/authorize");
+        if (!loginish) return;
+        filled = true;
+        try {
+            wv.evaluateJavascript(AuthFillJs.render(credAccount, credPassword, credOtp), null);
+            showTip(credHasOtp ? "已注入账号密码与 2FA 动态码" : "已注入账号密码（该账号无 2FA）");
+        } catch (Exception ignored) {}
+        /* 允许后续页面（如 2FA 页）再次注入 */
+        h.postDelayed(() -> filled = false, 2500);
     }
 
-    /** 第一步：拿 clientId + flow_token；第二步：打开官方 authorize URL */
+    /* ================= 授权流程 ================= */
+
     private void startAuthFlow() {
-        /* 先把 WebView 代理挂好，再跑 OkHttp 请求（两者独立，但顺序统一便于提示） */
         applyProxyThen(() -> new Thread(this::authFlowNetwork, "auth-flow").start());
     }
 
     private void authFlowNetwork() {
         String state = null, err = null, clientId = "";
         try {
-            JSONObject proxy = new Store(this).config().optJSONObject("proxy");
-            OkHttpClient base = new OkHttpClient.Builder()
-                    .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build();
-            OkHttpClient c = withProxy(base, proxy);
+            Store store = new Store(this);
+            OkHttpClient c = withProxy(new OkHttpClient.Builder()
+                    .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build(),
+                    store.config().optJSONObject("proxy"));
 
-            /* 1) 站点 clientId + 顺手缓存站点 turnstileSiteKey（失败不阻塞） */
+            /* 1) clientId + 顺手缓存站点 turnstileSiteKey / quota 单位 */
             try {
                 JSONObject st = getJson(c, baseUrl + "/api/status");
                 JSONObject d = st == null ? null : st.optJSONObject("data");
                 if (d != null) {
                     clientId = d.optString("github_client_id", "");
                     String tsk = d.optString("turnstile_site_key", "");
-                    if (!tsk.isEmpty() && siteKey != null)
-                        new Store(this).putSiteMeta(siteKey, "turnstileSiteKey", tsk);
+                    if (!tsk.isEmpty() && siteKey != null) store.putSiteMeta(siteKey, "turnstileSiteKey", tsk);
                     long unit = d.optLong("quota_per_unit", 0);
-                    if (unit > 0 && siteKey != null)
-                        new Store(this).putSiteMeta(siteKey, "quotaPerUnit", unit);
+                    if (unit > 0 && siteKey != null) store.putSiteMeta(siteKey, "quotaPerUnit", unit);
                 }
             } catch (Exception ignored) {}
 
@@ -332,7 +363,7 @@ public class AuthActivity extends Activity {
                     String body = resp.body() != null ? resp.body().string() : "";
                     if (code == 429) {
                         String ra = resp.header("Retry-After", "");
-                        err = "站点限流（429）" + (ra.isEmpty() ? "" : "，服务端建议等待 " + ra + " 秒");
+                        err = "站点限流（429）" + (ra.isEmpty() ? "" : "，建议等待 " + ra + " 秒");
                         if (attempt < 2) { try { Thread.sleep(4000L * (attempt + 1)); } catch (Exception ignored) {} continue; }
                         break;
                     }
@@ -372,7 +403,9 @@ public class AuthActivity extends Activity {
                 AlphaAnimation a = new AlphaAnimation(0f, 1f);
                 a.setDuration(220);
                 wv.startAnimation(a);
-                loadAuthUrl(cid, st2);
+                String authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(cid)
+                        + "&state=" + enc(st2) + "&scope=user:email";
+                wv.loadUrl(authUrl);
             });
         } catch (Throwable t) {
             final String er = "授权准备异常: " + t.getMessage();
@@ -380,72 +413,6 @@ public class AuthActivity extends Activity {
         }
     }
 
-    /** GET JSON（自动 close，失败返回 null） */
-    private static JSONObject getJson(OkHttpClient c, String url) {
-        Response rs = null;
-        try {
-            rs = c.newCall(new Request.Builder().url(url)
-                    .header("User-Agent", "Mozilla/5.0")
-                    .header("Accept", "application/json").build()).execute();
-            if (rs.code() != 200) return null;
-            String body = rs.body() != null ? rs.body().string() : "";
-            if (body.trim().isEmpty()) return null;
-            return new JSONObject(body);
-        } catch (Exception e) { return null; }
-        finally { if (rs != null) try { rs.close(); } catch (Exception ignored) {} }
-    }
-
-    private static OkHttpClient withProxy(OkHttpClient base, JSONObject proxy) {
-        if (proxy != null && proxy.optBoolean("enabled")) {
-            try {
-                final String host = proxy.optString("host", "127.0.0.1");
-                final int port = proxy.optInt("port", 10808);
-                /* 代理端口不可达就直连，避免整条链路挂死 */
-                java.net.Socket sk = new java.net.Socket();
-                sk.connect(new java.net.InetSocketAddress(host, port), 1200);
-                sk.close();
-                java.net.Proxy p = new java.net.Proxy(java.net.Proxy.Type.SOCKS,
-                        new java.net.InetSocketAddress(host, port));
-                return base.newBuilder().proxy(p).build();
-            } catch (Exception ignored) {}
-        }
-        return base;
-    }
-
-    /** GitHub 回调落地站点域 /oauth/ 路径时，注入脚本主动交换拿 bundle */
-    private void maybeExchange(WebView v, String url) {
-        if (done || url == null) return;
-        try {
-            java.net.URL u = new java.net.URL(url);
-            if (siteHost == null || siteHost.isEmpty()) return;
-            if (!u.getHost().equalsIgnoreCase(siteHost)) return;
-            String path = u.getPath();
-            if (path == null || !path.startsWith("/oauth/")) return;
-            String provider = path.substring("/oauth/".length());
-            if (provider.contains("/")) provider = provider.substring(0, provider.indexOf('/'));
-            if (provider.isEmpty()) return;
-            /* provider 来自站点自身回调路径，仍做白名单校验防注入 */
-            if (!provider.matches("[a-zA-Z0-9_-]{1,32}")) return;
-
-            final String js =
-                "(async()=>{try{" +
-                "const p=new URLSearchParams(location.search);" +
-                "const code=p.get('code'),state=p.get('state');" +
-                "if(!code){window.JustSign.onSession(JSON.stringify({success:false,message:'回调缺少 code'}));return;}" +
-                "const r=await fetch('/api/oauth/" + provider + "?code='+encodeURIComponent(code)+'&state='+encodeURIComponent(state||''),{headers:{'Accept':'application/json'},credentials:'include'});" +
-                "let j=null;try{j=await r.json()}catch(e){}" +
-                "if(!j){window.JustSign.onSession(JSON.stringify({success:false,message:'交换响应异常 HTTP '+r.status}));return;}" +
-                "window.JustSign.onSession(JSON.stringify(j));" +
-                "}catch(e){window.JustSign.onSession(JSON.stringify({success:false,message:String(e)}));}})()";
-            h.postDelayed(() -> { if (!done && wv != null) wv.evaluateJavascript(js, null); }, 400);
-        } catch (Exception ignored) {}
-    }
-
-    private static String urlEncode(String s2) {
-        try { return URLEncoder.encode(s2 == null ? "" : s2, "UTF-8"); } catch (Exception e) { return s2 == null ? "" : s2; }
-    }
-
-    /** 新版: user.username；老版: user.login */
     private void finishOk(JSONObject bundle, String token) {
         if (done) return;
         done = true;
@@ -464,10 +431,10 @@ public class AuthActivity extends Activity {
                     .put("updatedAt", System.currentTimeMillis());
             if (alias != null && !alias.isEmpty()) patch.put("alias", alias);
             if (login != null) patch.put("githubAccount", login);
+            if (credentialId != null && !credentialId.isEmpty()) patch.put("credentialId", credentialId);
 
             JSONObject rec = store.findAccount(accountKey);
             if (rec == null) {
-                /* 账号尚未创建（异常路径）：建全量记录 */
                 rec = new JSONObject().put("key", accountKey);
                 java.util.Iterator<String> it = patch.keys();
                 while (it.hasNext()) { String k = it.next(); rec.put(k, patch.get(k)); }
@@ -475,7 +442,6 @@ public class AuthActivity extends Activity {
             } else {
                 store.patchAccount(accountKey, patch);
             }
-            /* GitHub 用户名全局持久化：添加其他站点账号时自动预填 */
             if (login != null) {
                 try {
                     JSONObject cfg = store.config();
@@ -484,6 +450,9 @@ public class AuthActivity extends Activity {
                 } catch (Exception ignored) {}
             }
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
+            store.opLog(siteKey, accountKey, "授权", "ok",
+                    "授权成功" + (login == null ? "" : (" · " + login)),
+                    "token 有效 " + fmtMin(TokenKeeper.remainMinutes(token)) + " 分钟", "user");
 
             Intent out = new Intent();
             out.putExtra("ok", true);
@@ -493,6 +462,106 @@ public class AuthActivity extends Activity {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
         }
         finish();
+    }
+
+    private static String fmtMin(double m) {
+        return m < 0 ? "?" : String.format(java.util.Locale.US, "%.0f", m);
+    }
+
+    /* ================= 代理 / 工具 ================= */
+
+    private void applyProxyThen(Runnable then) {
+        if (proxyApplied) { then.run(); return; }
+        JSONObject proxy;
+        try { proxy = new Store(this).config().optJSONObject("proxy"); } catch (Exception e) { proxy = null; }
+        final boolean enabled = proxy != null && proxy.optBoolean("enabled");
+        if (!enabled || !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            proxyApplied = true;
+            then.run();
+            return;
+        }
+        final String host = proxy.optString("host", "127.0.0.1");
+        final int port = proxy.optInt("port", 10808);
+        new Thread(() -> {
+            boolean reachable = ProxyDetect.reachable(host, port, 1500);
+            h.post(() -> {
+                if (done || isFinishing()) return;
+                proxyApplied = true;
+                if (!reachable) {
+                    showTip("未检测到代理 " + host + ":" + port + " · 若加载失败请开 VPN");
+                    then.run();
+                    return;
+                }
+                try {
+                    ProxyConfig pc = new ProxyConfig.Builder()
+                            .addProxyRule("socks5://" + host + ":" + port)
+                            .addDirect()
+                            .build();
+                    ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {
+                        showTip("已挂载代理 " + host + ":" + port + " · GitHub 授权中");
+                        then.run();
+                    });
+                } catch (Exception e) { then.run(); }
+            });
+        }, "auth-proxy").start();
+    }
+
+    private static OkHttpClient withProxy(OkHttpClient base, JSONObject proxy) {
+        if (proxy != null && proxy.optBoolean("enabled")) {
+            try {
+                String host = proxy.optString("host", "127.0.0.1");
+                int port = proxy.optInt("port", 10808);
+                if (!ProxyDetect.reachable(host, port, 1200)) return base;
+                return base.newBuilder().proxy(new java.net.Proxy(java.net.Proxy.Type.SOCKS,
+                        new java.net.InetSocketAddress(host, port))).build();
+            } catch (Exception ignored) {}
+        }
+        return base;
+    }
+
+    private static JSONObject getJson(OkHttpClient c, String url) {
+        Response rs = null;
+        try {
+            rs = c.newCall(new Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0")
+                    .header("Accept", "application/json").build()).execute();
+            if (rs.code() != 200) return null;
+            String body = rs.body() != null ? rs.body().string() : "";
+            if (body.trim().isEmpty()) return null;
+            return new JSONObject(body);
+        } catch (Exception e) { return null; }
+        finally { if (rs != null) try { rs.close(); } catch (Exception ignored) {} }
+    }
+
+    private static String cookieOf(String base) {
+        try {
+            String ck = CookieManager.getInstance().getCookie(base);
+            return ck == null ? "" : ck;
+        } catch (Exception e) { return ""; }
+    }
+
+    private static String enc(String s) {
+        try { return URLEncoder.encode(s == null ? "" : s, "UTF-8"); } catch (Exception e) { return s == null ? "" : s; }
+    }
+
+    private void showTip(String text) {
+        h.post(() -> { if (tip != null) tip.setText("  " + text + "  "); });
+    }
+
+    private void showLoadError(String detail) {
+        if (done || isFinishing()) return;
+        h.post(() -> {
+            if (done || isFinishing()) return;
+            if (boot != null) boot.setVisibility(View.GONE);
+            if (wv != null) wv.setVisibility(View.GONE);
+            if (errMsg != null) errMsg.setText(detail
+                    + "\n\n常见原因：\n· 站点限流（429），稍等几分钟\n· 代理未开或未放行本应用\n· GitHub 直连被阻断（需开 VPN）");
+            if (errorLayer != null) errorLayer.setVisibility(View.VISIBLE);
+            showTip("授权准备失败 · 可点重试");
+            try {
+                new Store(this).opLog(siteKey, accountKey, "授权", "err", detail, "", "user");
+            } catch (Exception ignored) {}
+        });
     }
 
     @Override public void onBackPressed() {
