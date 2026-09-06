@@ -343,16 +343,11 @@ public class MainActivity extends Activity {
         for (int i = 0; i < sites.length(); i++) {
             JSONObject site = sites.optJSONObject(i);
             if (site == null) continue;
-            SwipeCard sc = new SwipeCard(this);
-            sc.setCard(siteCard(site));
-            final JSONObject fs = site;
-            sc.setListener(new SwipeCard.Listener() {
-                @Override public void onRefresh() { refreshSite(fs); }
-                @Override public void onDelete() { confirmRemoveSite(fs); }
-            });
+            /* 站点卡片本身不再包 SwipeCard —— 左右滑改为以「账号卡片」为单位，
+             * 否则一次滑动会作用到该站点下的所有账号。站点的刷新/删除走 ⋯ 菜单。 */
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.bottomMargin = Ui.dp(this, 12);
-            boardList.addView(sc, lp);
+            boardList.addView(siteCard(site), lp);
         }
     }
 
@@ -422,7 +417,20 @@ public class MainActivity extends Activity {
                 if (a == null) continue;
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
                 lp.topMargin = Ui.dp(this, i == 0 ? 10 : 8);
-                card.addView(accountItem(site, a), lp);
+                /* 每个账号各自包一层 SwipeCard：右滑只刷这一个账号，
+                 * 左滑只删这一个账号，互不影响。 */
+                SwipeCard sc = new SwipeCard(this);
+                sc.setCard(accountItem(site, a));
+                final JSONObject fa = a;
+                final String fak = a.optString("key");
+                sc.setListener(new SwipeCard.Listener() {
+                    @Override public void onRefresh() {
+                        if (fak.isEmpty()) return;
+                        refreshOne(fak);
+                    }
+                    @Override public void onDelete() { confirmRemoveAccount(fa); }
+                });
+                card.addView(sc, lp);
             }
         }
         return card;
@@ -809,26 +817,15 @@ singleBusy = true;
                 return;
             }
             final String m = msg == null ? "" : msg;
-            /* 后台跑不通 → 转可见兜底。
-             * 注意：人机验证类失败不再跳转 —— 这批站都是「登录即签到」，
-             * 可见页跑的是同一套 JS，Turnstile 同样过不去，只会再白等 60 秒，
-             * 用户看到的就是「跳出一个页面、提示等待人机验证、最后仍失败」。
-             * 真正该做的是提示已登录即得（奖励可能为 0）并刷新额度确认。 */
-            boolean envFail = m.startsWith("net::") || m.contains("超时") || m.contains("HTTP")
-                    || m.contains("加载失败") || m.contains("注入失败");
-            if (!envFail) {
-                boolean cap = m.contains("人机验证") || m.contains("手动确认");
-                toast(cap ? "人机验证未通过；该站登录即发奖励，正在刷新额度核对"
-                          : (m.isEmpty() ? "签到失败" : m));
-                /* 无条件刷新：登录动作可能已让额度变化，让用户看到真实数字 */
-                applyCheckinResult(key, new JSONObject());
-                render();
-                return;
-            }
-            Intent it = new Intent(this, CheckinActivity.class);
-            it.putExtra("siteKey", sk);
-            it.putExtra("accountKey", key);
-            startActivityForResult(it, REQ_CHECKIN);
+            /* 弹窗政策（对齐 just 站流程）：刷新和签到一律纯后台，失败绝不弹页。
+             * 可见兜底页跑的是同一套 JS，结果必然相同 —— 跳转只会打断用户，
+             * 表现为「突然跳出一个页面、等待、最后仍失败」。失败统一：toast 说明
+             * 原因 + 刷新额度核对（登录动作可能已让额度变化）。 */
+            boolean cap = m.contains("人机验证") || m.contains("手动确认");
+            toast(cap ? "人机验证未通过；该站登录即发奖励，正在刷新额度核对"
+                      : (m.isEmpty() ? "签到失败" : m));
+            applyCheckinResult(key, new JSONObject());   // 无条件刷新三额度
+            render();
         });
     }
 
@@ -897,8 +894,13 @@ singleBusy = true;
 
     /** status() 结果 → 账号 patch（lastStatus + 今日签到徽章） */
     private JSONObject buildStatusPatch(JSONObject st) throws Exception {
-        JSONObject patch = new JSONObject().put("lastStatus", st);
-        if (st.optBoolean("todayChecked", false)) {
+        JSONObject patch = new JSONObject();
+        /* 429/非 200：额度没取到，保留旧 lastStatus（避免显示成 0 / 假数据）。
+         * 只有真正拿到 200 才覆盖额度。 */
+        if (st != null && st.optInt("http", 0) == 200) {
+            patch.put("lastStatus", st);
+        }
+        if (st != null && st.optBoolean("todayChecked", false)) {
             JSONObject lc = new JSONObject()
                     .put("date", Engine.todayStr())
                     .put("time", System.currentTimeMillis());
@@ -1065,10 +1067,11 @@ singleBusy = true;
         final String ak = acc.optString("key");
         final String al = acc.optString("alias");
         final String cid = acc.optString("credentialId", "");
-
-        /* 优化：先尝试纯后台静默授权（利用系统现有的 GitHub 登录会话），
-           成功则完全不弹任何页面；只有 GitHub 会话过期确实需要用户登录时才弹窗 */
+        busyBegin("正在授权 " + al + "…");
+        /* 先试纯后台静默授权（复用系统 GitHub 会话）；身份不符 / 需要登录 / 2FA
+         * 时 needUi=true，才拉起可见 AuthActivity 让用户手动完成。 */
         SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
+            busyEnd();
             if (ok) {
                 new Store(this).opLog(sk, ak, "授权", "ok",
                         "凭据已自动后台交换成功" + (user == null || user.isEmpty() ? "" : (" · " + user)), "", "auto");
@@ -1076,7 +1079,13 @@ singleBusy = true;
                 render();
                 return;
             }
-            /* 后台无法完成（需要人工交互/登录/2FA）→ 才拉起可见 AuthActivity 界面 */
+            if (needUi && msg != null && !msg.isEmpty()) {
+                /* 典型场景：WebView 里登录的是另一个 GitHub 账号（身份不符）。
+                 * 把原因明确告诉用户，授权页打开后他知道要去切换账号。 */
+                toast(msg);
+                new Store(this).opLog(sk, ak, "授权", "info", msg, "转入手动授权", "auto");
+            }
+            /* 后台无法完成 → 拉起可见 AuthActivity */
             Intent it = new Intent(this, AuthActivity.class);
             it.putExtra("siteKey", sk);
             it.putExtra("accountKey", ak);
@@ -1085,7 +1094,6 @@ singleBusy = true;
             startActivityForResult(it, REQ_AUTH);
         });
     }
-
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         Store store = new Store(this);

@@ -51,11 +51,10 @@ public class SwipeCard extends FrameLayout {
 
     public SwipeCard(Context c) {
         super(c);
-        thresholdPx = Ui.dp(c, 80);
-        backPx = Ui.dp(c, 40);
-        actionWidthPx = Ui.dp(c, 80);
+        thresholdPx = Ui.dp(c, 56);         // 原 80dp 太苛刻：滑一段距离未到阈值就弹回，很难操作
+        backPx = Ui.dp(c, 28);              // 归位阈值同步放低
+        actionWidthPx = Ui.dp(c, 80);       // 删除板宽度不变（停靠位）
         touchSlop = ViewConfiguration.get(c).getScaledTouchSlop();
-
         int r = Ui.dp(c, 12);
 
         /* ---- 底层左：右滑刷新提示 ---- */
@@ -116,7 +115,9 @@ public class SwipeCard extends FrameLayout {
             case MotionEvent.ACTION_MOVE: {
                 float dx = e.getX() - downX;
                 float dy = e.getY() - downY;
-                if (!dragging && Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.4f) {
+                /* 1.15 倍：原 1.4 倍对斜向滑动太苛刻，稍微带点纵向就永久放弃，
+                 * 表现为「滑一段就弹回原位」。拦截后卡死跟随手指。 */
+                if (!dragging && Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.15f) {
                     dragging = true;
                     lastX = e.getX();
                     return true;                    // 判定为横滑，开始拦截
@@ -139,7 +140,7 @@ public class SwipeCard extends FrameLayout {
                 float dx = e.getX() - downX;
                 if (!dragging) {
                     float dy = e.getY() - downY;
-                    if (Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.4f) dragging = true;
+                    if (Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.15f) dragging = true;
                     else return true;
                 }
                 float base = docked ? -actionWidthPx : 0;

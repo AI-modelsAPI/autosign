@@ -236,7 +236,7 @@ public final class CheckinJs {
         "  finish(true,true,c1.ok?c1.reward:0,c1.ok&&c1.rewardKnown,'今日已签到');return;}" +
         "if(st1===401||(AUTHBAD.test(m1)&&!NEEDCAP.test(m1))){" +
         "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        "if(st1===429){finish(false,false,0,false,'站点限流（429），请稍后再试');return;}" +
+        "if(st1===429){finish(false,false,0,false,'站点限流（429），代理节点可能被拦，请换节点后重试');return;}" +
         /* 第 3 步：需要人机验证 */
         "if(NEEDCAP.test(m1)||st1===403||TS_ON){" +
         "  if(!sitekey){finish(false,false,0,false,'需要人机验证，但站点未返回 siteKey（请点刷新后重试）');return;}" +

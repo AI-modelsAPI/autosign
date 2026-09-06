@@ -50,24 +50,60 @@ public class Engine {
 
     /** 最近一次网络失败原因（供错误提示带出真实原因） */
     private volatile String lastError = "";
-
+    /** 429（WAF/限流）自动换端口的冷却：60s 内不重复切换，避免来回横跳 */
+    private static final long PROXY_SWITCH_COOLDOWN_MS = 60000L;
+    private volatile long lastProxySwitchAt = 0L;
     public Engine(Context c) { store = new Store(c); ctx = c.getApplicationContext(); }
-
     /* ================= HTTP ================= */
-
     private JSONObject call(JSONObject site, String token, String method, String path) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
         if (base.isEmpty()) throw new Exception("站点 baseUrl 为空");
         String url = base + path;
-
         lastError = "";
         JSONObject r = attempt(url, token, method, buildClient(useProxy, proxy));
+        /* 429 = 当前代理节点被 WAF/限流盯上。自动探测本机其它存活代理端口，
+         * 找到就持久化切过去并重试一次（60s 冷却防横跳）。 */
+        if (r != null && r.optInt("http") == 429 && useProxy) {
+            JSONObject switched = switchToBackupProxy(proxy);
+            if (switched != null) {
+                store.opLog("", "", "代理", "info",
+                        "429 触发换代理节点", switched.optString("host") + ":" + switched.optInt("port"), "auto");
+                r = attempt(url, token, method,
+                        buildClient(true, store.config().optJSONObject("proxy")));
+            }
+        }
         if (r == null && useProxy) r = attempt(url, token, method, plain);
         if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
                 + (lastError.isEmpty() ? "" : ": " + lastError));
         return r;
+    }
+    /** 429 后探测其它存活本地代理端口并持久化切换；无可用备用返回 null */
+    private JSONObject switchToBackupProxy(JSONObject cur) {
+        long now = System.currentTimeMillis();
+        if (now - lastProxySwitchAt < PROXY_SWITCH_COOLDOWN_MS) return null;
+        lastProxySwitchAt = now;
+        try {
+            String curHost = cur.optString("host", "127.0.0.1");
+            int curPort = cur.optInt("port", 10808);
+            java.util.ArrayList<JSONObject> list = ProxyDetect.scan(ctx);
+            for (JSONObject p : list) {
+                String h = p.optString("host", "");
+                int port = p.optInt("port", 0);
+                if (port <= 0 || !p.optBoolean("alive", false)) continue;
+                if (h.equals(curHost) && port == curPort) continue;  // 不是备用
+                JSONObject cfg = store.config();
+                JSONObject pc = cfg.optJSONObject("proxy");
+                if (pc == null) pc = new JSONObject();
+                pc.put("enabled", true).put("type", "socks5")
+                        .put("host", h).put("port", port);
+                cfg.put("proxy", pc);
+                store.saveConfig(cfg);
+                return pc;
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     /**
@@ -161,7 +197,7 @@ public class Engine {
     }
 
     private static String httpHint(int code) {
-        if (code == 429) return "站点限流（429），请稍后再试";
+        if (code == 429) return "站点限流（429），当前代理节点可能已被 WAF 拦截，请换代理节点后重试";
         if (code == 401) return "授权已过期（401），GitHub 会话失效需手动登录一次";
         if (code == 403) return "站点拒绝访问（403），可能触发人机验证";
         if (code >= 500) return "站点服务异常（" + code + "）";
