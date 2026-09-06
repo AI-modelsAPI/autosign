@@ -496,9 +496,6 @@ public class AuthActivity extends Activity {
                     store.saveConfig(cfg);
                 } catch (Exception ignored) {}
             }
-            /* 可见授权成功：保存该账号的 GitHub 会话快照，
-             * 供 SilentAuth 后台交换前 restore，避免轮流刷新时反复手动授权 */
-            GithubSession.save(store, accountKey, GithubSession.snapshot());
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
             store.opLog(siteKey, accountKey, "授权", "ok",
                     "授权成功" + (login == null ? "" : (" · " + login)), "", "user");

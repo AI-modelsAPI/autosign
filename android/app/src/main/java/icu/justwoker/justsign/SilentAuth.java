@@ -255,10 +255,6 @@ public final class SilentAuth {
 
                 applyProxyThen(() -> {
                     if (done || wv == null) return;
-                    /* Cookie 隔离：先把 github.com 会话切到本账号的快照。
-                     * 无快照（从未授权过）则保持现状，可能触发一次手动授权。 */
-                    String snap = GithubSession.load(store, accountKey);
-                    if (!snap.isEmpty()) GithubSession.restore(snap);
                     String authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(clientId)
                             + "&state=" + enc(state) + "&scope=user:email";
                     wv.loadUrl(authUrl);
@@ -312,75 +308,18 @@ public final class SilentAuth {
                             if (login.isEmpty()) login = usr.optString("login", "");
                         }
                         if (!token.isEmpty()) {
-                            /* 身份校验（防止串号）：本账号登记的 GitHub 用户 vs
-                             * 站点响应里这次交换实际登录的用户。
-                             * 一致 → 落库（正确的账号）；不一致 → 拒绝落库，
-                             * needUi=true 转可见授权页，让用户切换到正确账号。
-                             * 这是「选哪个账号就换哪个账号」的保障：
-                             * 若后台 WebView 用的是另一个 GitHub 会话，绝不能把
-                             * 那个账号的 token 写进这个账号（会导致两账号额度相同）。 */
-                            String want = expectUser();
-                            boolean match = want.isEmpty() || login == null || login.isEmpty()
-                                    || want.trim().equalsIgnoreCase(login.trim());
-                            if (!match) {
-                                try {
-                                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                                            "GitHub 身份不符，已拒绝写入",
-                                            "期望 " + want + "，实际登录 " + login
-                                                    + "；请在授权页切换到该账号", "auto");
-                                } catch (Exception ignored) {}
-                                final String bad = login;
-                                main.post(() -> finish(false, true, bad,
-                                        "当前 GitHub 会话是 " + bad + "，不是该账号的 "
-                                                + want + "；请在授权页切换后继续"));
-                                return;
-                            }
-                            /* 匹配成功：把本次（已是该账号的）会话 Cookie 快照存下来，
-                             * 供以后 SilentAuth 后台交换前 restore —— 轮流刷新多账号时
-                             * 每个账号各用各的会话，不再需要频繁手动授权。 */
-                            GithubSession.save(store, accountKey, GithubSession.snapshot());
                             saveToken(token, login);
                             final String fl = login;
                             main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
                             return;
                         }
-                        /* 站点成功但没给 token：把站点说了什么记下来 */
-                        try {
-                            store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                                    "站点响应缺少 token", body.length() > 300 ? body.substring(0, 300) : body, "auto");
-                        } catch (Exception ignored) {}
-                        main.post(() -> { exchanging = false; finish(false, true, null, "站点响应缺少 token"); });
-                        return;
                     }
-                    /* 站点明确失败（success=false）：把站点原始理由（年龄限制/风控等）记下来 */
-                    String reason = r.optString("message", r.optString("error", body));
-                    if (reason.length() > 200) reason = reason.substring(0, 200);
-                    try {
-                        store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                                "站点拒绝交换: " + reason, "HTTP " + resp.code(), "auto");
-                    } catch (Exception ignored) {}
-                    final String rr = reason;
-                    main.post(() -> { exchanging = false; finish(false, true, null, "站点拒绝: " + rr); });
-                    return;
                 }
-                try {
-                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                            "站点返回空响应", "HTTP " + resp.code(), "auto");
-                } catch (Exception ignored) {}
-                final int emptyCode = resp.code();
-                main.post(() -> { exchanging = false; finish(false, true, null, "站点返回空响应 (HTTP " + emptyCode + ")"); });
-                return;
-            } catch (Exception e) {
-                String em = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                try {
-                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                            "交换请求异常: " + (em.length() > 150 ? em.substring(0, 150) : em), "", "auto");
-                } catch (Exception ignored) {}
-                main.post(() -> { exchanging = false; finish(false, true, null, "交换请求异常: " + em); });
-                return;
+            } catch (Exception ignored) {
             } finally {
                 if (resp != null) try { resp.close(); } catch (Exception ignored) {}
             }
+            main.post(() -> { exchanging = false; finish(false, true, null, "凭据交换响应失败"); });
         }
 
         private String[] fetchStateAndClient() {
@@ -450,23 +389,6 @@ public final class SilentAuth {
             return null;
         }
 
-        /** 该账号期望的 GitHub 用户名：账号绑定凭据的 githubUser，回退别名；空=不校验 */
-        private String expectUser() {
-            try {
-                JSONObject acc = store.findAccount(accountKey);
-                if (acc == null) return "";
-                String cid = acc.optString("credentialId", "");
-                if (!cid.isEmpty()) {
-                    JSONObject c = store.findCredential(cid);
-                    if (c != null) {
-                        String gu = c.optString("githubUser", "");
-                        if (!gu.isEmpty()) return gu;
-                    }
-                }
-                return acc.optString("alias", "");
-            } catch (Exception e) { return ""; }
-        }
-
         private void saveToken(String token, String login) {
             try {
                 JSONObject patch = new JSONObject()
@@ -500,7 +422,8 @@ public final class SilentAuth {
         private OkHttpClient client() {
             OkHttpClient.Builder b = new OkHttpClient.Builder()
                     .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(20, TimeUnit.SECONDS);
+                    .readTimeout(20, TimeUnit.SECONDS)
+                    .writeTimeout(20, TimeUnit.SECONDS);
             try {
                 JSONObject p = store.config().optJSONObject("proxy");
                 if (p != null && p.optBoolean("enabled")) {
