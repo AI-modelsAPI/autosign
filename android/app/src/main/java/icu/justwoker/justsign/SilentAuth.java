@@ -255,6 +255,10 @@ public final class SilentAuth {
 
                 applyProxyThen(() -> {
                     if (done || wv == null) return;
+                    /* Cookie 隔离：先把 github.com 会话切到本账号的快照。
+                     * 无快照（从未授权过）则保持现状，可能触发一次手动授权。 */
+                    String snap = GithubSession.load(store, accountKey);
+                    if (!snap.isEmpty()) GithubSession.restore(snap);
                     String authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(clientId)
                             + "&state=" + enc(state) + "&scope=user:email";
                     wv.loadUrl(authUrl);
@@ -308,25 +312,33 @@ public final class SilentAuth {
                             if (login.isEmpty()) login = usr.optString("login", "");
                         }
                         if (!token.isEmpty()) {
-                            /* 关键校验：离屏 WebView 复用的是系统当前的 GitHub 会话，
-                             * 它未必是本账号对应的 GitHub 用户。多账号同站时若不校验，
-                             * 后授权的账号会被写入前一个账号的 token —— 表现为
-                             * 两个账号额度、奖励完全相同（实测 JWT sub 均为同一 uid）。
-                             * 身份不符时拒绝落库，交给可见授权页让用户切换账号登录。 */
+                            /* 身份校验（防止串号）：本账号登记的 GitHub 用户 vs
+                             * 站点响应里这次交换实际登录的用户。
+                             * 一致 → 落库（正确的账号）；不一致 → 拒绝落库，
+                             * needUi=true 转可见授权页，让用户切换到正确账号。
+                             * 这是「选哪个账号就换哪个账号」的保障：
+                             * 若后台 WebView 用的是另一个 GitHub 会话，绝不能把
+                             * 那个账号的 token 写进这个账号（会导致两账号额度相同）。 */
                             String want = expectUser();
-                            if (!want.isEmpty() && login != null && !login.isEmpty()
-                                    && !sameUser(want, login)) {
+                            boolean match = want.isEmpty() || login == null || login.isEmpty()
+                                    || want.trim().equalsIgnoreCase(login.trim());
+                            if (!match) {
                                 try {
                                     store.opLog(siteKey, accountKey, "后台凭据交换", "err",
                                             "GitHub 身份不符，已拒绝写入",
                                             "期望 " + want + "，实际登录 " + login
-                                                    + "；需在授权页切换到该账号", "auto");
+                                                    + "；请在授权页切换到该账号", "auto");
                                 } catch (Exception ignored) {}
                                 final String bad = login;
                                 main.post(() -> finish(false, true, bad,
-                                        "当前 GitHub 登录的是 " + bad + "，请手动授权切换到 " + want));
+                                        "当前 GitHub 会话是 " + bad + "，不是该账号的 "
+                                                + want + "；请在授权页切换后继续"));
                                 return;
                             }
+                            /* 匹配成功：把本次（已是该账号的）会话 Cookie 快照存下来，
+                             * 供以后 SilentAuth 后台交换前 restore —— 轮流刷新多账号时
+                             * 每个账号各用各的会话，不再需要频繁手动授权。 */
+                            GithubSession.save(store, accountKey, GithubSession.snapshot());
                             saveToken(token, login);
                             final String fl = login;
                             main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
@@ -408,7 +420,7 @@ public final class SilentAuth {
             return null;
         }
 
-        /** 该账号期望的 GitHub 用户名（来自凭据库 githubUser，回退别名）；空=不校验 */
+        /** 该账号期望的 GitHub 用户名：账号绑定凭据的 githubUser，回退别名；空=不校验 */
         private String expectUser() {
             try {
                 JSONObject acc = store.findAccount(accountKey);
@@ -424,10 +436,7 @@ public final class SilentAuth {
                 return acc.optString("alias", "");
             } catch (Exception e) { return ""; }
         }
-        /** 大小写无关比较 GitHub 用户名 */
-        private static boolean sameUser(String a, String b) {
-            return a != null && b != null && a.trim().equalsIgnoreCase(b.trim());
-        }
+
         private void saveToken(String token, String login) {
             try {
                 JSONObject patch = new JSONObject()
