@@ -450,7 +450,8 @@ public class AuthActivity extends Activity {
                 a.setDuration(220);
                 wv.startAnimation(a);
                 authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(cid)
-                        + "&state=" + enc(st2) + "&scope=user:email";
+                        + "&state=" + enc(st2) + "&scope=user:email"
+                        + (credAccount.isEmpty() ? "" : ("&login=" + enc(credAccount)));
                 reauthTries = 0;
                 wv.loadUrl(authUrl);
             });

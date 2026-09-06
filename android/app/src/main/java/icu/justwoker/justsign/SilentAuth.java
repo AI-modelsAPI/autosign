@@ -255,8 +255,14 @@ public final class SilentAuth {
 
                 applyProxyThen(() -> {
                     if (done || wv == null) return;
+                    /* 关键：GitHub OAuth 支持 login 参数 —— 强制以期望账号授权。
+                     * 若 WebView 里当前登录的是别的 GitHub 账号，GitHub 会要求
+                     * 切换/重新登录到该账号，从根上避免「选 AI-modelsAPI 却用
+                     * zgj19810121 授权」导致的站点年龄校验失败。 */
+                    String want = expectGithubLogin();
                     String authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(clientId)
-                            + "&state=" + enc(state) + "&scope=user:email";
+                            + "&state=" + enc(state) + "&scope=user:email"
+                            + (want.isEmpty() ? "" : ("&login=" + want));
                     wv.loadUrl(authUrl);
                 });
             } catch (Throwable t) {
@@ -398,6 +404,24 @@ public final class SilentAuth {
                 if (login != null && !login.isEmpty()) patch.put("githubAccount", login);
                 store.patchAccount(accountKey, patch);
             } catch (Exception ignored) {}
+        }
+
+        /** 该账号期望的 GitHub 登录名：账号绑定凭据的 githubUser，回退别名；空=无法确定 */
+        private String expectGithubLogin() {
+            try {
+                JSONObject acc = store.findAccount(accountKey);
+                if (acc == null) return "";
+                String cid = acc.optString("credentialId", "");
+                if (!cid.isEmpty()) {
+                    JSONObject c = store.findCredential(cid);
+                    if (c != null) {
+                        String gu = c.optString("githubUser", "");
+                        if (!gu.isEmpty()) return gu;
+                    }
+                }
+                String al = acc.optString("alias", "");
+                return al == null ? "" : al;
+            } catch (Exception e) { return ""; }
         }
 
         private synchronized void finish(boolean ok, boolean needUi, String user, String msg) {
