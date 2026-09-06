@@ -70,6 +70,24 @@ public class Store {
                 }
                 sp.edit().putBoolean("migrated_v2", true).putString("config", cfg.toString()).commit();
             }
+            /* v3：内置站 checkinType 跟随 Catalog 实测值校正（一次性）。
+             * 背景：v0.1.x 把所有站都写成 "manual"，而 manual 被判为 newapi → 会去
+             * POST /api/user/checkin。AgentRouter 一类「登录即得」站没有该路由（404），
+             * 签到必然失败。这里只改 checkinType，账号与其它字段保持不动。 */
+            if (!sp.getBoolean("migrated_v3_kind", false)) {
+                JSONArray sites = cfg.optJSONArray("sites");
+                for (int i = 0; sites != null && i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONObject cat = Catalog.byKey(s.optString("key", ""));
+                    if (cat == null) continue;   // 自定义站不动
+                    String want = cat.optString("checkinType", "");
+                    if (!want.isEmpty() && !want.equals(s.optString("checkinType", ""))) {
+                        s.put("checkinType", want);
+                    }
+                }
+                sp.edit().putBoolean("migrated_v3_kind", true).putString("config", cfg.toString()).commit();
+            }
         } catch (Exception ignored) {}
     }
 

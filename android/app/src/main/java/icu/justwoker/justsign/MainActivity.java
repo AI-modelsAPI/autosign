@@ -11,6 +11,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -46,6 +47,12 @@ public class MainActivity extends Activity {
 
     /* 顶栏 */
     private TextView topSummary, topTotal;
+    /* 常驻忙碌条：纯后台操作时给出可见的文字 + 转圈反馈。
+     * 之前只有 toast 与可关闭的日志弹窗，关掉后界面毫无动静，体验上像卡死。 */
+    private LinearLayout busyBar;
+    private TextView busyText;
+    private ProgressBar busySpin;
+    private int busyDepth = 0;
     /* 内容区 */
     private FrameLayout content;
     private ScrollView boardScroll;
@@ -72,6 +79,7 @@ public class MainActivity extends Activity {
 
         root.addView(buildTopBar(), new LinearLayout.LayoutParams(-1, Ui.dp(this, 56)));
         root.addView(Ui.divider(this, Ui.LINE_SOFT, 0));
+        root.addView(buildBusyBar(), new LinearLayout.LayoutParams(-1, -2));
 
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -97,6 +105,43 @@ public class MainActivity extends Activity {
     }
 
     /* ================= 顶栏 ================= */
+
+    /** 忙碌条：位于顶栏下方，有后台任务时显示「转圈 + 当前动作」，无任务时整条隐藏 */
+    private View buildBusyBar() {
+        busyBar = Ui.row(this);
+        busyBar.setBackgroundColor(0xFFEFF6FF);
+        busyBar.setPadding(Ui.dp(this, 16), Ui.dp(this, 7), Ui.dp(this, 16), Ui.dp(this, 7));
+        busySpin = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        busySpin.setIndeterminate(true);
+        int sz = Ui.dp(this, 14);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(sz, sz);
+        plp.rightMargin = Ui.dp(this, 8);
+        busyBar.addView(busySpin, plp);
+        busyText = Ui.tv(this, "", 11, Ui.BLUE, true);
+        busyBar.addView(busyText, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView log = Ui.tv(this, "查看日志", 11, Ui.BLUE);
+        log.setClickable(true);
+        log.setOnClickListener(v -> LogPopup.show(this));
+        busyBar.addView(log);
+        busyBar.setVisibility(View.GONE);
+        return busyBar;
+    }
+    /** 开始一个可见的后台任务；可嵌套，最后一个结束才收起 */
+    private void busyBegin(String what) {
+        busyDepth++;
+        if (busyBar == null) return;
+        if (busyText != null) busyText.setText(what);
+        busyBar.setVisibility(View.VISIBLE);
+    }
+    /** 更新当前任务文案（如 2/4 进度） */
+    private void busyUpdate(String what) {
+        if (busyText != null && busyDepth > 0) busyText.setText(what);
+    }
+    /** 结束一个任务；降到 0 时收起整条 */
+    private void busyEnd() {
+        if (busyDepth > 0) busyDepth--;
+        if (busyDepth == 0 && busyBar != null) busyBar.setVisibility(View.GONE);
+    }
 
     private View buildTopBar() {
         LinearLayout bar = Ui.row(this);
@@ -322,8 +367,10 @@ public class MainActivity extends Activity {
         /* 站头 */
         LinearLayout head = Ui.row(this);
         LinearLayout info = Ui.col(this);
-        /* 站点名：蓝色 + 外链图标，一眼可见是链接 */
-        TextView name = Ui.textIcon(this, site.optString("name", siteKey), "link", 15, Ui.BLUE, true);
+        /* 站点名：蓝色 + 紧跟名称的右箭头，一眼可见是链接。
+         * 注意宽度必须 WRAP_CONTENT —— info 是纵向容器，默认 MATCH_PARENT 会把
+         * drawableEnd 箭头推到卡片最右侧，与站名分离。 */
+        TextView name = Ui.textIcon(this, site.optString("name", siteKey), "chevron", 15, Ui.BLUE, true);
         name.setClickable(true);
         name.setOnClickListener(v -> {
             String home = site.optString("homeUrl", site.optString("baseUrl", ""));
@@ -331,7 +378,7 @@ public class MainActivity extends Activity {
             try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(home))); }
             catch (Exception e) { toast("无法打开链接"); }
         });
-        info.addView(name);
+        info.addView(name, new LinearLayout.LayoutParams(-2, -2));
         String host = site.optString("baseUrl", "").replaceFirst("^https?://", "");
         TextView meta = Ui.tv(this, host + " · " + Engine.kindLabel(site), 11, Ui.SUB2);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-2, -2);
@@ -551,6 +598,7 @@ public class MainActivity extends Activity {
         if (page != 0) showPage(0);
         LogPopup.autoShow(this);
         bulkBusy = true;
+        busyBegin("一键签到：0/" + targets.size());
         runBulkCheckin(targets, 0, new int[]{0, 0});
     }
 
@@ -558,6 +606,7 @@ public class MainActivity extends Activity {
     private void runBulkCheckin(java.util.ArrayList<String[]> list, int idx, int[] stat) {
         if (idx >= list.size()) {
             bulkBusy = false;
+            busyEnd();
             setTabAction(tabCheckIcon, tabCheckText, "check", "完成", Ui.white());
             h.postDelayed(() -> setTabAction(tabCheckIcon, tabCheckText,
                     "bolt", "签到", Ui.white()), 1200);
@@ -576,6 +625,13 @@ public class MainActivity extends Activity {
         String[] t = list.get(idx);
         final String sk = t[0], ak = t[1], kind = t[2];
         Store store = new Store(this);
+        {   /* 进度写进忙碌条，带站点/账号名，卡住时能看出卡在谁身上 */
+            JSONObject st = store.findSite(sk);
+            JSONObject ac = store.findAccount(ak);
+            String who = (st == null ? sk : st.optString("name", sk))
+                    + (ac == null ? "" : " · " + ac.optString("alias", ""));
+            busyUpdate("一键签到 " + (idx + 1) + "/" + list.size() + "：" + who);
+        }
         if ("newapi".equals(kind)) {
             OffscreenCheckin.run(this, sk, ak, 100, (ok, already, reward, rewardKnown, msg) -> {
                 String sum;
@@ -638,14 +694,23 @@ public class MainActivity extends Activity {
         if (page != 0) showPage(0);
         LogPopup.autoShow(this);
         bulkBusy = true;
+        busyBegin("一键刷新：0/" + targets.size());
         new Thread(() -> {
             Store store = new Store(this);
             int ok = 0, err = 0;
             for (int i = 0; i < targets.size(); i++) {
                 final int n = i + 1;
-                h.post(() -> setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
-                        n + "/" + targets.size(), Ui.BLUE));
                 String[] t = targets.get(i);
+                final String who;
+                JSONObject st0 = store.findSite(t[0]);
+                JSONObject ac0 = store.findAccount(t[1]);
+                who = (st0 == null ? t[0] : st0.optString("name", t[0]))
+                        + (ac0 == null ? "" : " · " + ac0.optString("alias", ""));
+                h.post(() -> {
+                    setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
+                            n + "/" + targets.size(), Ui.BLUE);
+                    busyUpdate("一键刷新 " + n + "/" + targets.size() + "：" + who);
+                });
                 try {
                     JSONObject stt = engine.status(t[1]);
                     store.patchAccount(t[1], buildStatusPatch(stt));
@@ -659,6 +724,7 @@ public class MainActivity extends Activity {
             final int fok = ok, ferr = err;
             h.post(() -> {
                 bulkBusy = false;
+                busyEnd();
                 setTabAction(tabRefreshIcon, tabRefreshText, "check", "完成", Ui.GREEN);
                 h.postDelayed(() -> setTabAction(tabRefreshIcon, tabRefreshText,
                         "refresh", "刷新", Ui.BLUE), 1200);
@@ -704,26 +770,27 @@ public class MainActivity extends Activity {
             return;
         }
 
-        singleBusy = true;
+singleBusy = true;
         if (btn != null) btn.setText("签到中…");
+        busyBegin("正在签到 " + site.optString("name", sk) + "…");
         LogPopup.autoShow(this);
-
         if (!Engine.isAutoCheckin(site)) {
             new Thread(() -> {
                 try {
                     JSONObject r = engine.checkin(key);
                     store.opLog(sk, key, "签到", r.optBoolean("ok") ? "ok" : "err",
                             r.optString("message", ""), "", "user");
-                    h.post(() -> { singleBusy = false; pushLog(store); applyCheckinResult(key, r); render(); });
+                    h.post(() -> { singleBusy = false; busyEnd(); pushLog(store); applyCheckinResult(key, r); render(); });
                 } catch (Exception e) {
                     store.opLog(sk, key, "签到", "err", "签到失败", String.valueOf(e.getMessage()), "user");
-                    h.post(() -> { singleBusy = false; pushLog(store); toast("签到失败: " + e.getMessage()); render(); });
+                    h.post(() -> { singleBusy = false; busyEnd(); pushLog(store); toast("签到失败: " + e.getMessage()); render(); });
                 }
             }).start();
             return;
         }
         OffscreenCheckin.run(this, sk, key, 100, (ok, already, reward, rewardKnown, msg) -> {
             singleBusy = false;
+            busyEnd();
             String sum;
             if (!ok) sum = msg;
             else if (already) sum = (msg == null || msg.isEmpty()) ? "今日已签" : msg;
@@ -830,16 +897,17 @@ public class MainActivity extends Activity {
     }
 
     private void refreshOne(String key) {
+        busyBegin("正在刷新额度…");
         new Thread(() -> {
             Store store = new Store(this);
             try {
                 JSONObject st = engine.status(key);
                 store.patchAccount(key, buildStatusPatch(st));
-                h.post(() -> { pushLog(store); render(); });
+                h.post(() -> { busyEnd(); pushLog(store); render(); });
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
                         "刷新失败", String.valueOf(e.getMessage()), "user");
-                h.post(() -> { pushLog(store); toast("刷新失败: " + e.getMessage()); });
+                h.post(() -> { busyEnd(); pushLog(store); toast("刷新失败: " + e.getMessage()); });
             }
         }).start();
     }

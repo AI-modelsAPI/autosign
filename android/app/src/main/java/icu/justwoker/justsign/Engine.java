@@ -364,6 +364,17 @@ public class Engine {
                .put("message", httpHint(code));
             return out;
         }
+        /* AgentRouter 一类站在 /api/user/self 里直接给 checked_in 布尔，
+         * 这是「登录即签到」最可靠的确证信号，优先采信。 */
+        JSONObject su = dd(self);
+        if (su != null && su.has("checked_in")) {
+            boolean ci = su.optBoolean("checked_in", false);
+            out.put("ok", ci).put("already", ci).put("reward", 0).put("rewardKnown", false)
+               .put("message", ci ? "登录即签到 · 站点已标记今日已签"
+                                  : "站点显示今日未签到，请打开网页登录一次以触发发放");
+            if (ci) markChecked(key, 0, false);
+            return out;
+        }
         out.put("ok", true).put("already", true).put("reward", 0).put("rewardKnown", false)
            .put("message", "登录即签到 · 已保活（该站无签到记录）");
         markChecked(key, 0, false);

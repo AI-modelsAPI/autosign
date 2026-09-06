@@ -57,6 +57,8 @@ public class AuthActivity extends Activity {
     private volatile int reauthTries = 0;
 
     private String credAccount = "", credPassword = "", credOtp = "";
+    /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
+    private boolean stateUseGet = false;
     private boolean credHasOtp = false;
 
     public class Bridge {
@@ -123,13 +125,17 @@ public class AuthActivity extends Activity {
         if (credentialId != null && !credentialId.isEmpty()) {
             JSONObject c = store.findCredential(credentialId);
             if (c != null) {
-                credAccount = c.optString("siteAccount", "");
-                if (credAccount.isEmpty()) credAccount = c.optString("githubUser", "");
+                /* 这里填的是 GitHub 登录页，必须优先用 githubUser；
+                 * siteAccount 只是站内昵称，两者不同名时用它会登录失败。 */
+                credAccount = c.optString("githubUser", "");
+                if (credAccount.isEmpty()) credAccount = c.optString("siteAccount", "");
                 credPassword = store.credPassword(credentialId);
                 credHasOtp = store.credHasTwofa(credentialId);
                 credOtp = credHasOtp ? store.credTwofaCode(credentialId) : "";
             }
         }
+        /* 已探测过的站点形态直接复用，省掉一次注定 404 的 POST */
+        if (siteKey != null) stateUseGet = "get".equals(store.siteMeta(siteKey, "stateMethod", ""));
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
@@ -328,10 +334,19 @@ public class AuthActivity extends Activity {
             boolean autoSubmit = new Store(this).uiPref("autoSubmitLogin", true);
             String otp = credHasOtp ? new Store(this).credTwofaCode(credentialId) : "";
             if (!otp.isEmpty()) credOtp = otp;
-            wv.evaluateJavascript(AuthFillJs.render(credAccount, credPassword, otp, autoSubmit), null);
-            showTip(credHasOtp
-                    ? (autoSubmit ? "已填入账号密码与 2FA，正在自动登录…" : "已注入账号密码与 2FA 动态码")
-                    : (autoSubmit ? "已填入账号密码，正在自动登录…" : "已注入账号密码（该账号无 2FA）"));
+            /* 密码为空是常见故障（卸载重装后 Keystore 密钥销毁 → 密文失效被清空）。
+             * 必须如实告知，否则用户只看到「已填入账号密码」却卡在登录页，无从判断。 */
+            boolean noPwd = credPassword == null || credPassword.isEmpty();
+            wv.evaluateJavascript(AuthFillJs.render(credAccount, credPassword, otp, autoSubmit && !noPwd), null);
+            if (noPwd) {
+                showTip("仅填入账号，未存密码 —— 请手动输入密码，或到「设置 → 凭据库」补录后重试");
+                new Store(this).opLog(siteKey, accountKey, "自动填充", "err",
+                        "凭据库无密码，仅填账号", "别名 " + alias + "：密码为空（卸载重装会清除已存密码，需重新录入）", "user");
+            } else {
+                showTip(credHasOtp
+                        ? (autoSubmit ? "已填入账号密码与 2FA，正在自动登录…" : "已注入账号密码与 2FA 动态码")
+                        : (autoSubmit ? "已填入账号密码，正在自动登录…" : "已注入账号密码（该账号无 2FA）"));
+            }
         } catch (Exception ignored) {}
         h.postDelayed(() -> filled = false, 2500);
     }
@@ -363,12 +378,22 @@ public class AuthActivity extends Activity {
             for (int attempt = 0; attempt < 3 && state == null; attempt++) {
                 Response resp = null;
                 try {
-                    resp = c.newCall(new Request.Builder().url(baseUrl + "/api/oauth/state")
+                    /* 两种站点形态：多数 New API 站用 POST，AgentRouter 一类只认
+                     * GET ?mode=login（POST 直接 404 Invalid URL）。attempt 0 先 POST，
+                     * 之后回退 GET；两者都返回合法 JSON，故不能只靠解析失败来判别。 */
+                    boolean useGet = stateUseGet || attempt > 0;
+                    Request.Builder rb = new Request.Builder()
                             .header("User-Agent", "Mozilla/5.0 (Linux; Android 16) Mobile Safari/537.36")
-                            .header("Accept", "application/json")
-                            .post(RequestBody.create(
-                                    "{\"provider\":\"github\",\"intent\":\"login\"}",
-                                    MediaType.parse("application/json"))).build()).execute();
+                            .header("Accept", "application/json");
+                    if (useGet) {
+                        rb.url(baseUrl + "/api/oauth/state?mode=login").get();
+                    } else {
+                        rb.url(baseUrl + "/api/oauth/state")
+                                .post(RequestBody.create(
+                                        "{\"provider\":\"github\",\"intent\":\"login\"}",
+                                        MediaType.parse("application/json")));
+                    }
+                    resp = c.newCall(rb.build()).execute();
                     int code = resp.code();
                     String body = resp.body() != null ? resp.body().string() : "";
                     if (code == 429) {
@@ -377,6 +402,13 @@ public class AuthActivity extends Activity {
                         if (attempt < 2) { try { Thread.sleep(4000L * (attempt + 1)); } catch (Exception ignored) {} continue; }
                         break;
                     }
+                    /* 该站不支持 POST 此路由：立即改用 GET 重试，并记住形态 */
+                    if (code == 404 && !useGet) {
+                        stateUseGet = true;
+                        if (siteKey != null) store.putSiteMeta(siteKey, "stateMethod", "get");
+                        err = "站点不支持 POST 取授权会话，已改用 GET 重试";
+                        continue;
+                    }
                     if (body.trim().isEmpty()) {
                         err = "站点返回空响应（HTTP " + code + "）";
                         if (attempt < 2) { try { Thread.sleep(2000L); } catch (Exception ignored) {} continue; }
@@ -384,7 +416,11 @@ public class AuthActivity extends Activity {
                     }
                     JSONObject j;
                     try { j = new JSONObject(body); }
-                    catch (Exception pe) { err = "站点响应非 JSON（HTTP " + code + "）"; break; }
+                    catch (Exception pe) {
+                        err = "站点响应非 JSON（HTTP " + code + "）";
+                        if (!useGet) { stateUseGet = true; continue; }
+                        break;
+                    }
                     if (code == 200 && j.optBoolean("success")) {
                         Object d = j.opt("data");
                         if (d instanceof String) state = (String) d;
