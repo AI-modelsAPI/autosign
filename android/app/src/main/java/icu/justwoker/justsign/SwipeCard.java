@@ -120,6 +120,10 @@ public class SwipeCard extends FrameLayout {
                 if (!dragging && Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.15f) {
                     dragging = true;
                     lastX = e.getX();
+                    /* 关键：立刻禁止父容器（ScrollView）继续拦截 —— 否则右滑途中
+                     * 一旦纵向位移稍大，ScrollView 会抢走事件并向本卡片发 ACTION_CANCEL，
+                     * 表现就是「滑一段不松手自动归位」。这里有且仅有 owner 能移动卡片。 */
+                    if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
                     return true;                    // 判定为横滑，开始拦截
                 }
                 return false;
@@ -134,14 +138,17 @@ public class SwipeCard extends FrameLayout {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getX(); downY = e.getY(); lastX = downX;
+                dragging = false;
                 return true;
 
             case MotionEvent.ACTION_MOVE: {
                 float dx = e.getX() - downX;
                 if (!dragging) {
                     float dy = e.getY() - downY;
-                    if (Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.15f) dragging = true;
-                    else return true;
+                    if (Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.15f) {
+                        dragging = true;
+                        if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                    } else return true;
                 }
                 float base = docked ? -actionWidthPx : 0;
                 float target = base + dx;
@@ -168,6 +175,7 @@ public class SwipeCard extends FrameLayout {
                 float tx = card.getTranslationX();
                 boolean wasDragging = dragging;
                 dragging = false;
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
 
                 if (!wasDragging) {
                     /* 未拖动：若处于停靠态，点卡片本体 = 归位 */
