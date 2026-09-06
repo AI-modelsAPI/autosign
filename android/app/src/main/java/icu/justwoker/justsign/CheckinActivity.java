@@ -49,8 +49,10 @@ public class CheckinActivity extends Activity {
     private Handler h;
     private WebView wv;
     private TextView tip;
+    private LinearLayout maskBox;          // 顶层白色遮罩（人机验证需要交互时移除）
     private String baseUrl, accountKey, siteKey;
     private volatile boolean fired = false, finished = false;
+    private volatile boolean unmasked = false;
     private Runnable watchdog;
 
     /* 账号快照：注入前读一次 */
@@ -119,7 +121,7 @@ public class CheckinActivity extends Activity {
         tip.setTextColor(0xFF0F172A); tip.setTextSize(15); tip.setTypeface(Typeface.DEFAULT_BOLD);
         tip.setGravity(Gravity.CENTER);
         TextView sub = new TextView(this);
-        sub.setText("人机验证将自动完成，无需任何操作\n完成后自动返回");
+        sub.setText("人机验证将自动完成，无需任何操作\n若需要手动确认会自动显示验证框");
         sub.setTextColor(0xFF64748B); sub.setTextSize(13); sub.setGravity(Gravity.CENTER);
         sub.setPadding(0, 36, 0, 0);
         LinearLayout tw = new LinearLayout(this);
@@ -128,6 +130,7 @@ public class CheckinActivity extends Activity {
         tw.setPadding(0, 36, 0, 0);
         tw.addView(tip); tw.addView(sub);
         box.addView(tw, new LinearLayout.LayoutParams(-2, -2));
+        maskBox = box;
         root.addView(box, new FrameLayout.LayoutParams(-1, -1)); // 顶层遮罩
         setContentView(root);
 
@@ -170,6 +173,12 @@ public class CheckinActivity extends Activity {
     /* ================= JS 注入签到 ================= */
     private void runCheckin() {
         if (wv == null || finished) return;
+        /* 注入前把库里最新 token 读一次（SilentAuth 可能刚在后台换过） */
+        try {
+            JSONObject acc = new Store(this).findAccount(accountKey);
+            String latest = acc == null ? "" : acc.optString("token", "");
+            if (latest.length() > 20) snapToken = latest;
+        } catch (Exception ignored) {}
         String js = CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken);
         try { wv.evaluateJavascript(js, null); }
         catch (Exception e) { finishErr("注入失败: " + e.getMessage()); }
@@ -182,6 +191,8 @@ public class CheckinActivity extends Activity {
         Intent out = new Intent();
         out.putExtra("ok", false);
         out.putExtra("message", msg == null ? "签到失败" : msg);
+        out.putExtra("accountKey", accountKey);
+        out.putExtra("siteKey", siteKey);
         setResult(RESULT_OK, out);
         finish();
     }
@@ -205,6 +216,12 @@ public class CheckinActivity extends Activity {
     public class Bridge {
         @JavascriptInterface
         public void onProgress(String msg) {
+            if (msg == null) return;
+            /* 人机验证可能需要手动点一下 → 掀开白色遮罩，把 Turnstile 交给用户 */
+            if (msg.contains(CheckinJs.SIGNAL_NEED_UI)) {
+                h.post(CheckinActivity.this::unmask);
+                return;
+            }
             h.post(() -> { if (tip != null && !finished) tip.setText(msg); });
         }
 
@@ -235,22 +252,35 @@ public class CheckinActivity extends Activity {
 
                     boolean ok = r.optBoolean("ok", false);
                     double reward = r.optDouble("reward", 0);
-                    /* 成功（含今日已签）→ 写当日徽章 */
+                    boolean rewardKnown = r.optBoolean("rewardKnown", false);
+                    /* 成功（含今日已签）→ 写当日徽章；奖励未知时不写 reward，避免显示成 $0 */
                     if (ok) {
                         try {
-                            store.patchAccount(accountKey, new JSONObject().put("lastCheckin",
-                                    new JSONObject().put("date", Engine.todayStr())
-                                            .put("reward", reward)
-                                            .put("time", System.currentTimeMillis())));
+                            JSONObject lc = new JSONObject()
+                                    .put("date", Engine.todayStr())
+                                    .put("time", System.currentTimeMillis());
+                            if (rewardKnown) lc.put("reward", reward);
+                            store.patchAccount(accountKey, new JSONObject().put("lastCheckin", lc));
                         } catch (Exception ignored) {}
+                    }
+
+                    String msg = r.optString("message", "");
+                    String detail = r.optString("detail", "");
+                    String tsErr = r.optString("tsError", "");
+                    if (!ok) {
+                        if (!detail.isEmpty()) msg = msg + " · " + detail;
+                        else if (!tsErr.isEmpty()) msg = msg + " · " + tsErr;
                     }
 
                     Intent out = new Intent();
                     out.putExtra("ok", ok);
                     out.putExtra("already", r.optBoolean("already", false));
                     out.putExtra("reward", reward);
+                    out.putExtra("rewardKnown", rewardKnown);
                     out.putExtra("auth", r.optBoolean("auth", false));
-                    out.putExtra("message", r.optString("message", ""));
+                    out.putExtra("message", msg);
+                    out.putExtra("accountKey", accountKey);
+                    out.putExtra("siteKey", siteKey);
                     setResult(RESULT_OK, out);
                     finish();
                 } catch (Exception e) {
@@ -258,6 +288,18 @@ public class CheckinActivity extends Activity {
                     finishErr("结果解析失败");
                 }
             });
+        }
+    }
+
+    /** 掀开遮罩，让用户看到并点击 Turnstile 挂件 */
+    private void unmask() {
+        if (unmasked || finished) return;
+        unmasked = true;
+        if (maskBox != null) maskBox.setVisibility(android.view.View.GONE);
+        /* 需要人工点一下时给足时间：看门狗延长到 3 分钟 */
+        if (h != null && watchdog != null) {
+            h.removeCallbacks(watchdog);
+            h.postDelayed(watchdog, 180000);
         }
     }
 }

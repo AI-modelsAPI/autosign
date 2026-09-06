@@ -27,26 +27,17 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /**
- * Engine — 纯 HTTP 调度引擎（对齐 Node 版 client.js/server.js）：
+ * Engine（v0.2.3）— 纯 HTTP 调度引擎：
  *   self      GET  /api/user/self
  *   status    GET  /api/status        （quota_per_unit / turnstile_site_key / price）
  *   logs      GET  /api/log/self      （找“签到”记录作为 lastBonus）
- *   checkin   POST /api/user/checkin  （manual 型走 WebView，见 OffscreenCheckin）
- * 网络：SOCKS5 代理优先（127.0.0.1:10808，v2ray 用户），失败自动直连降级（普通用户）。
+ *   checkin   POST /api/user/checkin  （newapi 型走 WebView，见 OffscreenCheckin）
  *
- * v0.1.8 修复（全量审计）：
- *   1. attempt() 吞掉了所有异常并返回 null → 上层只能报“均不可达”，看不到真实错误；
- *      现在记录 lastError 并在抛错时带出（含状态码/异常类型），且 Response 显式 close 防泄漏。
- *   2. call() 对 4xx/5xx 也返回，由业务判定；新增 http=429 的显式提示（站点限流，之前会被当成通用失败）。
- *   3. status() 把 turnstile_site_key / quota_per_unit 写入「站点 meta」而不是账号 —— 修复新建账号
- *      永远拿不到 siteKey、签到直接报「未配置 siteKey」的根因。
- *   4. dd() 兼容单层包裹（部分接口返回 {data:{...}} 而非 {data:{data:{}}}），原实现单层时返回空对象。
- *   5. 删除死代码 parseReward（v0.1.6 之后再无调用者）；未使用的私有 findSite 也移除。
- *   6. runAllOnce 原来对每个 manual 账号异步 fire-and-forget，Worker 会在签到完成前返回 →
- *      WorkManager 可能立刻回收进程导致后台签到全部失效。现在改为串行 + CountDownLatch 等待
- *      （每个账号最多 110s），Worker 生命周期覆盖真实签到过程。
- *   7. runAllOnce 跳过「今日已签」账号，避免每次调度重复跑 WebView 白耗电。
- *   8. checkinStatus 的 records 从 stats 内改为兼容 data.records 与 stats.records 两种结构。
+ * 【v0.2.3 架构重构（完全删除续期逻辑）】
+ *   1. 彻底删除不可靠的 TokenKeeper 续期逻辑。
+ *   2. 请求遇 401 或 token 为空时，直接调用 SilentAuth.exchangeSync 在纯后台
+ *      自动跑一次 GitHub OAuth 换取新鲜 token（零弹窗、零感知），再重试业务请求。
+ *   3. 刷新/签到流程先保证凭据有效再读取数据。
  */
 public class Engine {
     public static final long QUOTA_PER_UNIT_DEFAULT = 500000L;
@@ -64,7 +55,6 @@ public class Engine {
 
     /* ================= HTTP ================= */
 
-    /** 代理优先，网络层失败时直连 fallback；HTTP 错误码不算失败（交业务判定） */
     private JSONObject call(JSONObject site, String token, String method, String path) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
@@ -80,6 +70,55 @@ public class Engine {
         return r;
     }
 
+    /**
+     * 带 401 自动后台换凭据重试的请求（v0.2.3 核心）。
+     * 遇到 401 时不报错，直接在后台通过 SilentAuth 换新 token，换完自动重试一次。
+     *
+     * v0.2.3 补强：一次刷新会连打 4 个接口，若每个都各自 OAuth 一遍必然把站点打到 429。
+     * 这里的 tokenCache 让同一次刷新内的后续请求直接用已换好的新 token；
+     * SilentAuth 内部也有同账号串行 + 8s 复用 + 失败 90s 冷却三重保护。
+     */
+    public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path) throws Exception {
+        String token = cachedToken(accountKey);
+        if (token.isEmpty()) {
+            /* 先按 JWT exp 判定：过期/即将过期就直接换，不等 401 再补救（省一次往返） */
+            token = SilentAuth.ensureToken(ctx, store, site, accountKey);
+            if (!token.isEmpty()) cacheToken(accountKey, token);
+        }
+
+        JSONObject r = call(site, token, method, path);
+        if (r.optInt("http") != 401) return r;
+
+        /* 仍然 401（token 被服务端提前作废）→ 再换一次 */
+        String freshToken = SilentAuth.exchangeSync(ctx, store, site, accountKey);
+        if (!freshToken.isEmpty() && !freshToken.equals(token)) {
+            cacheToken(accountKey, freshToken);
+            JSONObject r2 = call(site, freshToken, method, path);
+            try { r2.put("reauthed", true); } catch (Exception ignored) {}
+            return r2;
+        }
+        return r;
+    }
+
+    /** 一轮刷新/签到开始时清缓存，保证读到最新 token */
+    public void resetTokenCache() {
+        synchronized (tokenCache) { tokenCache.clear(); }
+    }
+
+    /* 单次刷新周期内的 token 缓存（避免同一批请求各自触发 OAuth） */
+    private final java.util.HashMap<String, String> tokenCache = new java.util.HashMap<>();
+
+    private String cachedToken(String accountKey) {
+        synchronized (tokenCache) {
+            String t = tokenCache.get(accountKey);
+            return t == null ? "" : t;
+        }
+    }
+
+    private void cacheToken(String accountKey, String token) {
+        synchronized (tokenCache) { tokenCache.put(accountKey, token); }
+    }
+
     private OkHttpClient buildClient(boolean useProxy, JSONObject proxy) {
         if (!useProxy || proxy == null) return plain;
         try {
@@ -91,7 +130,6 @@ public class Engine {
         } catch (Exception e) { return plain; }
     }
 
-    /** 返回 {http, data}；网络层异常返回 null（触发直连 fallback），并记录 lastError */
     private JSONObject attempt(String url, String token, String method, OkHttpClient client) {
         Response resp = null;
         try {
@@ -114,7 +152,6 @@ public class Engine {
         }
     }
 
-    /** New API 响应包裹：优先 data.data，回退单层 data */
     private static JSONObject dd(JSONObject resp) {
         if (resp == null) return new JSONObject();
         JSONObject d = resp.optJSONObject("data");
@@ -123,17 +160,41 @@ public class Engine {
         return inner != null ? inner : d;
     }
 
-    /** HTTP 码 → 可读原因（供 UI 提示） */
     private static String httpHint(int code) {
         if (code == 429) return "站点限流（429），请稍后再试";
-        if (code == 401) return "授权已过期（401），请重新授权";
+        if (code == 401) return "授权已过期（401），GitHub 会话失效需手动登录一次";
         if (code == 403) return "站点拒绝访问（403），可能触发人机验证";
         if (code >= 500) return "站点服务异常（" + code + "）";
         if (code == 0) return "网络不可达";
         return "HTTP " + code;
     }
 
-    /* ================= 业务 ================= */
+    /* ================= 站点类型 ================= */
+
+    public static String siteKind(JSONObject site) {
+        String t = site == null ? "" : site.optString("checkinType", "login");
+        if ("manual".equals(t) || "newapi".equals(t)) return "newapi";
+        if ("web".equals(t)) return "web";
+        return "login";
+    }
+
+    public static boolean isAutoCheckin(JSONObject site) { return "newapi".equals(siteKind(site)); }
+    public static boolean isWebOnly(JSONObject site) { return "web".equals(siteKind(site)); }
+
+    public static String kindLabel(JSONObject site) {
+        switch (siteKind(site)) {
+            case "newapi": return "每日签到";
+            case "web":    return "网页手动";
+            default:       return "登录即得";
+        }
+    }
+
+    public static String kindLabelOf(String checkinType) {
+        try { return kindLabel(new JSONObject().put("checkinType", checkinType == null ? "" : checkinType)); }
+        catch (Exception e) { return "登录即得"; }
+    }
+
+    /* ================= 业务：刷新（读取三大额度 + 签到奖励） ================= */
 
     public JSONObject status(String key) throws Exception {
         JSONObject tk = store.findAccount(key);
@@ -141,22 +202,21 @@ public class Engine {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
         final String sKey = site.optString("key", "");
-        /* v0.2.0：先确保 token 新鲜（该站 JWT TTL 仅 15 分钟，不续期必然 401 变红） */
-        String token = TokenKeeper.ensureFresh(ctx, store, site, key);
-        if (token.isEmpty()) token = tk.optString("token", null);
 
-        JSONObject self = call(site, token, "GET", "/api/user/self");
+        /* 每轮刷新开头清一次缓存，读取本轮最新 token */
+        resetTokenCache();
+
+        /* 统一走 callWithAuth：过期先换、401 再换，全程后台无弹窗 */
+        JSONObject self = callWithAuth(site, key, "GET", "/api/user/self");
         int selfHttp = self.optInt("http");
 
         JSONObject stat;
-        try { stat = call(site, token, "GET", "/api/status"); }
+        try { stat = call(site, null, "GET", "/api/status"); }
         catch (Exception e) { stat = new JSONObject(); }
 
         long unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT);
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
 
-        /* v0.1.8：Turnstile siteKey / quota 单位缓存到「站点」而非账号
-         * （站点级属性，所有账号共享；否则新建账号必为空 → 签到报未配置 siteKey） */
         if (!sKey.isEmpty()) {
             String tsk = dd(stat).optString("turnstile_site_key", "");
             if (!tsk.isEmpty()) store.putSiteMeta(sKey, "turnstileSiteKey", tsk);
@@ -177,15 +237,15 @@ public class Engine {
                 .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user);
         if (selfHttp != 200) out.put("message", httpHint(selfHttp));
-        /* 今日消耗（v0.1.9）：/api/user/self 不返回今日字段（实测确认），
-           改用 /api/data/self?start_timestamp=今日0点&end_timestamp=now 累加 quota */
+
+        /* 今日消耗 */
         double todayUsed = -1;
         if (selfHttp == 200) {
-            try { todayUsed = todayUsage(site, token, unit); } catch (Exception ignored) {}
+            try { todayUsed = todayUsage(site, key, unit); } catch (Exception ignored) {}
         }
         if (todayUsed >= 0) out.put("todayUsed", Math.round(todayUsed * 100.0) / 100.0);
         store.appendLog(sKey, key, "status", "http=" + selfHttp);
-        /* v0.2.0 操作日志：刷新结果（成功与失败都记） */
+
         if (selfHttp == 200) {
             store.opLog(sKey, key, "刷新", "ok", "额度已更新",
                     "可用 $" + Ui.usd(Math.round(quota / unit * 100.0) / 100.0)
@@ -194,8 +254,7 @@ public class Engine {
             store.opLog(sKey, key, "刷新", "err", httpHint(selfHttp), "GET /api/user/self", "user");
         }
 
-        /* 跨设备已签鉴别：官方签到状态接口 /api/user/checkin?month=YYYY-MM，
-           不可用时回退当日日志探测。未授权时不必再查。 */
+        /* 签到状态与奖励检测 */
         if (selfHttp == 200) {
             JSONObject cs = null;
             try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
@@ -203,28 +262,30 @@ public class Engine {
                 JSONObject probe = null;
                 try { probe = todayBonus(key); } catch (Exception ignored) {}
                 if (probe != null) cs = new JSONObject().put("checked", true)
-                        .put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit));
+                        .put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit))
+                        .put("rewardKnown", true);
             }
             if (cs != null && cs.optBoolean("checked")) {
                 out.put("todayChecked", true);
                 out.put("todayRewardUSD", cs.optDouble("rewardUSD", 0));
-            } else out.put("todayChecked", false);
-        } else out.put("todayChecked", false);
+                out.put("todayRewardKnown", cs.optBoolean("rewardKnown", false));
+            } else {
+                out.put("todayChecked", false);
+                out.put("todayRewardKnown", false);
+            }
+        } else {
+            out.put("todayChecked", false);
+            out.put("todayRewardKnown", false);
+        }
         return out;
     }
 
-    /** 官方签到状态接口：GET /api/user/checkin?month=YYYY-MM
-     *  返回 {checked, rewardUSD, checkedDate}；非 200 或结构不符返回 null */
     public JSONObject checkinStatus(String key, long unit) throws Exception {
-        JSONObject tk = store.findAccount(key);
-        if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
-        String tok = TokenKeeper.ensureFresh(ctx, store, site, key);
-        if (tok.isEmpty()) tok = tk.optString("token", null);
-        JSONObject r = call(site, tok, "GET",
+        JSONObject r = callWithAuth(site, key, "GET",
                 "/api/user/checkin?month=" + URLEncoder.encode(month, "UTF-8"));
         if (r.optInt("http") != 200) return null;
         JSONObject d = dd(r);
@@ -233,7 +294,7 @@ public class Engine {
         String today = todayStr();
         boolean checked = stats.optBoolean("checked_in_today", false);
         double reward = 0;
-        /* records 可能挂 stats 下，也可能挂 data 下（不同版本） */
+        boolean rewardKnown = false;
         JSONArray recs = stats.optJSONArray("records");
         if (recs == null) recs = d.optJSONArray("records");
         if (recs != null) for (int i = 0; i < recs.length(); i++) {
@@ -243,58 +304,73 @@ public class Engine {
             if (today.equals(date)) {
                 double raw = o.optDouble("quota_awarded", o.optDouble("quota", 0));
                 reward = raw >= 1000 ? Math.round(raw / (double) unit * 100.0) / 100.0 : raw;
-                if (!checked) checked = true;   // 有当日记录即视为已签
+                rewardKnown = true;
+                if (!checked) checked = true;
                 break;
             }
         }
         return new JSONObject().put("checked", checked)
                 .put("rewardUSD", reward)
+                .put("rewardKnown", rewardKnown)
                 .put("checkedDate", today);
     }
 
-    /**
-     * 签到（非 manual 型）。manual 型必须走 WebView（Turnstile），
-     * 由 MainActivity / runAllOnce 调用 OffscreenCheckin，这里只回信号。
-     */
     public JSONObject checkin(String key) throws Exception {
         JSONObject tk = store.findAccount(key);
         JSONObject site = store.siteOfAccount(key);
         if (tk == null || site == null) throw new Exception("账号或站点不存在");
-        String token = tk.optString("token", null);
-        if (token == null || token.isEmpty()) throw new Exception("账号未授权，请先完成 GitHub 授权");
-        String type = site.optString("checkinType", "login");
         JSONObject out = new JSONObject();
-        if ("manual".equals(type)) {
+        if (isAutoCheckin(site)) {
             out.put("ok", false)
                .put("needWebview", true)
                .put("message", "该站启用人机验证，需在后台签到窗口完成");
             return out;
         }
-        /* 登录即签到型：无独立签到接口 —— 查当日「签到」记录，取奖励展示 */
+        if (isWebOnly(site)) {
+            out.put("ok", false).put("webOnly", true).put("rewardKnown", false)
+               .put("message", "该站不开放签到接口，请点站点名打开网页手动操作");
+            return out;
+        }
         long unit = store.siteMetaLong(site.optString("key", ""), "quotaPerUnit", QUOTA_PER_UNIT_DEFAULT);
+
+        JSONObject cs = null;
+        try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
+        if (cs != null && cs.optBoolean("checked")) {
+            double rw = cs.optDouble("rewardUSD", 0);
+            boolean known = cs.optBoolean("rewardKnown", false);
+            out.put("ok", true).put("already", true)
+               .put("reward", rw).put("rewardKnown", known)
+               .put("message", known && rw > 0 ? "今日已签到" : "今日已签到（本站无奖励）");
+            markChecked(key, rw, known);
+            return out;
+        }
+
         JSONObject tb = null;
         try { tb = todayBonus(key); } catch (Exception ignored) {}
-        out.put("ok", true).put("skipped", false).put("already", true);
         if (tb != null) {
-            out.put("reward", quotaToUSD(tb.optLong("quota", 0), unit))
-               .put("message", "登录即签到 · 今日奖励已到账");
-        } else {
-            JSONObject self = null;
-            try { self = call(site, token, "GET", "/api/user/self"); } catch (Exception ignored) {}
-            int code = self == null ? 0 : self.optInt("http");
-            if (code != 200) {
-                out.put("ok", false).put("already", false).put("message", httpHint(code));
-                return out;
-            }
-            out.put("message", "登录即签到 · 每日额度自动发放（今日暂无签到记录）");
+            double rw = quotaToUSD(tb.optLong("quota", 0), unit);
+            out.put("ok", true).put("already", true)
+               .put("reward", rw).put("rewardKnown", true)
+               .put("message", rw > 0 ? "登录即签到 · 今日奖励已到账" : "登录即签到 · 今日已记录");
+            markChecked(key, rw, true);
+            return out;
         }
-        markChecked(key, out.optDouble("reward", 0));
+
+        JSONObject self = null;
+        try { self = callWithAuth(site, key, "GET", "/api/user/self"); } catch (Exception ignored) {}
+        int code = self == null ? 0 : self.optInt("http");
+        if (code != 200) {
+            out.put("ok", false).put("already", false).put("rewardKnown", false)
+               .put("message", httpHint(code));
+            return out;
+        }
+        out.put("ok", true).put("already", true).put("reward", 0).put("rewardKnown", false)
+           .put("message", "登录即签到 · 已保活（该站无签到记录）");
+        markChecked(key, 0, false);
         return out;
     }
 
-    /** 今日消耗（v0.1.9）：GET /api/data/self?start_timestamp&end_timestamp 累加 quota → 美元。
-     *  失败或无数据返回 -1（UI 显示为 "—"），0 条记录返回 0。 */
-    private double todayUsage(JSONObject site, String token, long unit) {
+    private double todayUsage(JSONObject site, String accountKey, long unit) {
         try {
             java.util.Calendar c = java.util.Calendar.getInstance();
             c.set(java.util.Calendar.HOUR_OF_DAY, 0);
@@ -303,7 +379,7 @@ public class Engine {
             c.set(java.util.Calendar.MILLISECOND, 0);
             long start = c.getTimeInMillis() / 1000L;
             long end = System.currentTimeMillis() / 1000L;
-            JSONObject r = call(site, token, "GET",
+            JSONObject r = callWithAuth(site, accountKey, "GET",
                     "/api/data/self?start_timestamp=" + start + "&end_timestamp=" + end + "&default_time=hour");
             if (r.optInt("http") != 200) return -1;
             JSONArray list = null;
@@ -320,24 +396,22 @@ public class Engine {
         } catch (Exception e) { return -1; }
     }
 
-    /** 原始 quota → 美元（日志记录里的 quota 是原始单位，如 12500000 = $25） */
     private static double quotaToUSD(long q, long unit) {
         if (q <= 0) return 0;
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         return q >= 1000 ? Math.round(q / (double) unit * 100.0) / 100.0 : q;
     }
 
-    /** 账号写入当日签到状态（支撑「今日已签」徽章与按钮置灰，次日自动失效） */
-    private void markChecked(String accountKey, double reward) {
+    private void markChecked(String accountKey, double reward, boolean rewardKnown) {
         try {
-            store.patchAccount(accountKey, new JSONObject().put("lastCheckin",
-                    new JSONObject().put("date", todayStr())
-                            .put("reward", reward)
-                            .put("time", System.currentTimeMillis())));
+            JSONObject lc = new JSONObject()
+                    .put("date", todayStr())
+                    .put("time", System.currentTimeMillis());
+            if (rewardKnown) lc.put("reward", reward);
+            store.patchAccount(accountKey, new JSONObject().put("lastCheckin", lc));
         } catch (Exception ignored) {}
     }
 
-    /** 今日「签到」奖励记录（logs 里最后一条含“签到”且时间为今天的记录） */
     public JSONObject todayBonus(String key) throws Exception {
         JSONObject lg = logs(key, "系统", 30);
         if (!lg.optBoolean("ok")) return null;
@@ -347,7 +421,6 @@ public class Engine {
         return (t > 0 && isToday(t)) ? lb : null;
     }
 
-    /** 日志时间解析：兼容 unix 秒 / 毫秒 / ISO 字符串 */
     private static long parseTimeMs(String s) {
         if (s == null || s.isEmpty()) return 0L;
         try {
@@ -379,9 +452,6 @@ public class Engine {
         return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date());
     }
 
-    /* ================= 当日签到状态 ================= */
-
-    /** 账号今日是否已签到（lastCheckin.date == 今天，次日自动失效） */
     public static boolean isCheckedToday(JSONObject acc) {
         if (acc == null) return false;
         JSONObject lc = acc.optJSONObject("lastCheckin");
@@ -389,14 +459,12 @@ public class Engine {
     }
 
     public JSONObject logs(String key, String category, int limit) throws Exception {
-        JSONObject tk = store.findAccount(key);
-        if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
         if (limit <= 0 || limit > 200) limit = 20;
         String path = "/api/log/self?category=" + URLEncoder.encode(category, "UTF-8")
                 + "&limit=" + limit + "&page=1";
-        JSONObject r = call(site, tk.optString("token", null), "GET", path);
+        JSONObject r = callWithAuth(site, key, "GET", path);
         int code = r.optInt("http");
         JSONObject out = new JSONObject().put("ok", code == 200).put("http", code);
         if (code != 200) out.put("message", httpHint(code));
@@ -429,19 +497,6 @@ public class Engine {
         return out;
     }
 
-    public JSONObject proxyTest() throws Exception {
-        JSONArray sites = store.config().optJSONArray("sites");
-        if (sites == null || sites.length() == 0) throw new Exception("无站点");
-        long t0 = System.currentTimeMillis();
-        JSONObject r = call(sites.getJSONObject(0), null, "GET", "/api/status");
-        return new JSONObject().put("ok", r.optInt("http") == 200)
-                .put("http", r.optInt("http")).put("ms", System.currentTimeMillis() - t0);
-    }
-
-    /**
-     * cron 等价：manual 站点走离屏 WebView 签到，login 站点刷新保活。
-     * v0.1.8：串行 + 等待完成（Worker 生命周期必须覆盖签到全过程，否则进程被回收后台签到全废）。
-     */
     public void runAllOnce() {
         if (!scheduleAllowsToday()) {
             store.opLog("", "", "定时签到", "info", "今日跳过（仅工作日执行）", "", "cron");
@@ -455,35 +510,39 @@ public class Engine {
             final String sKey = site.optString("key", "");
             JSONArray accs = site.optJSONArray("accounts");
             if (accs == null) continue;
-            boolean manual = "manual".equals(site.optString("checkinType"));
+            boolean auto = isAutoCheckin(site);
+            boolean webOnly = isWebOnly(site);
             for (int j = 0; j < accs.length(); j++) {
                 JSONObject tk = accs.optJSONObject(j);
-                if (tk == null || tk.optString("token", "").isEmpty()) continue;
+                if (tk == null) continue;
                 final String key = tk.optString("key");
                 if (key.isEmpty()) continue;
-                /* 今日已签则跳过（省电、避免重复跑 WebView） */
                 if (isCheckedToday(tk)) {
                     store.appendLog(sKey, key, "cron-skip", "今日已签");
                     continue;
                 }
                 try {
-                    if (manual) {
+                    if (webOnly) {
+                        store.appendLog(sKey, key, "cron-skip", "网页手动型站点，需人工操作");
+                        store.opLog(sKey, key, "定时签到", "info",
+                                "跳过（该站需网页手动签到）", "", "cron");
+                    } else if (auto) {
                         final CountDownLatch latch = new CountDownLatch(1);
                         final String[] ev = { "cron-checkin-fail" };
                         final String[] dt = { "未返回" };
-                        OffscreenCheckin.run(ctx, sKey, key, 100, (ok, already, reward, msg) -> {
+                        OffscreenCheckin.run(ctx, sKey, key, 100, (ok, already, reward, rewardKnown, msg) -> {
                             ev[0] = ok ? (already ? "cron-checkin-already" : "cron-checkin-ok") : "cron-checkin-fail";
-                            dt[0] = ok ? (already ? (msg == null ? "今日已签" : msg) : ("奖励 $" + reward))
-                                       : (msg == null ? "" : msg);
+                            if (!ok) dt[0] = msg == null ? "" : msg;
+                            else if (already) dt[0] = (msg == null || msg.isEmpty()) ? "今日已签" : msg;
+                            else dt[0] = rewardKnown ? ("奖励 $" + Ui.usd(reward)) : "签到成功";
                             latch.countDown();
                         });
-                        /* 等待签到真正跑完（离屏 WebView 看门狗 100s，这里给 110s 余量） */
                         if (!latch.await(110, TimeUnit.SECONDS)) { ev[0] = "cron-checkin-fail"; dt[0] = "等待超时"; }
                         store.appendLog(sKey, key, ev[0], dt[0]);
                         store.opLog(sKey, key, "定时签到",
                                 ev[0].endsWith("fail") ? "err" : "ok", dt[0], "", "cron");
                     } else {
-                        JSONObject r = call(site, tk.optString("token"), "GET", "/api/user/self");
+                        JSONObject r = callWithAuth(site, key, "GET", "/api/user/self");
                         store.appendLog(sKey, key, "cron-login-refresh", "http=" + r.optInt("http"));
                         store.opLog(sKey, key, "定时刷新",
                                 r.optInt("http") == 200 ? "ok" : "err",
@@ -499,8 +558,6 @@ public class Engine {
             }
         }
     }
-
-    /* ================= 后台调度（WorkManager，12h 周期） ================= */
 
     public static class CheckWorker extends Worker {
         public CheckWorker(@NonNull Context c, @NonNull WorkerParameters p) { super(c, p); }
@@ -525,8 +582,6 @@ public class Engine {
             int h = Math.max(1, Math.min(24, sch.optInt("intervalHours", 12)));
             periodMin = h * 60L;
         } else {
-            /* daily / weekday：周期 24h，首次延迟到下一个指定时刻
-               （WorkManager 无法精确定时，最小周期 15min；weekday 由 runAllOnce 前置判断跳过周末） */
             periodMin = 24 * 60L;
             initialDelayMin = minutesUntil(sch.optInt("hour", 8), sch.optInt("minute", 30));
         }
@@ -538,12 +593,10 @@ public class Engine {
                         .setRequiredNetworkType(NetworkType.CONNECTED).build());
         if (initialDelayMin > 0) b.setInitialDelay(initialDelayMin, TimeUnit.MINUTES);
 
-        /* 配置可能变化 → REPLACE 让新周期立即生效 */
         wm.enqueueUniquePeriodicWork("justsign-check",
                 ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, b.build());
     }
 
-    /** 距离下一个 hh:mm 还有多少分钟（含跨天） */
     private static long minutesUntil(int hour, int minute) {
         java.util.Calendar now = java.util.Calendar.getInstance();
         java.util.Calendar t = java.util.Calendar.getInstance();
@@ -556,7 +609,6 @@ public class Engine {
         return Math.max(1, diff);
     }
 
-    /** 定时任务执行前的日期判定（weekday 模式跳过周六日） */
     private boolean scheduleAllowsToday() {
         try {
             JSONObject sch = store.schedule();

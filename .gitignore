@@ -3,3 +3,9 @@ data/
 dist/
 *.log
 .env
+build/
+.gradle/
+local.properties
+gradle-wrapper.jar
+gradlew
+gradlew.bat

@@ -62,7 +62,7 @@ public class SwipeCard extends FrameLayout {
         LinearLayout lb = Ui.row(c);
         lb.setBackground(Ui.round(Ui.GREEN_BG2, r));
         lb.setPadding(Ui.dp(c, 16), 0, 0, 0);
-        TextView lt = Ui.tv(c, Ui.ic("tab_refresh") + " 刷新数据", 13, Ui.GREEN, true);
+        TextView lt = Ui.iconText(c, "refresh", "刷新数据", 13, Ui.GREEN, true);
         lb.addView(lt);
         leftBoard = lb;
         addView(leftBoard, new LayoutParams(-1, -1));
@@ -74,8 +74,8 @@ public class SwipeCard extends FrameLayout {
         del.setGravity(android.view.Gravity.CENTER);
         del.setBackground(Ui.roundRight(Ui.RED, r));
         del.setClickable(true);
-        del.addView(Ui.tv(c, Ui.ic("trash"), 18, Ui.white(), true));
-        del.addView(Ui.tv(c, "删除", 11, Ui.white(), true), lpTop(c, 2));
+        del.addView(Ui.icon(c, "trash", 19, Ui.white()));
+        del.addView(Ui.tv(c, "删除", 11, Ui.white(), true), lpTop(c, 3));
         del.setOnClickListener(v -> { if (listener != null) listener.onDelete(); });
         rbWrap.addView(del, new LinearLayout.LayoutParams(actionWidthPx, -1));
         rightBoard = rbWrap;
@@ -154,9 +154,9 @@ public class SwipeCard extends FrameLayout {
                 if (leftBoard instanceof LinearLayout) {
                     View t = ((LinearLayout) leftBoard).getChildAt(0);
                     if (t instanceof TextView) {
-                        ((TextView) t).setText(armedRefresh
-                                ? (Ui.ic("check") + " 松开立即刷新")
-                                : (Ui.ic("tab_refresh") + " 刷新数据"));
+                        TextView tv = (TextView) t;
+                        tv.setText(armedRefresh ? "松开立即刷新" : "刷新数据");
+                        Ui.setLead(tv, armedRefresh ? "check" : "refresh", 13, Ui.GREEN);
                     }
                 }
                 return true;

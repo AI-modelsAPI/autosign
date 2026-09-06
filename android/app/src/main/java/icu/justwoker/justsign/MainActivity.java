@@ -153,50 +153,82 @@ public class MainActivity extends Activity {
 
     /* ================= 底部 Tab ================= */
 
+    /**
+     * 底部 4 个按钮（v0.2.2 重做）：
+     *   - 图标与文案在同一行（横向），文案 12sp 加粗（原来 10sp 太小）
+     *   - 每个按钮有独立的圆角背景 + 彼此留 6dp 间距，视觉上是 4 个独立按钮，
+     *     不再是一整条上写了四个词
+     *   - 页面型（看板/设置）：选中蓝底蓝字，未选中透明底灰字
+     *   - 动作型（签到/刷新）：签到=实心蓝主按钮，刷新=浅蓝次按钮，永不获得持久高亮
+     */
     private View buildTabBar() {
         tabBar = Ui.row(this);
         tabBar.setBackgroundColor(Ui.CARD);
+        tabBar.setPadding(Ui.dp(this, 8), Ui.dp(this, 7), Ui.dp(this, 8), Ui.dp(this, 7));
 
-        LinearLayout t0 = tabItem(Ui.ic("tab_board"), "签到", true);
+        LinearLayout t0 = tabItem("board", "看板");
         tabBoardIcon = (TextView) t0.getChildAt(0);
         tabBoardText = (TextView) t0.getChildAt(1);
         t0.setOnClickListener(v -> showPage(0));
 
-        LinearLayout t1 = tabItem(Ui.ic("tab_checkin"), "一键签到", false);
+        LinearLayout t1 = tabItem("bolt", "签到");
         tabCheckIcon = (TextView) t1.getChildAt(0);
         tabCheckText = (TextView) t1.getChildAt(1);
         t1.setOnClickListener(v -> bulkCheckin());
 
-        LinearLayout t2 = tabItem(Ui.ic("tab_refresh"), "一键刷新", false);
+        LinearLayout t2 = tabItem("refresh", "刷新");
         tabRefreshIcon = (TextView) t2.getChildAt(0);
         tabRefreshText = (TextView) t2.getChildAt(1);
         t2.setOnClickListener(v -> bulkRefresh());
 
-        LinearLayout t3 = tabItem(Ui.ic("tab_settings"), "设置", false);
+        LinearLayout t3 = tabItem("settings", "设置");
         tabSetIcon = (TextView) t3.getChildAt(0);
         tabSetText = (TextView) t3.getChildAt(1);
         t3.setOnClickListener(v -> showPage(1));
 
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f);
-        tabBar.addView(t0, lp);
-        tabBar.addView(t1, new LinearLayout.LayoutParams(0, -1, 1f));
-        tabBar.addView(t2, new LinearLayout.LayoutParams(0, -1, 1f));
-        tabBar.addView(t3, new LinearLayout.LayoutParams(0, -1, 1f));
+        tabBar.addView(t0, tabLp(0));
+        tabBar.addView(t1, tabLp(6));
+        tabBar.addView(t2, tabLp(6));
+        tabBar.addView(t3, tabLp(6));
+
+        /* 动作按钮的固定配色（不随页面切换变化） */
+        styleTab(t1, tabCheckIcon, tabCheckText, "bolt", Ui.white(), Ui.BLUE);
+        styleTab(t2, tabRefreshIcon, tabRefreshText, "refresh", Ui.BLUE, Ui.BLUE_BG);
         return tabBar;
     }
 
-    private LinearLayout tabItem(String icon, String label, boolean active) {
-        LinearLayout box = Ui.col(this);
+    private LinearLayout.LayoutParams tabLp(int leftGapDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f);
+        lp.leftMargin = Ui.dp(this, leftGapDp);
+        return lp;
+    }
+
+    /** 一个 Tab 按钮：[图标][文案] 横向一行；图标用只带 CompoundDrawable 的空 TextView 承载 */
+    private LinearLayout tabItem(String icon, String label) {
+        LinearLayout box = Ui.row(this);
         box.setGravity(Gravity.CENTER);
         box.setClickable(true);
         box.setFocusable(true);
-        int fg = active ? Ui.BLUE : Ui.TXT2;
-        box.addView(Ui.tv(this, icon, 17, fg, false));
-        TextView t = Ui.tv(this, label, 10, fg, true);
+        TextView ic = Ui.tv(this, "", 1, Ui.SUB2, false);
+        ic.setCompoundDrawablesWithIntrinsicBounds(Icons.d(this, icon, 17, Ui.SUB2), null, null, null);
+        box.addView(ic);
+        TextView t = Ui.tv(this, label, 12, Ui.SUB2, true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.topMargin = Ui.dp(this, 2);
+        lp.leftMargin = Ui.dp(this, 5);
         box.addView(t, lp);
         return box;
+    }
+
+    /** 给整个 Tab 上色：文字色 fg，圆角背景 bg（bg 传 0 = 透明） */
+    private void styleTab(View box, TextView icon, TextView text, String iconName, int fg, int bg) {
+        if (box != null) {
+            box.setBackground(bg == 0 ? null : Ui.round(bg, Ui.dp(this, 8)));
+        }
+        if (icon != null) {
+            icon.setCompoundDrawablesWithIntrinsicBounds(
+                    Icons.d(this, iconName, 17, fg), null, null, null);
+        }
+        if (text != null) text.setTextColor(fg);
     }
 
     private void showPage(int p) {
@@ -204,12 +236,11 @@ public class MainActivity extends Activity {
         boardScroll.setVisibility(p == 0 ? View.VISIBLE : View.GONE);
         if (emptyView != null) emptyView.setVisibility(View.GONE);
         settings.setVisibility(p == 1 ? View.VISIBLE : View.GONE);
-        /* 页面型 Tab 高亮；动作型永不高亮 */
-        int on = Ui.BLUE, off = Ui.SUB2;
-        tabBoardIcon.setTextColor(p == 0 ? on : off);
-        tabBoardText.setTextColor(p == 0 ? on : off);
-        tabSetIcon.setTextColor(p == 1 ? on : off);
-        tabSetText.setTextColor(p == 1 ? on : off);
+        /* 页面型 Tab：选中蓝底蓝字；动作型（签到/刷新）配色固定，不参与高亮 */
+        styleTab((View) tabBoardIcon.getParent(), tabBoardIcon, tabBoardText, "board",
+                p == 0 ? Ui.BLUE : Ui.SUB2, p == 0 ? Ui.BLUE_BG : 0);
+        styleTab((View) tabSetIcon.getParent(), tabSetIcon, tabSetText, "settings",
+                p == 1 ? Ui.BLUE : Ui.SUB2, p == 1 ? Ui.BLUE_BG : 0);
         if (p == 1) settings.refresh();
         else render();
     }
@@ -226,7 +257,7 @@ public class MainActivity extends Activity {
         emptyView = Ui.col(this);
         emptyView.setGravity(Gravity.CENTER);
         emptyView.setPadding(Ui.dp(this, 32), 0, Ui.dp(this, 32), Ui.dp(this, 40));
-        emptyView.addView(Ui.tv(this, Ui.ic("globe"), 42, Ui.SUB2));
+        emptyView.addView(Ui.icon(this, "empty", 46, Ui.SUB2));
         TextView et = Ui.tv(this, "暂无配置站点", 15, Ui.TXT2, true);
         LinearLayout.LayoutParams e1 = new LinearLayout.LayoutParams(-2, -2);
         e1.topMargin = Ui.dp(this, 12);
@@ -236,7 +267,10 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams e2 = new LinearLayout.LayoutParams(-2, -2);
         e2.topMargin = Ui.dp(this, 4);
         emptyView.addView(ed, e2);
-        TextView go = Ui.btn(this, "去添加站点 " + Ui.ic("chevron"), 13, Ui.BLUE, Ui.BLUE_BG, 16, 8);
+        TextView go = Ui.textIcon(this, "去添加站点", "chevron", 13, Ui.BLUE, true);
+        go.setBackground(Ui.round(Ui.BLUE_BG, Ui.dp(this, 8)));
+        go.setPadding(Ui.dp(this, 16), Ui.dp(this, 8), Ui.dp(this, 16), Ui.dp(this, 8));
+        go.setClickable(true);
         go.setOnClickListener(v -> { showPage(1); settings.openSites(); });
         LinearLayout.LayoutParams e3 = new LinearLayout.LayoutParams(-2, -2);
         e3.topMargin = Ui.dp(this, 16);
@@ -288,8 +322,8 @@ public class MainActivity extends Activity {
         /* 站头 */
         LinearLayout head = Ui.row(this);
         LinearLayout info = Ui.col(this);
-        /* 站点名：蓝色 + ↗，一眼可见是链接 */
-        TextView name = Ui.tv(this, site.optString("name", siteKey) + " " + Ui.ic("link"), 15, Ui.BLUE, true);
+        /* 站点名：蓝色 + 外链图标，一眼可见是链接 */
+        TextView name = Ui.textIcon(this, site.optString("name", siteKey), "link", 15, Ui.BLUE, true);
         name.setClickable(true);
         name.setOnClickListener(v -> {
             String home = site.optString("homeUrl", site.optString("baseUrl", ""));
@@ -299,8 +333,7 @@ public class MainActivity extends Activity {
         });
         info.addView(name);
         String host = site.optString("baseUrl", "").replaceFirst("^https?://", "");
-        TextView meta = Ui.tv(this, host + " · "
-                + ("manual".equals(site.optString("checkinType")) ? "手动签到" : "登录即签到"), 11, Ui.SUB2);
+        TextView meta = Ui.tv(this, host + " · " + Engine.kindLabel(site), 11, Ui.SUB2);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-2, -2);
         mlp.topMargin = Ui.dp(this, 2);
         info.addView(meta, mlp);
@@ -320,9 +353,11 @@ public class MainActivity extends Activity {
                     all ? Ui.GREEN : Ui.ORANGE, all ? Ui.GREEN_BG2 : Ui.AMBER_BG));
             head.addView(Ui.gapW(this, 6));
         }
-        TextView add = Ui.flat(this, Ui.ic("plus") + "账号", 11, Ui.BLUE);
+        TextView add = Ui.iconText(this, "plus", "账号", 11, Ui.BLUE, true);
+        add.setPadding(Ui.dp(this, 6), Ui.dp(this, 5), Ui.dp(this, 6), Ui.dp(this, 5));
+        add.setClickable(true);
         add.setOnClickListener(v -> promptAddAccount(site));
-        TextView more = Ui.flat(this, Ui.ic("more"), 14, Ui.SUB);
+        View more = Ui.iconBtn(this, "more", 15, Ui.SUB, 6);
         more.setOnClickListener(v -> siteMenu(site));
         head.addView(add);
         head.addView(more);
@@ -385,19 +420,25 @@ public class MainActivity extends Activity {
             main = Ui.btn(this, "去授权", 11, Ui.RED, Ui.RED_BG, 10, 4);
             main.setOnClickListener(v -> startAuth(site, acc));
         } else if (checked) {
-            main = Ui.pill(this, Ui.ic("check") + " 已签", 11, Ui.GREEN_D, Ui.GREEN_BG);
+            main = Ui.iconPill(this, "check", "已签", 11, Ui.GREEN_D, Ui.GREEN_BG);
             main.setClickable(true);
             main.setOnClickListener(v -> {
                 JSONObject lc = acc.optJSONObject("lastCheckin");
+                boolean known = lc != null && lc.has("reward");
                 double rw = lc == null ? 0 : lc.optDouble("reward", 0);
-                toast(rw > 0 ? ("今日签到奖励 +$" + Ui.usd(rw)) : "今日已签到");
+                if (!known) toast("今日已签到（本站未返回奖励金额）");
+                else if (rw > 0) toast("今日签到奖励 +$" + Ui.usd(rw));
+                else toast("今日已签到 · 本站签到不发奖励");
             });
         } else {
-            main = Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
+            boolean webOnly = Engine.isWebOnly(site);
+            main = webOnly
+                    ? Ui.btn(this, "去网页", 11, Ui.BLUE, Ui.BLUE_BG, 12, 4)
+                    : Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
             main.setOnClickListener(v -> doCheckin(key, main));
         }
         r1.addView(main);
-        TextView ovf = Ui.flat(this, Ui.ic("more"), 14, Ui.SUB2);
+        View ovf = Ui.iconBtn(this, "more", 15, Ui.SUB2, 5);
         ovf.setOnClickListener(v -> accountMenu(site, acc));
         r1.addView(ovf);
         box.addView(r1);
@@ -410,13 +451,27 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-2, -2);
             blp.leftMargin = Ui.dp(this, 6);
             r2.addView(bal, blp);
-            /* 今日签到奖励（这就是之前完全没显示的数字） */
+            /* 今日签到奖励：只在服务端给出确切数额时才显示金额 */
             double reward = 0;
+            boolean rewardKnown = false;
             JSONObject lc = acc.optJSONObject("lastCheckin");
-            if (lc != null && Engine.todayStr().equals(lc.optString("date", ""))) reward = lc.optDouble("reward", 0);
-            if (reward <= 0 && st.optBoolean("todayChecked")) reward = st.optDouble("todayRewardUSD", 0);
-            if (reward > 0) {
-                TextView rw = Ui.pill(this, "+$" + Ui.usd(reward) + " 今日签到", 11, Ui.GREEN_D, Ui.GREEN_BG);
+            if (lc != null && Engine.todayStr().equals(lc.optString("date", "")) && lc.has("reward")) {
+                reward = lc.optDouble("reward", 0);
+                rewardKnown = true;
+            }
+            if (!rewardKnown && st.optBoolean("todayChecked") && st.optBoolean("todayRewardKnown", false)) {
+                reward = st.optDouble("todayRewardUSD", 0);
+                rewardKnown = true;
+            }
+            if (rewardKnown && reward > 0) {
+                TextView rw = Ui.iconPill(this, "bolt", "+$" + Ui.usd(reward) + " 今日签到",
+                        11, Ui.GREEN_D, Ui.GREEN_BG);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-2, -2);
+                rlp.leftMargin = Ui.dp(this, 8);
+                r2.addView(rw, rlp);
+            } else if (checked && rewardKnown) {
+                /* 已签但本站不发奖励 —— 明确告知，避免用户以为漏显示 */
+                TextView rw = Ui.pill(this, "本站无签到奖励", 10, Ui.SUB, Ui.LINE_SOFT);
                 LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-2, -2);
                 rlp.leftMargin = Ui.dp(this, 8);
                 r2.addView(rw, rlp);
@@ -446,7 +501,9 @@ public class MainActivity extends Activity {
             r3.addView(Ui.tv(this, "累计已用 $" + Ui.usd(st.optDouble("usedUSD", 0)), 11, Ui.SUB));
         }
         r3.addView(Ui.spring(this));
-        TextView logBtn = Ui.flat(this, "日志 " + Ui.ic("chevron"), 11, Ui.SUB);
+        TextView logBtn = Ui.textIcon(this, "日志", "chevron", 11, Ui.SUB, true);
+        logBtn.setPadding(Ui.dp(this, 6), Ui.dp(this, 5), Ui.dp(this, 4), Ui.dp(this, 5));
+        logBtn.setClickable(true);
         logBtn.setOnClickListener(v -> LogPopup.show(this));
         r3.addView(logBtn);
         LinearLayout.LayoutParams r3lp = new LinearLayout.LayoutParams(-1, -2);
@@ -457,7 +514,7 @@ public class MainActivity extends Activity {
         if (st != null && !stOk) {
             String msg = st.optString("message", "");
             if (!msg.isEmpty()) {
-                TextView warn = Ui.tv(this, Ui.ic("dot_err") + " " + msg, 11, Ui.RED_D);
+                TextView warn = Ui.iconText(this, "info", msg, 11, Ui.RED_D, false);
                 warn.setBackground(Ui.round(Ui.RED_BG2, Ui.dp(this, 4)));
                 warn.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
                 LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
@@ -484,7 +541,10 @@ public class MainActivity extends Activity {
                 JSONObject a = accs.optJSONObject(j);
                 if (a == null || a.optString("token", "").isEmpty()) continue;
                 if (Engine.isCheckedToday(a)) continue;
-                targets.add(new String[]{ s.optString("key"), a.optString("key"), s.optString("checkinType", "login") });
+                /* 网页手动型站点不进批量队列（后台无法完成，只会刷一堆失败日志） */
+                if (Engine.isWebOnly(s)) continue;
+                targets.add(new String[]{ s.optString("key"), a.optString("key"),
+                        Engine.siteKind(s) });
             }
         }
         if (targets.isEmpty()) { toast("没有待签账号（未授权或今日已签）"); return; }
@@ -498,39 +558,62 @@ public class MainActivity extends Activity {
     private void runBulkCheckin(java.util.ArrayList<String[]> list, int idx, int[] stat) {
         if (idx >= list.size()) {
             bulkBusy = false;
-            setTabAction(tabCheckIcon, tabCheckText, Ui.ic("check"), "完成", Ui.GREEN);
+            setTabAction(tabCheckIcon, tabCheckText, "check", "完成", Ui.white());
             h.postDelayed(() -> setTabAction(tabCheckIcon, tabCheckText,
-                    Ui.ic("tab_checkin"), "一键签到", Ui.TXT2), 1200);
+                    "bolt", "签到", Ui.white()), 1200);
             render();
             toast("签到完成：成功 " + stat[0] + " · 失败 " + stat[1]);
+            /* 批量签到收尾统一刷一遍额度（三大数字一次到位，不用再手点刷新） */
+            if (stat[0] > 0) {
+                java.util.ArrayList<String> keys = new java.util.ArrayList<>();
+                for (String[] t : list) keys.add(t[1]);
+                h.postDelayed(() -> refreshKeys(keys), 400);
+            }
             return;
         }
-        setTabAction(tabCheckIcon, tabCheckText, Ui.ic("hourglass"),
-                "签到 " + (idx + 1) + "/" + list.size(), Ui.GREEN);
+        setTabAction(tabCheckIcon, tabCheckText, "hourglass",
+                (idx + 1) + "/" + list.size(), Ui.white());
         String[] t = list.get(idx);
-        final String sk = t[0], ak = t[1], type = t[2];
+        final String sk = t[0], ak = t[1], kind = t[2];
         Store store = new Store(this);
-        if ("manual".equals(type)) {
-            OffscreenCheckin.run(this, sk, ak, 100, (ok, already, reward, msg) -> {
-                store.opLog(sk, ak, "一键签到", ok ? "ok" : "err",
-                        ok ? (already ? "今日已签" : ("签到成功 +$" + Ui.usd(reward))) : msg, "", "user");
+        if ("newapi".equals(kind)) {
+            OffscreenCheckin.run(this, sk, ak, 100, (ok, already, reward, rewardKnown, msg) -> {
+                String sum;
+                if (!ok) sum = msg;
+                else if (already) sum = (msg == null || msg.isEmpty()) ? "今日已签" : msg;
+                else sum = rewardKnown && reward > 0 ? ("签到成功 +$" + Ui.usd(reward)) : "签到成功";
+                store.opLog(sk, ak, "一键签到", ok ? "ok" : "err", sum, "", "user");
                 pushLog(store);
+                JSONObject r = new JSONObject();
+                try {
+                    r.put("ok", ok);
+                    r.put("already", already);
+                    r.put("reward", reward);
+                    r.put("rewardKnown", rewardKnown);
+                    r.put("message", msg == null ? "" : msg);
+                } catch (Exception ignored) {}
+                applyCheckinResult(ak, r, true);
                 if (ok) stat[0]++; else stat[1]++;
                 runBulkCheckin(list, idx + 1, stat);
             });
         } else {
             new Thread(() -> {
                 String lvl = "ok", sum;
+                JSONObject r = null;
                 try {
-                    JSONObject r = engine.checkin(ak);
+                    r = engine.checkin(ak);
                     boolean ok = r.optBoolean("ok");
                     lvl = ok ? "ok" : "err";
                     sum = r.optString("message", ok ? "完成" : "失败");
                     if (ok) stat[0]++; else stat[1]++;
                 } catch (Exception e) { lvl = "err"; sum = String.valueOf(e.getMessage()); stat[1]++; }
                 store.opLog(sk, ak, "一键签到", lvl, sum, "", "user");
-                final String flvl = lvl;
-                h.post(() -> { pushLog(store); runBulkCheckin(list, idx + 1, stat); });
+                final JSONObject fr = r;
+                h.post(() -> {
+                    pushLog(store);
+                    if (fr != null) applyCheckinResult(ak, fr, true);
+                    runBulkCheckin(list, idx + 1, stat);
+                });
             }).start();
         }
     }
@@ -546,11 +629,12 @@ public class MainActivity extends Activity {
             if (accs == null) continue;
             for (int j = 0; j < accs.length(); j++) {
                 JSONObject a = accs.optJSONObject(j);
-                if (a == null || a.optString("token", "").isEmpty()) continue;
+                if (a == null) continue;
+/* v0.2.3：token 为空也纳入 —— 后台会自动交换凭据，不该被跳过 */
                 targets.add(new String[]{ s.optString("key"), a.optString("key") });
             }
         }
-        if (targets.isEmpty()) { toast("没有已授权账号"); return; }
+        if (targets.isEmpty()) { toast("没有账号可刷新"); return; }
         if (page != 0) showPage(0);
         LogPopup.autoShow(this);
         bulkBusy = true;
@@ -559,19 +643,12 @@ public class MainActivity extends Activity {
             int ok = 0, err = 0;
             for (int i = 0; i < targets.size(); i++) {
                 final int n = i + 1;
-                h.post(() -> setTabAction(tabRefreshIcon, tabRefreshText, Ui.ic("hourglass"),
-                        "刷新 " + n + "/" + targets.size(), Ui.BLUE));
+                h.post(() -> setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
+                        n + "/" + targets.size(), Ui.BLUE));
                 String[] t = targets.get(i);
                 try {
                     JSONObject stt = engine.status(t[1]);
-                    JSONObject patch = new JSONObject().put("lastStatus", stt);
-                    if (stt.optBoolean("todayChecked", false)) {
-                        patch.put("lastCheckin", new JSONObject()
-                                .put("date", Engine.todayStr())
-                                .put("reward", stt.optDouble("todayRewardUSD", 0))
-                                .put("time", System.currentTimeMillis()));
-                    }
-                    store.patchAccount(t[1], patch);
+                    store.patchAccount(t[1], buildStatusPatch(stt));
                     if (stt.optBoolean("ok")) ok++; else err++;
                 } catch (Exception e) {
                     err++;
@@ -582,17 +659,21 @@ public class MainActivity extends Activity {
             final int fok = ok, ferr = err;
             h.post(() -> {
                 bulkBusy = false;
-                setTabAction(tabRefreshIcon, tabRefreshText, Ui.ic("check"), "完成", Ui.GREEN);
+                setTabAction(tabRefreshIcon, tabRefreshText, "check", "完成", Ui.GREEN);
                 h.postDelayed(() -> setTabAction(tabRefreshIcon, tabRefreshText,
-                        Ui.ic("tab_refresh"), "一键刷新", Ui.TXT2), 1200);
+                        "refresh", "刷新", Ui.BLUE), 1200);
                 render();
                 toast("刷新完成：成功 " + fok + " · 失败 " + ferr);
             });
         }).start();
     }
 
-    private void setTabAction(TextView icon, TextView text, String ic, String label, int color) {
-        if (icon != null) { icon.setText(ic); icon.setTextColor(color); }
+    /** 动作型 Tab 的进度态：换图标 + 换文案（配色保持该按钮固有风格，只在完成时闪一下绿色文字） */
+    private void setTabAction(TextView icon, TextView text, String iconName, String label, int color) {
+        if (icon != null) {
+            icon.setCompoundDrawablesWithIntrinsicBounds(
+                    Icons.d(this, iconName, 17, color), null, null, null);
+        }
         if (text != null) { text.setText(label); text.setTextColor(color); }
     }
 
@@ -611,19 +692,29 @@ public class MainActivity extends Activity {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) { toast("站点信息缺失"); return; }
         final String sk = site.optString("key", "");
-        final String ct = site.optString("checkinType", "");
         if (sk.isEmpty()) { toast("站点信息缺失"); return; }
+
+        /* 网页手动型：没有可用签到接口，直接开站点主页交给用户，不假装在签 */
+        if (Engine.isWebOnly(site)) {
+            String home = site.optString("homeUrl", site.optString("baseUrl", ""));
+            store.opLog(sk, key, "签到", "info", "该站需网页手动签到，已打开站点", home, "user");
+            toast("该站不开放签到接口，已打开网页");
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(home))); }
+            catch (Exception e) { toast("无法打开链接"); }
+            return;
+        }
+
         singleBusy = true;
         if (btn != null) btn.setText("签到中…");
         LogPopup.autoShow(this);
 
-        if (!"manual".equals(ct)) {
+        if (!Engine.isAutoCheckin(site)) {
             new Thread(() -> {
                 try {
                     JSONObject r = engine.checkin(key);
                     store.opLog(sk, key, "签到", r.optBoolean("ok") ? "ok" : "err",
                             r.optString("message", ""), "", "user");
-                    h.post(() -> { singleBusy = false; pushLog(store); applyCheckinResult(r); render(); });
+                    h.post(() -> { singleBusy = false; pushLog(store); applyCheckinResult(key, r); render(); });
                 } catch (Exception e) {
                     store.opLog(sk, key, "签到", "err", "签到失败", String.valueOf(e.getMessage()), "user");
                     h.post(() -> { singleBusy = false; pushLog(store); toast("签到失败: " + e.getMessage()); render(); });
@@ -631,23 +722,29 @@ public class MainActivity extends Activity {
             }).start();
             return;
         }
-        OffscreenCheckin.run(this, sk, key, 100, (ok, already, reward, msg) -> {
+        OffscreenCheckin.run(this, sk, key, 100, (ok, already, reward, rewardKnown, msg) -> {
             singleBusy = false;
-            store.opLog(sk, key, "签到", ok ? "ok" : "err",
-                    ok ? (already ? "今日已签" : ("签到成功 +$" + Ui.usd(reward))) : msg,
+            String sum;
+            if (!ok) sum = msg;
+            else if (already) sum = (msg == null || msg.isEmpty()) ? "今日已签" : msg;
+            else sum = rewardKnown && reward > 0 ? ("签到成功 +$" + Ui.usd(reward)) : "签到成功";
+            store.opLog(sk, key, "签到", ok ? "ok" : "err", sum,
                     ok ? "" : "后台离屏 WebView", "user");
             pushLog(store);
             if (ok) {
                 JSONObject r = new JSONObject();
                 try { r.put("ok", true).put("already", already).put("reward", reward)
+                        .put("rewardKnown", rewardKnown)
                         .put("message", msg == null ? "" : msg); } catch (Exception ignored) {}
-                applyCheckinResult(r);
+                applyCheckinResult(key, r);
                 render();
                 return;
             }
             final String m = msg == null ? "" : msg;
+            /* 后台跑不通（网络/注入/人机验证需交互）→ 转可见兜底，让用户看得见 */
             boolean envFail = m.startsWith("net::") || m.contains("超时") || m.contains("HTTP")
-                    || m.contains("加载失败") || m.contains("注入失败") || m.contains("人机验证未通过");
+                    || m.contains("加载失败") || m.contains("注入失败")
+                    || m.contains("人机验证") || m.contains("手动确认");
             if (!envFail) { toast(m.isEmpty() ? "签到失败" : m); render(); return; }
             Intent it = new Intent(this, CheckinActivity.class);
             it.putExtra("siteKey", sk);
@@ -656,19 +753,38 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void applyCheckinResult(JSONObject r) {
+    /**
+     * 签到结果落地：toast 提示 + 自动刷新额度。
+     *
+     * v0.2.3：签到成功/已签后立即自动刷一次三大额度（可用/累计已用/今日消耗），
+     * 用户不用再手点一次刷新。batchMode=true 时跳过刷新 —— 批量签到结束后统一刷，
+     * 免得 N 个账号各刷一遍把站点打满。
+     */
+    private void applyCheckinResult(String accountKey, JSONObject r, boolean batchMode) {
         double reward = r.optDouble("reward", 0);
+        boolean known = r.optBoolean("rewardKnown", false);
         if (r.optBoolean("already")) {
             String m = r.optString("message", "今日已签到");
-            if (reward > 0) m += " · 今日奖励 $" + Ui.usd(reward);
-            toast(m);
+            if (known && reward > 0) m += " · 奖励 $" + Ui.usd(reward);
+            if (!batchMode) toast(m);
         } else if (r.optBoolean("ok")) {
-            toast(reward > 0 ? ("签到成功 本次奖励 +$" + Ui.usd(reward)) : r.optString("message", "签到成功"));
+            if (!batchMode) {
+                if (known && reward > 0) toast("签到成功 本次奖励 +$" + Ui.usd(reward));
+                else toast(r.optString("message", "签到成功"));
+            }
         } else if (r.optBoolean("auth")) {
-            toast("授权已过期，请点「重新授权」");
+            if (!batchMode) toast("授权已过期，正在后台重新交换凭据…");
         } else {
-            toast(r.optString("message", "签到失败"));
+            if (!batchMode) toast(r.optString("message", "签到失败"));
         }
+
+        if (!batchMode && (r.optBoolean("ok") || r.optBoolean("already"))) {
+            if (accountKey != null && !accountKey.isEmpty()) refreshOne(accountKey);
+        }
+    }
+
+    private void applyCheckinResult(String accountKey, JSONObject r) {
+        applyCheckinResult(accountKey, r, false);
     }
 
     private void refreshSite(JSONObject site) {
@@ -682,19 +798,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 串行刷新一批账号（批量签到收尾用，避免并发把站点打满） */
+    private void refreshKeys(java.util.List<String> keys) {
+        if (keys == null || keys.isEmpty()) return;
+        new Thread(() -> {
+            Store store = new Store(this);
+            for (String key : keys) {
+                if (key == null || key.isEmpty()) continue;
+                try {
+                    JSONObject st = engine.status(key);
+                    store.patchAccount(key, buildStatusPatch(st));
+                } catch (Exception ignored) {}
+            }
+            h.post(() -> { pushLog(store); render(); });
+        }, "bulk-refresh-after-checkin").start();
+    }
+
+    /** status() 结果 → 账号 patch（lastStatus + 今日签到徽章） */
+    private JSONObject buildStatusPatch(JSONObject st) throws Exception {
+        JSONObject patch = new JSONObject().put("lastStatus", st);
+        if (st.optBoolean("todayChecked", false)) {
+            JSONObject lc = new JSONObject()
+                    .put("date", Engine.todayStr())
+                    .put("time", System.currentTimeMillis());
+            if (st.optBoolean("todayRewardKnown", false)) {
+                lc.put("reward", st.optDouble("todayRewardUSD", 0));
+            }
+            patch.put("lastCheckin", lc);
+        }
+        return patch;
+    }
+
     private void refreshOne(String key) {
         new Thread(() -> {
             Store store = new Store(this);
             try {
                 JSONObject st = engine.status(key);
-                JSONObject patch = new JSONObject().put("lastStatus", st);
-                if (st.optBoolean("todayChecked", false)) {
-                    patch.put("lastCheckin", new JSONObject()
-                            .put("date", Engine.todayStr())
-                            .put("reward", st.optDouble("todayRewardUSD", 0))
-                            .put("time", System.currentTimeMillis()));
-                }
-                store.patchAccount(key, patch);
+                store.patchAccount(key, buildStatusPatch(st));
                 h.post(() -> { pushLog(store); render(); });
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
@@ -768,12 +908,12 @@ public class MainActivity extends Activity {
             String gh = c.optString("githubUser", "");
             String sa = c.optString("siteAccount", "");
             String who = !gh.isEmpty() ? gh : sa;
-            labels.add(Ui.ic("user") + " " + c.optString("alias", who)
+            labels.add(c.optString("alias", who)
                     + (who.isEmpty() ? "" : ("  (" + who + ")"))
                     + (store.credHasTwofa(c.optString("id")) ? "  · 2FA" : ""));
             ids.add(c.optString("id"));
         }
-        labels.add(Ui.ic("plus") + " 录入新账号…");
+        labels.add("录入新账号…");
         new AlertDialog.Builder(this)
                 .setTitle("为「" + site.optString("name") + "」添加账号")
                 .setItems(labels.toArray(new String[0]), (d, w) -> {
@@ -838,12 +978,30 @@ public class MainActivity extends Activity {
     }
 
     private void startAuth(JSONObject site, JSONObject acc) {
-        Intent it = new Intent(this, AuthActivity.class);
-        it.putExtra("siteKey", site.optString("key"));
-        it.putExtra("accountKey", acc.optString("key"));
-        it.putExtra("alias", acc.optString("alias"));
-        it.putExtra("credentialId", acc.optString("credentialId", ""));
-        startActivityForResult(it, REQ_AUTH);
+        if (site == null || acc == null) return;
+        final String sk = site.optString("key");
+        final String ak = acc.optString("key");
+        final String al = acc.optString("alias");
+        final String cid = acc.optString("credentialId", "");
+
+        /* 优化：先尝试纯后台静默授权（利用系统现有的 GitHub 登录会话），
+           成功则完全不弹任何页面；只有 GitHub 会话过期确实需要用户登录时才弹窗 */
+        SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
+            if (ok) {
+                new Store(this).opLog(sk, ak, "授权", "ok",
+                        "凭据已自动后台交换成功" + (user == null || user.isEmpty() ? "" : (" · " + user)), "", "auto");
+                toast("授权成功（已自动静默完成）");
+                render();
+                return;
+            }
+            /* 后台无法完成（需要人工交互/登录/2FA）→ 才拉起可见 AuthActivity 界面 */
+            Intent it = new Intent(this, AuthActivity.class);
+            it.putExtra("siteKey", sk);
+            it.putExtra("accountKey", ak);
+            it.putExtra("alias", al);
+            it.putExtra("credentialId", cid);
+            startActivityForResult(it, REQ_AUTH);
+        });
     }
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
@@ -855,13 +1013,15 @@ public class MainActivity extends Activity {
                 r.put("ok", data.getBooleanExtra("ok", false))
                  .put("already", data.getBooleanExtra("already", false))
                  .put("reward", data.getDoubleExtra("reward", 0))
+                 .put("rewardKnown", data.getBooleanExtra("rewardKnown", false))
                  .put("auth", data.getBooleanExtra("auth", false))
                  .put("message", data.getStringExtra("message") == null ? "" : data.getStringExtra("message"));
             } catch (Exception ignored) {}
-            store.opLog("", "", "可见兜底签到", r.optBoolean("ok") ? "ok" : "err",
+            String ak = data.getStringExtra("accountKey");
+            store.opLog("", ak == null ? "" : ak, "可见兜底签到", r.optBoolean("ok") ? "ok" : "err",
                     r.optString("message", ""), "", "user");
             pushLog(store);
-            applyCheckinResult(r);
+            applyCheckinResult(ak, r);
             render();
         }
         if (req == REQ_AUTH) {

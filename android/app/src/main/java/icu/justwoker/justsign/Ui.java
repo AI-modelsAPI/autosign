@@ -12,21 +12,20 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-
 /**
- * Ui（v0.2.0）— 共享 View 工厂 + 双套图标集。
+ * Ui（v0.2.1）— 共享 View 工厂 + 扁平单色图标接入。
  *
- * 【图标双套方案】部分定制 ROM 字库缺 emoji 字形（渲染成方框豆腐块）。
- *   启动时用 Paint.hasGlyph 探测代表字符（🗑 U+1F5D1），缺失则整体切到几何符号集。
- *   设置里另留手动开关（uiPrefs.geometricIcons）覆盖自动判定。
+ * 【v0.2.1 图标改造】彻底移除 emoji 图标（🗑🔄⚡ 各自带颜色，混在一起五颜六色，
+ *   且不同 ROM 字形不一、缺字形变豆腐块）。改为 Icons 用 Canvas 画的 24×24 线性图标：
+ *   严格单色（跟随文字色）、扁平、无渐变无阴影。
+ *   文字带图标统一走 iconText / iconBtn / iconPill（CompoundDrawable，与文字同色同基线）。
  *
- * 【尺寸】本项目历史代码全部用 px 直写（如 setPadding(36,32,36,28)），
- *   为保持一致并避免混用，这里提供 dp(ctx,int) 统一换算，新代码一律走它。
+ * 【尺寸】统一 dp(ctx,v) 换算。
  */
 public final class Ui {
     private Ui() {}
 
-    /* ================= 配色（gemini 定稿） ================= */
+    /* ================= 配色 ================= */
     public static final int BG        = 0xFFF8F9FA;
     public static final int CARD      = 0xFFFFFFFF;
     public static final int CARD_SUB  = 0xFFF9FAFB;
@@ -59,69 +58,13 @@ public final class Ui {
     public static final int LOG_TXT   = 0xFFF8FAFC;
     public static final int SCRIM     = 0x66000000;
 
-    /* ================= 图标集 ================= */
-
-    /** true = 用几何符号集（设备缺 emoji 字形，或用户手动开启） */
-    private static Boolean geometric = null;
-
-    public static void initIcons(Context c) {
-        boolean forced = false;
-        try {
-            forced = new Store(c).uiPref("geometricIcons", false);
-        } catch (Exception ignored) {}
-        if (forced) { geometric = true; return; }
-        boolean ok = true;
-        try {
-            Paint p = new Paint();
-            /* 代表性 emoji：🗑 与 🔄，任一缺失就整体降级 */
-            ok = p.hasGlyph("\uD83D\uDDD1") && p.hasGlyph("\uD83D\uDD04");
-        } catch (Throwable t) { ok = false; }
-        geometric = !ok;
-    }
-
-    public static boolean isGeometric() { return geometric != null && geometric; }
-
-    /** 图标查表：emoji 主选 / 几何备选（用途名 → 字符） */
-    public static String ic(String name) {
-        boolean g = isGeometric();
-        switch (name) {
-            case "tab_board":   return g ? "\u2611"  : "\uD83D\uDCCB"; // ☑ / 📋
-            case "tab_checkin": return g ? "\u25B6"  : "\u26A1";       // ▶ / ⚡
-            case "tab_refresh": return g ? "\u27F3"  : "\uD83D\uDD04"; // ⟳ / 🔄
-            case "tab_log":     return g ? "\u2261"  : "\uD83D\uDCDC"; // ≡ / 📜
-            case "tab_settings":return g ? "\u25C8"  : "\u2699";       // ◈ / ⚙
-            case "link":        return g ? "\u2794"  : "\u2197";       // ➔ / ↗
-            case "more":        return g ? "\u22EE"  : "\u22EF";       // ⋮ / ⋯
-            case "check":       return "\u2713";                        // ✓（全设备可用）
-            case "cross":       return "\u2715";                        // ✕
-            case "edit":        return g ? "\u270E"  : "\u270F";       // ✎ / ✏
-            case "trash":       return g ? "\u2715"  : "\uD83D\uDDD1"; // ✕ / 🗑
-            case "user":        return g ? "\u03A9"  : "\uD83D\uDC64"; // Ω / 👤
-            case "eye":         return g ? "\u25CE"  : "\uD83D\uDC41"; // ◎ / 👁
-            case "eye_off":     return g ? "\u2298"  : "\uD83D\uDD76"; // ⊘ / 🕶
-            case "clock":       return g ? "\u25F7"  : "\u23F0";       // ◷ / ⏰
-            case "plug":        return g ? "\u260D"  : "\uD83D\uDD0C"; // ☍ / 🔌
-            case "bell":        return g ? "\u25CB"  : "\uD83D\uDD14"; // ○ / 🔔
-            case "globe":       return g ? "\u25C9"  : "\uD83C\uDF10"; // ◉ / 🌐
-            case "back":        return g ? "\u25C0"  : "\u2190";       // ◀ / ←
-            case "plus":        return "\uFF0B";                        // ＋
-            case "chevron":     return "\u203A";                        // ›
-            case "dot_ok":      return g ? "\u25CF"  : "\uD83D\uDFE2"; // ● / 🟢
-            case "dot_err":     return g ? "\u25A0"  : "\uD83D\uDD34"; // ■ / 🔴
-            case "dot_info":    return g ? "\u25C6"  : "\uD83D\uDD35"; // ◆ / 🔵
-            case "hourglass":   return g ? "\u25F4"  : "\u23F3";       // ◴ / ⏳
-            case "pkg":         return g ? "\u25A3"  : "\uD83D\uDCE6"; // ▣ / 📦
-            case "info":        return g ? "\u24D8"  : "\u2139";       // ⓘ / ℹ
-            default:            return "";
-        }
-    }
-
     /* ================= 尺寸 ================= */
 
     public static int dp(Context c, float v) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
                 c.getResources().getDisplayMetrics()));
     }
+
 
     /* ================= 背景 ================= */
 
@@ -190,6 +133,75 @@ public final class Ui {
         t.setFocusable(true);
         t.setGravity(Gravity.CENTER);
         return t;
+    }
+
+    /* ================= 图标（Icons 绘制，单色扁平） ================= */
+
+    /** 兼容旧调用；图标改为程序化绘制后无需初始化，保留空实现 */
+    public static void initIcons(Context c) { /* no-op since v0.2.1 */ }
+
+    /** 纯图标（无文字）ImageView */
+    public static android.widget.ImageView icon(Context c, String name, int sizeDp, int color) {
+        return Icons.view(c, name, sizeDp, color);
+    }
+
+    /** 纯图标可点击按钮（无底，触控区 ≥ 32dp） */
+    public static View iconBtn(Context c, String name, int sizeDp, int color, int padDp) {
+        LinearLayout box = row(c);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(c, padDp), dp(c, padDp), dp(c, padDp), dp(c, padDp));
+        box.setClickable(true);
+        box.setFocusable(true);
+        box.addView(Icons.view(c, name, sizeDp, color));
+        return box;
+    }
+
+    /** 文字 + 前置图标（CompoundDrawable，与文字同色同基线） */
+    public static TextView iconText(Context c, String name, String text, float sp, int color, boolean bold) {
+        TextView t = tv(c, text, sp, color, bold);
+        int size = Math.round(sp * 1.15f);
+        t.setCompoundDrawablesWithIntrinsicBounds(Icons.d(c, name, size, color), null, null, null);
+        t.setCompoundDrawablePadding(dp(c, 5));
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        return t;
+    }
+
+    /** 图标 + 文字的浅底按钮 */
+    public static TextView iconBtnText(Context c, String name, String text, float sp,
+                                       int fg, int bg, int hPadDp, int vPadDp) {
+        TextView t = iconText(c, name, text, sp, fg, true);
+        t.setBackground(round(bg, dp(c, 6)));
+        t.setPadding(dp(c, hPadDp), dp(c, vPadDp), dp(c, hPadDp), dp(c, vPadDp));
+        t.setClickable(true);
+        t.setFocusable(true);
+        return t;
+    }
+
+    /** 图标 + 文字的胶囊标签 */
+    public static TextView iconPill(Context c, String name, String text, float sp, int fg, int bg) {
+        TextView t = iconText(c, name, text, sp, fg, true);
+        t.setBackground(round(bg, dp(c, 10)));
+        t.setPadding(dp(c, 8), dp(c, 3), dp(c, 8), dp(c, 3));
+        return t;
+    }
+
+    /** 文字 + 后置图标（如「日志 ›」「站点名 ↗」） */
+    public static TextView textIcon(Context c, String text, String name, float sp, int color, boolean bold) {
+        TextView t = tv(c, text, sp, color, bold);
+        int size = Math.round(sp * 1.1f);
+        t.setCompoundDrawablesWithIntrinsicBounds(null, null, Icons.d(c, name, size, color), null);
+        t.setCompoundDrawablePadding(dp(c, 3));
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        return t;
+    }
+
+    /** 把已存在 TextView 的前置图标换掉（进度态切换用） */
+    public static void setLead(TextView t, String name, float sp, int color) {
+        if (t == null) return;
+        int size = Math.round(sp * 1.15f);
+        t.setCompoundDrawablesWithIntrinsicBounds(
+                Icons.d(t.getContext(), name, size, color), null, null, null);
+        t.setCompoundDrawablePadding(dp(t.getContext(), 5));
     }
 
     /* ================= 容器 ================= */

@@ -40,7 +40,13 @@ import org.json.JSONObject;
  */
 public final class OffscreenCheckin {
 
-    public interface Callback { void onResult(boolean ok, boolean already, double reward, String message); }
+    /**
+     * @param rewardKnown 服务端是否给出了明确的奖励数额
+     *                    （false = 查不到记录，UI 不应展示金额；true + reward==0 = 本站签到无奖励）
+     */
+    public interface Callback {
+        void onResult(boolean ok, boolean already, double reward, boolean rewardKnown, String message);
+    }
 
     private OffscreenCheckin() {}
 
@@ -49,8 +55,17 @@ public final class OffscreenCheckin {
         if (ctx0 == null || cb == null) return;
         final Context app = ctx0.getApplicationContext();
         final int to = timeoutSec > 0 ? timeoutSec : 100;
-        new Handler(Looper.getMainLooper()).post(
-                () -> new Runner(app, siteKey, accountKey, to, cb).start());
+        /* v0.2.3：签到前先在后台确保凭据可用（过期就静默换一次），
+           否则注入的 JS 会拿着过期 token 打 checkin，白跑一趟 WebView。 */
+        new Thread(() -> {
+            try {
+                Store st = new Store(app);
+                JSONObject site = st.findSite(siteKey);
+                if (site != null) SilentAuth.ensureToken(app, st, site, accountKey);
+            } catch (Exception ignored) {}
+            new Handler(Looper.getMainLooper()).post(
+                    () -> new Runner(app, siteKey, accountKey, to, cb).start());
+        }, "offcheckin-pre").start();
     }
 
     private static final class Runner {
@@ -66,11 +81,14 @@ public final class OffscreenCheckin {
         private WebView wv;
         private volatile boolean done = false;
         private volatile boolean fired = false;
+        /** JS 报「人机验证可能需要交互」→ 后台跑不通，通知调用方转可见兜底 */
+        private volatile boolean needUi = false;
 
         Runner(Context ctx, String siteKey, String accountKey, int timeoutSec, Callback cb) {
             this.ctx = ctx; this.siteKey = siteKey; this.accountKey = accountKey;
             this.timeoutSec = timeoutSec; this.cb = cb;
-            this.timeoutTask = () -> finish(false, false, 0, "后台签到超时（人机验证未完成）");
+            this.timeoutTask = () -> finish(false, false, 0, false,
+                    needUi ? "人机验证需要手动确认" : "后台签到超时");
         }
 
         /** 必须在主线程调用 */
@@ -79,10 +97,10 @@ public final class OffscreenCheckin {
             try {
                 Store store = new Store(ctx);
                 JSONObject site = store.findSite(siteKey);
-                if (site == null) { finish(false, false, 0, "站点不存在"); return; }
+                if (site == null) { finish(false, false, 0, false, "站点不存在"); return; }
                 final String base = site.optString("baseUrl", "").replaceAll("/+$", "");
-                if (base.isEmpty()) { finish(false, false, 0, "站点 baseUrl 为空"); return; }
-                if (accountKey == null || accountKey.isEmpty()) { finish(false, false, 0, "账号缺失"); return; }
+                if (base.isEmpty()) { finish(false, false, 0, false, "站点 baseUrl 为空"); return; }
+                if (accountKey == null || accountKey.isEmpty()) { finish(false, false, 0, false, "账号缺失"); return; }
 
                 wv = new WebView(ctx); /* 离屏：不 attach 窗口，无 UI，JS 全速运行 */
                 WebSettings s = wv.getSettings();
@@ -101,17 +119,18 @@ public final class OffscreenCheckin {
                         if (url == null || url.startsWith("about:")) return;
                         fired = true;
                         try { v.evaluateJavascript(js(), null); }
-                        catch (Exception e) { finish(false, false, 0, "注入失败: " + e.getMessage()); }
+                        catch (Exception e) { finish(false, false, 0, false, "注入失败: " + e.getMessage()); }
                     }
                     @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                         if (r == null || !r.isForMainFrame()) return;
-                        finish(false, false, 0, "net::" + (e != null ? String.valueOf(e.getDescription()) : "unknown"));
+                        finish(false, false, 0, false,
+                                "net::" + (e != null ? String.valueOf(e.getDescription()) : "unknown"));
                     }
                     @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
                                                               android.webkit.WebResourceResponse rsp) {
                         if (r == null || !r.isForMainFrame()) return;
                         int code = rsp != null ? rsp.getStatusCode() : 0;
-                        if (code >= 400) finish(false, false, 0, "站点返回 HTTP " + code);
+                        if (code >= 400) finish(false, false, 0, false, "站点返回 HTTP " + code);
                     }
                 });
                 main.postDelayed(timeoutTask, timeoutSec * 1000L);
@@ -119,10 +138,10 @@ public final class OffscreenCheckin {
                 applyProxyThen(new Store(ctx), () -> {
                     if (done) return;
                     try { if (wv != null) wv.loadUrl(base + "/"); }
-                    catch (Exception e) { finish(false, false, 0, "加载失败: " + e.getMessage()); }
+                    catch (Exception e) { finish(false, false, 0, false, "加载失败: " + e.getMessage()); }
                 });
             } catch (Throwable t) {
-                finish(false, false, 0, "后台签到异常: " + t.getMessage());
+                finish(false, false, 0, false, "后台签到异常: " + t.getMessage());
             }
         }
 
@@ -187,7 +206,8 @@ public final class OffscreenCheckin {
             return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken);
         }
 
-        private synchronized void finish(boolean ok, boolean already, double reward, String message) {
+        private synchronized void finish(boolean ok, boolean already, double reward,
+                                        boolean rewardKnown, String message) {
             if (done) return;
             done = true;
             main.removeCallbacks(timeoutTask);
@@ -199,26 +219,37 @@ public final class OffscreenCheckin {
                 catch (Exception ignored) {}
             });
 
-            /* 成功（含"今日已签"）→ 写本地当日徽章，置灰立即生效 */
+            /* 成功（含"今日已签"）→ 写本地当日徽章，置灰立即生效。
+               rewardKnown=false 时不写 reward 字段，避免把「未知」显示成 $0 */
             if (ok) {
                 try {
                     JSONObject lc = new JSONObject()
                             .put("date", Engine.todayStr())
-                            .put("reward", reward)
                             .put("time", System.currentTimeMillis());
+                    if (rewardKnown) lc.put("reward", reward);
                     new Store(ctx).patchAccount(accountKey, new JSONObject().put("lastCheckin", lc));
                 } catch (Exception ignored) {}
             }
 
-            final boolean fok = ok, fal = already;
+            final boolean fok = ok, fal = already, frk = rewardKnown;
             final double frw = reward;
             final String fmsg = message == null ? "" : message;
-            main.post(() -> { try { cb.onResult(fok, fal, frw, fmsg); } catch (Exception ignored) {} });
+            main.post(() -> { try { cb.onResult(fok, fal, frw, frk, fmsg); } catch (Exception ignored) {} });
         }
 
         /** JS 与 Java 的桥：结果回传 + 续期新 token / 站点 siteKey 落库 */
         private class Bridge {
-            @JavascriptInterface public void onProgress(String m) { /* 纯后台无 UI，忽略 */ }
+            @JavascriptInterface public void onProgress(String m) {
+                /* 纯后台无 UI；只关心「需要人机交互」这个信号 */
+                if (m == null || !m.contains(CheckinJs.SIGNAL_NEED_UI)) return;
+                if (needUi) return;
+                needUi = true;
+                /* 给 4 秒宽限：interaction-only 挂件常在这之后才静默放行。
+                   仍未完成就提前收工，让调用方立刻转可见兜底，而不是干等到 100s 超时。 */
+                main.postDelayed(() -> {
+                    if (!done) finish(false, false, 0, false, "人机验证需要手动确认");
+                }, 4000);
+            }
 
             @JavascriptInterface public void onResult(String json) {
                 /* JS 桥回调在 WebView 内部线程，必须切主线程再动 WebView/Store */
@@ -242,10 +273,19 @@ public final class OffscreenCheckin {
                         long unit = r.optLong("unit", 0);
                         if (unit > 0) store.putSiteMeta(siteKey, "quotaPerUnit", unit);
 
+                        /* 失败原因里带上 JS 给的细节（tsError / detail），便于日志定位 */
+                        String msg = r.optString("message", "");
+                        String detail = r.optString("detail", "");
+                        String tsErr = r.optString("tsError", "");
+                        if (!r.optBoolean("ok", false)) {
+                            if (!detail.isEmpty()) msg = msg + " · " + detail;
+                            else if (!tsErr.isEmpty()) msg = msg + " · " + tsErr;
+                        }
+
                         finish(r.optBoolean("ok", false), r.optBoolean("already", false),
-                                r.optDouble("reward", 0), r.optString("message", ""));
+                                r.optDouble("reward", 0), r.optBoolean("rewardKnown", false), msg);
                     } catch (Exception e) {
-                        finish(false, false, 0, "后台签到结果解析失败");
+                        finish(false, false, 0, false, "后台签到结果解析失败");
                     }
                 });
             }

@@ -4,7 +4,6 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -38,17 +37,8 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /**
- * AuthActivity（v0.2.0）— GitHub 授权桥 + 凭据自动填充。
- *
- * 【v0.2.0 修复 state 竞速（第二次授权必失败的根因）】
- * 实测：首次授权时 WebView 缓存冷，站点 3.4MB SPA 加载慢，我们延迟注入的脚本抢先消费
- * flow_token → 成功；第二次资源已缓存，SPA 秒起并**自己先消费掉单次有效的 flow_token**
- * → 我们再调 /api/oauth/github 得到「State parameter is empty or mismatched」。
- * 修法：shouldOverrideUrlLoading 拦截站点 /oauth/ 回调 URL 并 return true（页面根本不加载），
- * 由 OkHttp 直接完成 code 交换。SPA 没有机会启动，不再赛跑。
- *
- * 【自动填充】GitHub 登录页 / 站点登录页出现账号密码框时注入 AuthFillJs 填入凭据。
- *   2FA：凭据配了才填并聚焦；没配则完全跳过（用户明确要求）。
+ * AuthActivity（v0.2.3）— GitHub 授权（仅在需要人工交互时由 MainActivity 拉起）。
+ * 优先在后台静默完成（SilentAuth）；只有需要用户登录/2FA时才展示本界面。
  */
 public class AuthActivity extends Activity {
 
@@ -63,12 +53,12 @@ public class AuthActivity extends Activity {
     private volatile boolean proxyApplied = false;
     private volatile boolean exchanging = false;
     private volatile boolean filled = false;
+    private volatile String authUrl = "";
+    private volatile int reauthTries = 0;
 
-    /* 凭据快照（用于自动填充） */
     private String credAccount = "", credPassword = "", credOtp = "";
     private boolean credHasOtp = false;
 
-    /** JS ↔ Java 桥 */
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
             if (done) return;
@@ -79,8 +69,27 @@ public class AuthActivity extends Activity {
                 try {
                     JSONObject r = new JSONObject(json);
                     if (!r.optBoolean("ok")) return;
+                    String act = r.optString("action", "");
+                    if (!act.isEmpty()) {
+                        String label;
+                        switch (act) {
+                            case "submitLogin": label = "已自动点击登录"; break;
+                            case "submit2fa":   label = "已自动提交 2FA 验证码"; break;
+                            case "switch2fa":   label = "已切换到验证器 App 验证"; break;
+                            case "expand2fa":   label = "已展开其他验证方式"; break;
+                            default:            label = act; break;
+                        }
+                        showTip(label);
+                        new Store(AuthActivity.this).opLog(siteKey, accountKey, "自动登录", "ok",
+                                label, r.optString("label", ""), "auto");
+                        if ("submitLogin".equals(act) || "switch2fa".equals(act) || "expand2fa".equals(act)) {
+                            filled = false;
+                        }
+                        return;
+                    }
                     Object f = r.opt("filled");
-                    String what = f == null ? "" : String.valueOf(f);
+                    if (f == null) return;
+                    String what = String.valueOf(f);
                     showTip("已自动填充 " + what.replace("[", "").replace("]", "").replace("\"", ""));
                     new Store(AuthActivity.this).opLog(siteKey, accountKey, "自动填充", "ok",
                             "已填充 " + what, credHasOtp ? "含 2FA 动态码" : "该账号无 2FA", "auto");
@@ -92,7 +101,6 @@ public class AuthActivity extends Activity {
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Ui.initIcons(this);
         siteKey = getIntent().getStringExtra("siteKey");
         accountKey = getIntent().getStringExtra("accountKey");
         alias = getIntent().getStringExtra("alias");
@@ -108,7 +116,6 @@ public class AuthActivity extends Activity {
         }
         try { siteHost = new java.net.URL(baseUrl).getHost(); } catch (Exception e) { siteHost = ""; }
 
-        /* 凭据快照：账号 / 密码 / 2FA（没配 2FA 则 credOtp 为空串，脚本整体跳过） */
         if (credentialId == null || credentialId.isEmpty()) {
             JSONObject acc = store.findAccount(accountKey);
             if (acc != null) credentialId = acc.optString("credentialId", "");
@@ -135,15 +142,14 @@ public class AuthActivity extends Activity {
         try { CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
         wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
-            /* 关键：拦截站点 /oauth/ 回调，不让 SPA 加载抢消费 flow_token */
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                 if (req == null || req.getUrl() == null) return false;
                 return interceptCallback(req.getUrl().toString());
             }
             @Override public void onPageFinished(WebView v, String url) {
                 maybeFill(url);
-                /* 兜底：若拦截未命中（部分重定向不过 shouldOverride），页面已落地时再交换一次 */
-                if (url != null) interceptCallback(url);
+                if (url != null && interceptCallback(url)) return;
+                maybeResumeAuthorize(url);
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest req, android.webkit.WebResourceError err) {
                 if (req == null || !req.isForMainFrame()) return;
@@ -159,7 +165,6 @@ public class AuthActivity extends Activity {
         wv.setVisibility(View.GONE);
         root.addView(wv, new FrameLayout.LayoutParams(-1, -1));
 
-        /* 启动层 */
         boot = Ui.col(this);
         boot.setGravity(Gravity.CENTER);
         boot.setBackgroundColor(Color.WHITE);
@@ -172,7 +177,6 @@ public class AuthActivity extends Activity {
         boot.addView(bootText);
         root.addView(boot, new FrameLayout.LayoutParams(-1, -1));
 
-        /* 错误层 */
         errorLayer = Ui.col(this);
         errorLayer.setGravity(Gravity.CENTER);
         errorLayer.setBackgroundColor(Color.WHITE);
@@ -197,7 +201,6 @@ public class AuthActivity extends Activity {
         errorLayer.addView(backTip, blp2);
         root.addView(errorLayer, new FrameLayout.LayoutParams(-1, -1));
 
-        /* 底部提示条 */
         tip = Ui.tv(this, "  GitHub 授权中 · 已登录将自动完成  ", 12, Color.WHITE);
         tip.setBackgroundColor(0xE6111827);
         tip.setPadding(Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10));
@@ -207,9 +210,6 @@ public class AuthActivity extends Activity {
         startAuthFlow();
     }
 
-    /* ================= 回调拦截（修 state 竞速） ================= */
-
-    /** @return true = 已拦截（阻止页面加载并自行交换） */
     private boolean interceptCallback(String url) {
         if (done || exchanging || url == null) return false;
         try {
@@ -230,7 +230,7 @@ public class AuthActivity extends Activity {
             showTip("正在交换授权凭证…");
             final String fp = provider, fc = code, fs = state;
             new Thread(() -> exchange(fp, fc, fs), "oauth-exchange").start();
-            return true;    // 阻止 WebView 加载该 URL —— SPA 不会启动，不会抢消费 flow_token
+            return true;
         } catch (Exception e) { return false; }
     }
 
@@ -247,7 +247,6 @@ public class AuthActivity extends Activity {
         return "";
     }
 
-    /** OkHttp 直接换 bundle（带上 WebView 的站点 Cookie，等价于同源 fetch） */
     private void exchange(String provider, String code, String state) {
         Response resp = null;
         String err = null;
@@ -261,8 +260,6 @@ public class AuthActivity extends Activity {
                             + "&state=" + URLEncoder.encode(state == null ? "" : state, "UTF-8"))
                     .header("Accept", "application/json")
                     .header("User-Agent", "Mozilla/5.0 (Linux; Android 16) Mobile Safari/537.36");
-            String ck = cookieOf(baseUrl);
-            if (!ck.isEmpty()) rb.header("Cookie", ck);
             resp = c.newCall(rb.build()).execute();
             int http = resp.code();
             String body = resp.body() != null ? resp.body().string() : "";
@@ -302,12 +299,25 @@ public class AuthActivity extends Activity {
         }
     }
 
-    /* ================= 自动填充 ================= */
+    private void maybeResumeAuthorize(String url) {
+        if (done || exchanging || url == null || authUrl.isEmpty()) return;
+        String u = url.toLowerCase(java.util.Locale.US);
+        if (!u.startsWith("https://github.com")) return;
+        if (u.contains("/login") || u.contains("/session") || u.contains("two-factor")
+                || u.contains("/oauth/authorize") || u.contains("device")
+                || u.contains("verified-device") || u.contains("sudo")) return;
+        if (reauthTries >= 2) {
+            showLoadError("GitHub 已登录但未跳回站点，请点重试。");
+            return;
+        }
+        reauthTries++;
+        showTip("GitHub 已登录，正在返回站点完成授权…");
+        h.postDelayed(() -> { if (!done && wv != null) wv.loadUrl(authUrl); }, 400);
+    }
 
     private void maybeFill(String url) {
         if (done || filled || url == null || url.startsWith("about:")) return;
-        if (credAccount.isEmpty() && credPassword.isEmpty()) return;   // 无凭据不注入
-        /* 只在登录相关页注入（GitHub 登录/2FA 页、站点登录页） */
+        if (credAccount.isEmpty() && credPassword.isEmpty()) return;
         String u = url.toLowerCase(java.util.Locale.US);
         boolean loginish = u.contains("github.com/login") || u.contains("/sessions")
                 || u.contains("two-factor") || u.contains("/login") || u.contains("/signin")
@@ -315,14 +325,16 @@ public class AuthActivity extends Activity {
         if (!loginish) return;
         filled = true;
         try {
-            wv.evaluateJavascript(AuthFillJs.render(credAccount, credPassword, credOtp), null);
-            showTip(credHasOtp ? "已注入账号密码与 2FA 动态码" : "已注入账号密码（该账号无 2FA）");
+            boolean autoSubmit = new Store(this).uiPref("autoSubmitLogin", true);
+            String otp = credHasOtp ? new Store(this).credTwofaCode(credentialId) : "";
+            if (!otp.isEmpty()) credOtp = otp;
+            wv.evaluateJavascript(AuthFillJs.render(credAccount, credPassword, otp, autoSubmit), null);
+            showTip(credHasOtp
+                    ? (autoSubmit ? "已填入账号密码与 2FA，正在自动登录…" : "已注入账号密码与 2FA 动态码")
+                    : (autoSubmit ? "已填入账号密码，正在自动登录…" : "已注入账号密码（该账号无 2FA）"));
         } catch (Exception ignored) {}
-        /* 允许后续页面（如 2FA 页）再次注入 */
         h.postDelayed(() -> filled = false, 2500);
     }
-
-    /* ================= 授权流程 ================= */
 
     private void startAuthFlow() {
         applyProxyThen(() -> new Thread(this::authFlowNetwork, "auth-flow").start());
@@ -336,7 +348,6 @@ public class AuthActivity extends Activity {
                     .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build(),
                     store.config().optJSONObject("proxy"));
 
-            /* 1) clientId + 顺手缓存站点 turnstileSiteKey / quota 单位 */
             try {
                 JSONObject st = getJson(c, baseUrl + "/api/status");
                 JSONObject d = st == null ? null : st.optJSONObject("data");
@@ -349,7 +360,6 @@ public class AuthActivity extends Activity {
                 }
             } catch (Exception ignored) {}
 
-            /* 2) flow_token（429 退避重试 2 次） */
             for (int attempt = 0; attempt < 3 && state == null; attempt++) {
                 Response resp = null;
                 try {
@@ -403,8 +413,9 @@ public class AuthActivity extends Activity {
                 AlphaAnimation a = new AlphaAnimation(0f, 1f);
                 a.setDuration(220);
                 wv.startAnimation(a);
-                String authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(cid)
+                authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(cid)
                         + "&state=" + enc(st2) + "&scope=user:email";
+                reauthTries = 0;
                 wv.loadUrl(authUrl);
             });
         } catch (Throwable t) {
@@ -451,8 +462,7 @@ public class AuthActivity extends Activity {
             }
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
             store.opLog(siteKey, accountKey, "授权", "ok",
-                    "授权成功" + (login == null ? "" : (" · " + login)),
-                    "token 有效 " + fmtMin(TokenKeeper.remainMinutes(token)) + " 分钟", "user");
+                    "授权成功" + (login == null ? "" : (" · " + login)), "", "user");
 
             Intent out = new Intent();
             out.putExtra("ok", true);
@@ -463,12 +473,6 @@ public class AuthActivity extends Activity {
         }
         finish();
     }
-
-    private static String fmtMin(double m) {
-        return m < 0 ? "?" : String.format(java.util.Locale.US, "%.0f", m);
-    }
-
-    /* ================= 代理 / 工具 ================= */
 
     private void applyProxyThen(Runnable then) {
         if (proxyApplied) { then.run(); return; }
@@ -531,13 +535,6 @@ public class AuthActivity extends Activity {
             return new JSONObject(body);
         } catch (Exception e) { return null; }
         finally { if (rs != null) try { rs.close(); } catch (Exception ignored) {} }
-    }
-
-    private static String cookieOf(String base) {
-        try {
-            String ck = CookieManager.getInstance().getCookie(base);
-            return ck == null ? "" : ck;
-        } catch (Exception e) { return ""; }
     }
 
     private static String enc(String s) {

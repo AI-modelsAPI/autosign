@@ -72,7 +72,7 @@ public class SettingsView extends FrameLayout {
         bar.setPadding(Ui.dp(act, 12), 0, Ui.dp(act, 16), 0);
         bar.setLayoutParams(new LinearLayout.LayoutParams(-1, Ui.dp(act, 52)));
         if (back) {
-            TextView b = Ui.flat(act, Ui.ic("back"), 18, Ui.TXT2);
+            View b = Ui.iconBtn(act, "back", 19, Ui.TXT2, 6);
             b.setOnClickListener(v -> show(PAGE_ROOT));
             bar.addView(b);
             bar.addView(Ui.gapW(act, 4));
@@ -84,7 +84,7 @@ public class SettingsView extends FrameLayout {
 
     private View barSites() {
         LinearLayout bar = (LinearLayout) bar("站点管理", true);
-        TextView add = Ui.btn(act, Ui.ic("plus") + " 手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
         add.setOnClickListener(v -> editSiteDialog(null));
         bar.addView(add);
         return bar;
@@ -92,7 +92,7 @@ public class SettingsView extends FrameLayout {
 
     private View barCreds() {
         LinearLayout bar = (LinearLayout) bar("账号凭据库", true);
-        TextView add = Ui.btn(act, Ui.ic("plus") + " 录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
         add.setOnClickListener(v -> editCredDialog(null));
         bar.addView(add);
         return bar;
@@ -132,12 +132,12 @@ public class SettingsView extends FrameLayout {
         /* --- 资产与服务 --- */
         LinearLayout g1 = group("资产与服务");
         int credN = store.credentials().length();
-        g1.addView(item(Ui.ic("user"), "账号凭据库",
+        g1.addView(item("user", "账号凭据库",
                 credN == 0 ? "未录入任何账号" : ("已录入 " + credN + " 个账号"),
                 null, v -> show(PAGE_CREDS)));
         g1.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
         int siteN = store.sites().length();
-        g1.addView(item(Ui.ic("globe"), "站点管理",
+        g1.addView(item("server", "站点管理",
                 siteN == 0 ? "未添加站点" : ("已配置 " + siteN + " 个站点"),
                 null, v -> show(PAGE_SITES)));
         rootBody.addView(g1);
@@ -148,8 +148,8 @@ public class SettingsView extends FrameLayout {
         boolean pxOn = px != null && px.optBoolean("enabled");
         String pxSub = pxOn ? (px.optString("host", "127.0.0.1") + ":" + px.optInt("port", 10808))
                 : "未启用（直连）";
-        LinearLayout proxyRow = item(Ui.ic("plug"), "SOCKS5 代理", pxSub, null, v -> proxyDialog());
-        TextView autoBtn = Ui.btn(act, Ui.ic("tab_checkin") + " 自动检测", 11, Ui.BLUE, Ui.BLUE_BG, 8, 4);
+        LinearLayout proxyRow = item("plug", "SOCKS5 代理", pxSub, null, v -> proxyDialog());
+        TextView autoBtn = Ui.iconBtnText(act, "bolt", "自动检测", 11, Ui.BLUE, Ui.BLUE_BG, 8, 4);
         autoBtn.setOnClickListener(v -> autoDetectProxy());
         /* 插到 chevron 之前 */
         proxyRow.addView(autoBtn, proxyRow.getChildCount() - 1);
@@ -163,20 +163,17 @@ public class SettingsView extends FrameLayout {
 
         /* --- 界面与日志 --- */
         LinearLayout g3 = group("界面与日志");
-        g3.addView(switchItem(Ui.ic("tab_log"), "日志自动弹出",
+        g3.addView(switchItem("log", "日志自动弹出",
                 "执行签到/刷新时自动打开日志浮窗",
                 store.uiPref("logAutoPopup", true),
                 on -> new Store(act).setUiPref("logAutoPopup", on)));
         g3.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g3.addView(switchItem(Ui.ic("info"), "使用经典几何图标",
-                Ui.isGeometric() ? "当前：几何符号（兼容模式）" : "当前：Emoji 图标",
-                store.uiPref("geometricIcons", false),
-                on -> {
-                    new Store(act).setUiPref("geometricIcons", on);
-                    act.toast("重启应用后生效");
-                }));
+        g3.addView(switchItem("user", "授权时自动点登录",
+                "填好账号密码/2FA 后自动提交；人机验证未过时只填不点",
+                store.uiPref("autoSubmitLogin", true),
+                on -> new Store(act).setUiPref("autoSubmitLogin", on)));
         g3.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g3.addView(item(Ui.ic("trash"), "清空操作日志",
+        g3.addView(item("trash", "清空操作日志",
                 "当前 " + store.opLogs().length() + " 条", null, v ->
                 new AlertDialog.Builder(act).setTitle("清空日志")
                         .setMessage("清空全部操作日志？")
@@ -195,16 +192,16 @@ public class SettingsView extends FrameLayout {
                     .getPackageInfo(act.getPackageName(), 0);
             ver = "v" + pi.versionName + " (build " + pi.versionCode + ")";
         } catch (Exception ignored) {}
-        g4.addView(item(Ui.ic("info"), "版本", null, ver, null));
+        g4.addView(item("info", "版本", null, ver, null));
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g4.addView(item(Ui.ic("pkg"), "开源主页", "AI-modelsAPI/justsign", null, v -> {
+        g4.addView(item("pkg", "开源主页", "AI-modelsAPI/justsign", null, v -> {
             try {
                 act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
                         android.net.Uri.parse("https://github.com/AI-modelsAPI/justsign")));
             } catch (Exception e) { act.toast("无法打开链接"); }
         }));
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g4.addView(item(Ui.ic("dot_ok"), "凭据加密",
+        g4.addView(item("shield", "凭据加密",
                 Crypto.available() ? "Android Keystore 可用（AES-256-GCM）" : "不可用：本机无法安全保存密码",
                 null, null));
         rootBody.addView(g4);
@@ -218,7 +215,7 @@ public class SettingsView extends FrameLayout {
 
         LinearLayout head = Ui.row(act);
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.tv(act, Ui.ic("clock") + "  定时自动签到", 14, Ui.TXT2, true));
+        left.addView(Ui.iconText(act, "clock", "定时自动签到", 14, Ui.TXT2, true));
         left.addView(Ui.tv(act, "后台按周期自动执行全站签到", 11, Ui.SUB2));
         head.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));
         Switch sw = new Switch(act);
@@ -378,7 +375,7 @@ public class SettingsView extends FrameLayout {
                     JSONObject f = found.get(i);
                     labels[i] = f.optString("host") + ":" + f.optInt("port")
                             + "   " + f.optString("note", f.optString("source", ""))
-                            + (f.optBoolean("alive", true) ? "  " + Ui.ic("dot_ok") : "  " + Ui.ic("dot_err"));
+                            + (f.optBoolean("alive", true) ? "  ✓" : "  ✕");
                 }
                 new AlertDialog.Builder(act).setTitle("发现 " + found.size() + " 个候选")
                         .setItems(labels, (d, w) -> {
@@ -426,7 +423,7 @@ public class SettingsView extends FrameLayout {
             banner.setPadding(Ui.dp(act, 12), Ui.dp(act, 10), Ui.dp(act, 12), Ui.dp(act, 10));
             banner.addView(Ui.tv(act, "可一键导入 " + missing + " 个常用公益中转站", 12, Ui.BLUE_DEEP),
                     new LinearLayout.LayoutParams(0, -2, 1f));
-            TextView imp = Ui.btn(act, Ui.ic("tab_checkin") + " 批量导入", 11, Ui.white(), Ui.BLUE, 10, 5);
+            TextView imp = Ui.iconBtnText(act, "import", "批量导入", 11, Ui.white(), Ui.BLUE, 10, 5);
             imp.setOnClickListener(v -> batchImportDialog(pool, have));
             banner.addView(imp);
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
@@ -449,12 +446,12 @@ public class SettingsView extends FrameLayout {
             JSONArray accs = s.optJSONArray("accounts");
             int an = accs == null ? 0 : accs.length();
             info.addView(Ui.tv(act, s.optString("baseUrl", "") + "  ·  "
-                    + ("manual".equals(s.optString("checkinType")) ? "手动签到" : "登录即签到")
+                    + Engine.kindLabel(s)
                     + "  ·  " + an + " 个账号", 11, Ui.SUB));
             row.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
-            TextView edit = Ui.flat(act, Ui.ic("edit"), 14, Ui.SUB);
+            View edit = Ui.iconBtn(act, "edit", 16, Ui.SUB, 7);
             edit.setOnClickListener(v -> editSiteDialog(s));
-            TextView del = Ui.flat(act, Ui.ic("trash"), 14, Ui.RED);
+            View del = Ui.iconBtn(act, "trash", 16, Ui.RED, 7);
             del.setOnClickListener(v -> new AlertDialog.Builder(act)
                     .setTitle("删除站点")
                     .setMessage("删除「" + s.optString("name") + "」及其下 " + an + " 个账号？不可恢复。")
@@ -481,7 +478,7 @@ public class SettingsView extends FrameLayout {
         for (int i = 0; i < cand.size(); i++) {
             JSONObject c = cand.get(i);
             labels[i] = c.optString("name") + "  ("
-                    + ("manual".equals(c.optString("checkinType")) ? "每日签到" : "登录即签") + ")";
+                    + Engine.kindLabelOf(c.optString("checkinType")) + ")";
             checked[i] = true;
         }
         new AlertDialog.Builder(act).setTitle("批量导入站点")
@@ -524,23 +521,25 @@ public class SettingsView extends FrameLayout {
         uOut[0].setInputType(InputType.TYPE_TEXT_VARIATION_URI);
         box.addView(Ui.gapH(act, 10));
 
-        /* 签到方式单选 */
+        /* 签到方式单选（三种形态，与 Engine.siteKind 对齐） */
         box.addView(Ui.tv(act, "签到方式", 11, Ui.SUB, true));
-        final String[] type = { isNew ? "manual" : site.optString("checkinType", "manual") };
-        LinearLayout seg = Ui.row(act);
+        final String[] type = { isNew ? "newapi" : Engine.siteKind(site) };
+        LinearLayout seg = Ui.col(act);
         seg.setBackground(Ui.round(Ui.LINE_SOFT, Ui.dp(act, 6)));
         seg.setPadding(Ui.dp(act, 2), Ui.dp(act, 2), Ui.dp(act, 2), Ui.dp(act, 2));
-        final TextView[] segBtns = new TextView[2];
-        String[] tKeys = { "manual", "login" };
-        String[] tNames = { "手动签到（有签到接口）", "登录即签到" };
-        for (int i = 0; i < 2; i++) {
+        final TextView[] segBtns = new TextView[3];
+        String[] tKeys = { "newapi", "login", "web" };
+        String[] tNames = { "每日签到（有 /api/user/checkin 接口）",
+                            "登录即得（无签到接口，只保活刷额度）",
+                            "网页手动（接口不通，点签到打开网页）" };
+        for (int i = 0; i < 3; i++) {
             final int idx = i;
             TextView t = Ui.tv(act, tNames[i], 11, Ui.SUB, false);
-            t.setPadding(Ui.dp(act, 10), Ui.dp(act, 5), Ui.dp(act, 10), Ui.dp(act, 5));
+            t.setPadding(Ui.dp(act, 10), Ui.dp(act, 7), Ui.dp(act, 10), Ui.dp(act, 7));
             t.setClickable(true);
             t.setOnClickListener(v -> {
                 type[0] = tKeys[idx];
-                for (int k = 0; k < 2; k++) {
+                for (int k = 0; k < 3; k++) {
                     boolean on = k == idx;
                     segBtns[k].setTextColor(on ? Ui.BLUE : Ui.SUB);
                     segBtns[k].setTypeface(on ? android.graphics.Typeface.DEFAULT_BOLD
@@ -549,7 +548,7 @@ public class SettingsView extends FrameLayout {
                 }
             });
             segBtns[i] = t;
-            seg.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+            seg.addView(t, new LinearLayout.LayoutParams(-1, -2));
         }
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
         slp.topMargin = Ui.dp(act, 5);
@@ -560,7 +559,7 @@ public class SettingsView extends FrameLayout {
             uOut[0].setText(site.optString("baseUrl"));
         }
         /* 初始化选中态 */
-        int initIdx = "login".equals(type[0]) ? 1 : 0;
+        int initIdx = "login".equals(type[0]) ? 1 : ("web".equals(type[0]) ? 2 : 0);
         segBtns[initIdx].setTextColor(Ui.BLUE);
         segBtns[initIdx].setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         segBtns[initIdx].setBackground(Ui.round(Ui.CARD, Ui.dp(act, 4)));
@@ -596,16 +595,16 @@ public class SettingsView extends FrameLayout {
         Store store = new Store(act);
 
         if (!Crypto.available()) {
-            TextView warn = Ui.tv(act, Ui.ic("dot_err")
-                    + " 本机 Keystore 不可用，密码与 2FA 将无法保存（拒绝明文落盘）", 11, Ui.RED_D);
+            TextView warn = Ui.iconText(act, "info",
+                    "本机 Keystore 不可用，密码与 2FA 将无法保存（拒绝明文落盘）", 11, Ui.RED_D, false);
             warn.setBackground(Ui.round(Ui.RED_BG2, Ui.dp(act, 6)));
             warn.setPadding(Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 10), Ui.dp(act, 8));
             LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
             wlp.bottomMargin = Ui.dp(act, 10);
             credsBody.addView(warn, wlp);
         } else {
-            TextView tip = Ui.tv(act, Ui.ic("info")
-                    + " 密码与 2FA 经 Android Keystore 加密存储；卸载应用后密钥销毁需重录。", 11, Ui.SUB);
+            TextView tip = Ui.iconText(act, "shield",
+                    "密码与 2FA 经 Android Keystore 加密存储；卸载应用后密钥销毁需重录。", 11, Ui.SUB, false);
             LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
             tlp.bottomMargin = Ui.dp(act, 10);
             credsBody.addView(tip, tlp);
@@ -652,9 +651,9 @@ public class SettingsView extends FrameLayout {
             info.addView(flags, flp);
             row.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
 
-            TextView edit = Ui.flat(act, Ui.ic("edit"), 14, Ui.SUB);
+            TextView edit = Ui.flat(act, "编辑", 11, Ui.SUB);
             edit.setOnClickListener(v -> editCredDialog(c));
-            TextView del = Ui.flat(act, Ui.ic("trash"), 14, Ui.RED);
+            View del = Ui.iconBtn(act, "trash", 16, Ui.RED, 7);
             del.setOnClickListener(v -> new AlertDialog.Builder(act)
                     .setTitle("删除凭据")
                     .setMessage("删除后已关联的 " + used + " 个站点账号将解除绑定（不影响已授权 token）。")
@@ -701,17 +700,22 @@ public class SettingsView extends FrameLayout {
         pwd.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         pwd.setPadding(Ui.dp(act, 10), Ui.dp(act, 10), Ui.dp(act, 10), Ui.dp(act, 10));
         pwdRow.addView(pwd, new LinearLayout.LayoutParams(0, -2, 1f));
-        final TextView eye = Ui.flat(act, Ui.ic("eye"), 14, Ui.SUB);
         final boolean[] shown = { false };
-        eye.setOnClickListener(v -> {
+        final LinearLayout eyeBox = Ui.row(act);
+        eyeBox.setGravity(Gravity.CENTER);
+        eyeBox.setPadding(Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 12), Ui.dp(act, 8));
+        eyeBox.setClickable(true);
+        eyeBox.addView(Ui.icon(act, "eye", 17, Ui.SUB));
+        eyeBox.setOnClickListener(v -> {
             shown[0] = !shown[0];
             pwd.setInputType(shown[0]
                     ? (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD)
                     : (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD));
             pwd.setSelection(pwd.getText().length());
-            eye.setText(shown[0] ? Ui.ic("eye_off") : Ui.ic("eye"));
+            eyeBox.removeAllViews();
+            eyeBox.addView(Ui.icon(act, shown[0] ? "eye_off" : "eye", 17, Ui.SUB));
         });
-        pwdRow.addView(eye);
+        pwdRow.addView(eyeBox);
         LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(-1, -2);
         plp.topMargin = Ui.dp(act, 5);
         box.addView(pwdRow, plp);
@@ -790,35 +794,37 @@ public class SettingsView extends FrameLayout {
     }
 
     /** 条目：图标+标题+副标题 | 右侧值文本或箭头 */
-    private LinearLayout item(String icon, String title, String sub, String value, OnClickListener onClick) {
+    private LinearLayout item(String iconName, String title, String sub, String value, OnClickListener onClick) {
         LinearLayout row = Ui.row(act);
         row.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 12));
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.tv(act, icon + "  " + title, 14, Ui.TXT2, false));
+        left.addView(Ui.iconText(act, iconName, title, 14, Ui.TXT2, false));
         if (sub != null && !sub.isEmpty()) {
             TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
+            slp.leftMargin = Ui.dp(act, 22);
             left.addView(s, slp);
         }
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));
         if (value != null) row.addView(Ui.tv(act, value, 13, Ui.SUB));
-        else if (onClick != null) row.addView(Ui.tv(act, Ui.ic("chevron"), 16, Ui.SUB2));
+        else if (onClick != null) row.addView(Ui.icon(act, "chevron", 15, Ui.SUB2));
         if (onClick != null) { row.setClickable(true); row.setOnClickListener(onClick); }
         return row;
     }
 
     private interface BoolSink { void set(boolean on); }
 
-    private LinearLayout switchItem(String icon, String title, String sub, boolean init, BoolSink sink) {
+    private LinearLayout switchItem(String iconName, String title, String sub, boolean init, BoolSink sink) {
         LinearLayout row = Ui.row(act);
         row.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 16), Ui.dp(act, 10));
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.tv(act, icon + "  " + title, 14, Ui.TXT2, false));
+        left.addView(Ui.iconText(act, iconName, title, 14, Ui.TXT2, false));
         if (sub != null && !sub.isEmpty()) {
             TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
+            slp.leftMargin = Ui.dp(act, 22);
             left.addView(s, slp);
         }
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));

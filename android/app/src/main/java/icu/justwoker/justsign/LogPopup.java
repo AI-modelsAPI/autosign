@@ -76,15 +76,17 @@ public final class LogPopup {
         /* Header */
         LinearLayout header = Ui.row(a);
         header.setPadding(Ui.dp(a, 14), Ui.dp(a, 10), Ui.dp(a, 14), Ui.dp(a, 10));
-        header.addView(Ui.tv(a, Ui.ic("tab_log") + " 实时执行日志", 13, Ui.LOG_TXT, true));
+        header.addView(Ui.iconText(a, "log", "实时执行日志", 13, Ui.LOG_TXT, true));
         header.addView(Ui.spring(a));
-        TextView clear = Ui.flat(a, Ui.ic("trash") + " 清空", 11, Ui.LOG_INFO);
+        TextView clear = Ui.iconText(a, "trash", "清空", 11, Ui.LOG_INFO, true);
+        clear.setPadding(Ui.dp(a, 6), Ui.dp(a, 5), Ui.dp(a, 6), Ui.dp(a, 5));
+        clear.setClickable(true);
         clear.setOnClickListener(v -> {
             new Store(act).clearOpLogs();
             body.removeAllViews();
             body.addView(emptyLine("日志已清空"));
         });
-        TextView close = Ui.flat(a, Ui.ic("cross"), 14, Ui.LOG_INFO);
+        View close = Ui.iconBtn(a, "cross", 15, Ui.LOG_INFO, 5);
         close.setOnClickListener(v -> dismiss());
         header.addView(clear);
         header.addView(Ui.gapW(a, 6));
@@ -99,7 +101,7 @@ public final class LogPopup {
         win.addView(hairline(a));
         LinearLayout footer = Ui.row(a);
         footer.setPadding(Ui.dp(a, 14), Ui.dp(a, 7), Ui.dp(a, 14), Ui.dp(a, 7));
-        footer.addView(Ui.tv(a, Ui.ic("dot_ok") + " 监听中", 9, Ui.LOG_OK));
+        footer.addView(Ui.iconText(a, "dot", "监听中", 9, Ui.LOG_OK, false));
         footer.addView(Ui.spring(a));
         boolean autoOn = new Store(a).uiPref("logAutoPopup", true);
         footerRight = Ui.tv(a, "自动弹出: " + (autoOn ? "开" : "关"), 9, Ui.LOG_INFO);
@@ -225,8 +227,6 @@ public final class LogPopup {
     private View line(JSONObject e) {
         String level = e.optString("level", "info");
         int fg = "ok".equals(level) ? Ui.LOG_OK : ("err".equals(level) ? Ui.LOG_ERR : Ui.LOG_INFO);
-        String dot = "ok".equals(level) ? Ui.ic("dot_ok")
-                : ("err".equals(level) ? Ui.ic("dot_err") : Ui.ic("dot_info"));
 
         LinearLayout box = Ui.col(act);
         box.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 4));
@@ -234,16 +234,17 @@ public final class LogPopup {
         String site = e.optString("siteName", "");
         String alias = e.optString("alias", "");
         String who = site.isEmpty() ? "" : ("[" + site + (alias.isEmpty() ? "" : ("/" + alias)) + "] ");
-        String head = dot + " " + hhmmss(e.optLong("time", 0)) + " " + who
+        String head = hhmmss(e.optLong("time", 0)) + " " + who
                 + "[" + e.optString("action", "") + "] " + e.optString("summary", "");
-        TextView t1 = Ui.tv(act, head, 11, fg, true);
+        /* 状态用同色小圆点表示（单色扁平，不用彩色 emoji） */
+        TextView t1 = Ui.iconText(act, "dot", head, 11, fg, true);
         box.addView(t1);
 
         String detail = e.optString("detail", "");
         String source = srcText(e.optString("source", "user"));
         if (!detail.isEmpty() || !source.isEmpty()) {
             String sub = detail.isEmpty() ? source : (detail + (source.isEmpty() ? "" : (" · " + source)));
-            TextView t2 = Ui.tv(act, "   " + sub, 10, Ui.LOG_INFO);
+            TextView t2 = Ui.tv(act, "     " + sub, 10, Ui.LOG_INFO);
             box.addView(t2);
         }
         return box;
