@@ -244,11 +244,13 @@ public final class OffscreenCheckin {
                 if (m == null || !m.contains(CheckinJs.SIGNAL_NEED_UI)) return;
                 if (needUi) return;
                 needUi = true;
-                /* 给 4 秒宽限：interaction-only 挂件常在这之后才静默放行。
-                   仍未完成就提前收工，让调用方立刻转可见兜底，而不是干等到 100s 超时。 */
+                /* 宽限必须长于 JS 内 Turnstile 的等待上限（25s），否则会在
+                 * JS 走到「日志兜底」之前就把它掐掉 —— 这批站登录即发奖励，
+                 * 日志兜底才是真正能判成功的一步。留到 30s 让 JS 自己收尾；
+                 * 真超时了再由 Java 兜底报错。 */
                 main.postDelayed(() -> {
                     if (!done) finish(false, false, 0, false, "人机验证需要手动确认");
-                }, 4000);
+                }, 30000);
             }
 
             @JavascriptInterface public void onResult(String json) {

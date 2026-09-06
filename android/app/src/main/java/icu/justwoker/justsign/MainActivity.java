@@ -612,8 +612,9 @@ public class MainActivity extends Activity {
                     "bolt", "签到", Ui.white()), 1200);
             render();
             toast("签到完成：成功 " + stat[0] + " · 失败 " + stat[1]);
-            /* 批量签到收尾统一刷一遍额度（三大数字一次到位，不用再手点刷新） */
-            if (stat[0] > 0) {
+            /* 批量签到收尾统一刷一遍额度：不论成功与否都刷。
+             * 登录即签到型站点即便判定失败，额度也可能已变化。 */
+            {
                 java.util.ArrayList<String> keys = new java.util.ArrayList<>();
                 for (String[] t : list) keys.add(t[1]);
                 h.postDelayed(() -> refreshKeys(keys), 400);
@@ -808,11 +809,22 @@ singleBusy = true;
                 return;
             }
             final String m = msg == null ? "" : msg;
-            /* 后台跑不通（网络/注入/人机验证需交互）→ 转可见兜底，让用户看得见 */
+            /* 后台跑不通 → 转可见兜底。
+             * 注意：人机验证类失败不再跳转 —— 这批站都是「登录即签到」，
+             * 可见页跑的是同一套 JS，Turnstile 同样过不去，只会再白等 60 秒，
+             * 用户看到的就是「跳出一个页面、提示等待人机验证、最后仍失败」。
+             * 真正该做的是提示已登录即得（奖励可能为 0）并刷新额度确认。 */
             boolean envFail = m.startsWith("net::") || m.contains("超时") || m.contains("HTTP")
-                    || m.contains("加载失败") || m.contains("注入失败")
-                    || m.contains("人机验证") || m.contains("手动确认");
-            if (!envFail) { toast(m.isEmpty() ? "签到失败" : m); render(); return; }
+                    || m.contains("加载失败") || m.contains("注入失败");
+            if (!envFail) {
+                boolean cap = m.contains("人机验证") || m.contains("手动确认");
+                toast(cap ? "人机验证未通过；该站登录即发奖励，正在刷新额度核对"
+                          : (m.isEmpty() ? "签到失败" : m));
+                /* 无条件刷新：登录动作可能已让额度变化，让用户看到真实数字 */
+                applyCheckinResult(key, new JSONObject());
+                render();
+                return;
+            }
             Intent it = new Intent(this, CheckinActivity.class);
             it.putExtra("siteKey", sk);
             it.putExtra("accountKey", key);
@@ -845,9 +857,11 @@ singleBusy = true;
             if (!batchMode) toast(r.optString("message", "签到失败"));
         }
 
-        if (!batchMode && (r.optBoolean("ok") || r.optBoolean("already"))) {
-            if (accountKey != null && !accountKey.isEmpty()) refreshOne(accountKey);
-        }
+        /* 签到后一律刷新三个额度（可用/累计已用/今日消耗）。
+         * 四个站都是「登录即签到」：即使本次判定失败（例如人机验证没过），
+         * 登录动作本身可能已让额度发生变化，刷新才能反映真实状态。
+         * 奖励为 0 的站同样要刷 —— 用户要看的是三个额度，不只是奖励。 */
+        if (!batchMode && accountKey != null && !accountKey.isEmpty()) refreshOne(accountKey);
     }
 
     private void applyCheckinResult(String accountKey, JSONObject r) {
