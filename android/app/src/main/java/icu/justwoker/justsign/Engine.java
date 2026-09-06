@@ -262,8 +262,8 @@ public class Engine {
                 JSONObject probe = null;
                 try { probe = todayBonus(key); } catch (Exception ignored) {}
                 if (probe != null) cs = new JSONObject().put("checked", true)
-                        .put("rewardUSD", quotaToUSD(probe.optLong("quota", 0), unit))
-                        .put("rewardKnown", true);
+                        .put("rewardUSD", probe.optDouble("rewardUSD", 0))
+                        .put("rewardKnown", probe.optBoolean("rewardKnown", false));
             }
             if (cs != null && cs.optBoolean("checked")) {
                 out.put("todayChecked", true);
@@ -348,11 +348,16 @@ public class Engine {
         JSONObject tb = null;
         try { tb = todayBonus(key); } catch (Exception ignored) {}
         if (tb != null) {
-            double rw = quotaToUSD(tb.optLong("quota", 0), unit);
+            /* 金额来自 content 文案（quota 恒为 0，不能用它折算）。
+             * 解析不到金额时按「无奖励」处理，不编造数字。 */
+            double rw = tb.optDouble("rewardUSD", 0);
+            boolean known = tb.optBoolean("rewardKnown", false);
             out.put("ok", true).put("already", true)
-               .put("reward", rw).put("rewardKnown", true)
-               .put("message", rw > 0 ? "登录即签到 · 今日奖励已到账" : "登录即签到 · 今日已记录");
-            markChecked(key, rw, true);
+               .put("reward", rw).put("rewardKnown", known)
+               .put("message", (known && rw > 0)
+                       ? "登录即签到 · 今日奖励已到账"
+                       : "登录即签到 · 今日已签（无奖励）");
+            markChecked(key, rw, known);
             return out;
         }
 
@@ -423,13 +428,22 @@ public class Engine {
         } catch (Exception ignored) {}
     }
 
+    /**
+     * 今日是否有「每日签到」日志记录，并带出奖励金额。
+     * 注意 quota 字段恒为 0，金额只在 content 文案里（row.usd 已解析好）。
+     * 返回的对象额外带 rewardUSD / rewardKnown 两个字段。
+     */
     public JSONObject todayBonus(String key) throws Exception {
         JSONObject lg = logs(key, "系统", 30);
         if (!lg.optBoolean("ok")) return null;
         JSONObject lb = lg.optJSONObject("lastBonus");
         if (lb == null || !lb.has("time")) return null;
         long t = parseTimeMs(lb.optString("time"));
-        return (t > 0 && isToday(t)) ? lb : null;
+        if (t <= 0 || !isToday(t)) return null;
+        double usd = lb.optDouble("usd", -1);
+        lb.put("rewardUSD", usd >= 0 ? usd : 0);
+        lb.put("rewardKnown", usd >= 0);
+        return lb;
     }
 
     private static long parseTimeMs(String s) {
@@ -469,11 +483,21 @@ public class Engine {
         return lc != null && todayStr().equals(lc.optString("date", ""));
     }
 
+    /**
+     * 查用户日志。
+     * 实测（justworker / kktoken / agentrouter 均为 New API 系）：
+     *   - 过滤签到记录必须用 type=4，category=系统 这个参数站点根本不认（返回全部日志）；
+     *   - 签到条目的 quota 字段恒为 0，金额只写在 content 文案里，
+     *     形如「用户签到，获得额度 ＄20.642880 额度」（全角 ＄）；
+     *   - 响应结构为 {data:{page,page_size,total,items:[...]}}。
+     * @param category 传 "系统" 时自动改用 type=4（签到/系统额度变动）
+     */
     public JSONObject logs(String key, String category, int limit) throws Exception {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
         if (limit <= 0 || limit > 200) limit = 20;
-        String path = "/api/log/self?category=" + URLEncoder.encode(category, "UTF-8")
+        boolean sysCat = "系统".equals(category);
+        String path = "/api/log/self?" + (sysCat ? "type=4" : ("category=" + URLEncoder.encode(category, "UTF-8")))
                 + "&limit=" + limit + "&page=1";
         JSONObject r = callWithAuth(site, key, "GET", path);
         int code = r.optInt("http");
@@ -493,19 +517,43 @@ public class Engine {
             if (list != null) for (int i = 0; i < list.length(); i++) {
                 JSONObject o = list.optJSONObject(i);
                 if (o == null) continue;
-                String text = o.optString("description", o.optString("content", ""));
+                String text = o.optString("content", o.optString("description", ""));
+                long q = o.optLong("quota", 0);
+                double usdFromText = parseUsdInText(text);
                 JSONObject row = new JSONObject()
                         .put("time", o.optString("created_at", o.optString("time", "")))
                         .put("category", o.optString("category", category))
+                        .put("type", o.optInt("type", -1))
                         .put("text", text)
-                        .put("quota", o.optLong("quota", 0));
+                        .put("quota", q)
+                        .put("usd", usdFromText);
                 rows.put(row);
-                if (text.contains("签到")) lastBonus = row;
+                /* 只认「签到」类文案：同为 type=4 的还有注册赠送、邀请赠送，
+                 * 那些不是每日签到，不能拿来当今日已签的依据。 */
+                if (isCheckinText(text)) lastBonus = row;
             }
         }
         out.put("rows", rows);
         out.put("lastBonus", lastBonus == null ? JSONObject.NULL : lastBonus);
         return out;
+    }
+    /** 是否为「每日签到」类文案（排除注册赠送/邀请赠送等同类型条目） */
+    static boolean isCheckinText(String text) {
+        if (text == null || text.isEmpty()) return false;
+        if (!(text.contains("签到") || text.toLowerCase(java.util.Locale.US).contains("check-in")
+                || text.toLowerCase(java.util.Locale.US).contains("checkin"))) return false;
+        return !(text.contains("注册") || text.contains("邀请") || text.contains("兑换"));
+    }
+    /** 从日志文案里取美元金额：「获得额度 ＄20.642880 额度」→ 20.64（全角/半角 $ 均可） */
+    static double parseUsdInText(String text) {
+        if (text == null || text.isEmpty()) return -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("[＄$]\\s*([0-9]+(?:\\.[0-9]+)?)").matcher(text);
+        if (m.find()) {
+            try { return Math.round(Double.parseDouble(m.group(1)) * 100.0) / 100.0; }
+            catch (Exception ignored) {}
+        }
+        return -1;
     }
 
     public void runAllOnce() {

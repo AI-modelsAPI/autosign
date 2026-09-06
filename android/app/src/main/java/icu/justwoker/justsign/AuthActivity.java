@@ -2,6 +2,7 @@ package icu.justwoker.justsign;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -461,6 +462,70 @@ public class AuthActivity extends Activity {
     }
 
     private void finishOk(JSONObject bundle, String token) {
+        if (done) return;
+        Store store0 = new Store(this);
+        JSONObject userObj0 = bundle.optJSONObject("user");
+        String login0 = null;
+        if (userObj0 != null) {
+            login0 = userObj0.optString("username", "");
+            if (login0.isEmpty()) login0 = userObj0.optString("login", "");
+            if (login0.isEmpty()) login0 = null;
+        }
+        /* 身份核对：本账号期望的 GitHub 用户 vs 实际授权到的用户。
+         * 多账号同站时，WebView 里若仍是上一个账号的会话，就会把同一个站点
+         * 用户的 token 写到两个账号上（实测两账号 JWT sub 相同、额度完全一致）。
+         * 手动授权可能是有意换绑，所以这里不直接拒绝，而是让用户确认。 */
+        String want = expectGithubUser(store0);
+        if (login0 != null && !want.isEmpty() && !want.trim().equalsIgnoreCase(login0.trim())) {
+            final String actual = login0;
+            new AlertDialog.Builder(this)
+                    .setTitle("GitHub 账号不一致")
+                    .setMessage("该账号登记为 " + want + "，但本次授权到的是 " + actual
+                            + "。\n\n继续会把 " + actual + " 的额度写到这个账号上，"
+                            + "两个账号将显示相同数据。\n\n建议：先在 GitHub 退出并切换账号后重试。")
+                    .setNegativeButton("重新登录", (d, w) -> {
+                        store0.opLog(siteKey, accountKey, "授权", "err",
+                                "GitHub 身份不符，用户选择重新登录",
+                                "期望 " + want + "，实际 " + actual, "user");
+                        try {
+                            CookieManager.getInstance().removeAllCookies(null);
+                            CookieManager.getInstance().flush();
+                        } catch (Exception ignored) {}
+                        if (wv != null) wv.loadUrl("https://github.com/logout");
+                        h.postDelayed(() -> { if (!isFinishing()) startAuthFlow(); }, 1200);
+                    })
+                    .setPositiveButton("仍然继续", (d, w) -> doFinishOk(bundle, token))
+                    .setCancelable(false)
+                    .show();
+            return;
+        }
+        doFinishOk(bundle, token);
+    }
+    /** 本账号期望的 GitHub 用户名：凭据库 githubUser 优先，回退别名；空=不校验 */
+    private String expectGithubUser(Store store) {
+        try {
+            if (credentialId != null && !credentialId.isEmpty()) {
+                JSONObject c = store.findCredential(credentialId);
+                if (c != null) {
+                    String gu = c.optString("githubUser", "");
+                    if (!gu.isEmpty()) return gu;
+                }
+            }
+            JSONObject acc = store.findAccount(accountKey);
+            if (acc != null) {
+                String cid = acc.optString("credentialId", "");
+                if (!cid.isEmpty()) {
+                    JSONObject c = store.findCredential(cid);
+                    if (c != null) {
+                        String gu = c.optString("githubUser", "");
+                        if (!gu.isEmpty()) return gu;
+                    }
+                }
+            }
+            return alias == null ? "" : alias;
+        } catch (Exception e) { return ""; }
+    }
+    private void doFinishOk(JSONObject bundle, String token) {
         if (done) return;
         done = true;
         Store store = new Store(this);

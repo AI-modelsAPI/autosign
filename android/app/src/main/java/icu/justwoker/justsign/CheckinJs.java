@@ -127,8 +127,10 @@ public final class CheckinJs {
         "  var d0=new Date(t+'T00:00:00');" +
         "  var s0=Math.floor(d0.getTime()/1000);" +
         "  var e0=s0+86400;" +
-        "  var urls=['/api/log/self?p=1&page_size=100&start_timestamp='+s0+'&end_timestamp='+e0," +
-        "            '/api/log/self?p=0&page_size=100'];" +
+        /* 实测：过滤签到记录必须用 type=4；category=系统 站点不认（返回全部日志）。
+         * 条目里 quota 恒为 0，金额只写在 content：「用户签到，获得额度 ＄20.64 额度」。 */
+        "  var urls=['/api/log/self?type=4&limit=30&page=1'," +
+        "            '/api/log/self?limit=50&page=1'];" +
         "  for(var u=0;u<urls.length;u++){" +
         "    var r=null;try{r=await fetch(urls[u],{headers:H(),credentials:'include'});}catch(e){continue}" +
         "    if(!r||r.status!==200)continue;" +
@@ -140,18 +142,19 @@ public final class CheckinJs {
         "    else if(d&&Array.isArray(d.data))items=d.data;" +
         "    else if(d&&Array.isArray(d.logs))items=d.logs;" +
         "    for(var i=0;i<items.length;i++){var o=items[i]||{};" +
-        "      var txt=String(o.content||o.remark||o.message||o.detail||'');" +
-        "      if(!/签到|checkin|check-in|签到奖励/i.test(txt))continue;" +
+        "      var txt=String(o.content||o.description||o.remark||o.message||'');" +
+        "      if(!/签到|check.?in/i.test(txt))continue;" +
+        /* 同为 type=4 的还有「新用户注册赠送」「使用邀请码赠送」，不是每日签到 */
+        "      if(/注册|邀请|兑换/.test(txt))continue;" +
         "      var ts=Number(o.created_at||o.createdAt||o.timestamp||o.created_time||0);" +
         "      if(ts>0){if(ts>1e12)ts=Math.floor(ts/1000);" +
         "        if(ts<s0||ts>=e0)continue;}" +
-        "      var q=o.quota;" +
-        "      if(q===undefined||q===null){var mm=txt.match(/([0-9]+(?:\\.[0-9]+)?)/);" +
-        "        q=mm?Number(mm[1])*UNIT:0;}" +
-        "      return {found:true,reward:usd(q)};}" +
+        "      var mm=txt.match(/[＄$]\\s*([0-9]+(?:\\.[0-9]+)?)/);" +
+        "      if(mm)return {found:true,reward:Math.round(Number(mm[1])*100)/100,known:true};" +
+        "      return {found:true,reward:0,known:false};}" +
         "  }" +
-        "  return {found:false,reward:0};" +
-        "}catch(e){return {found:false,reward:0};}}" +
+        "  return {found:false,reward:0,known:false};" +
+        "}catch(e){return {found:false,reward:0,known:false};}}" +
         /* ---- POST 封装 ---- */
         "async function post(u){var st=0;try{" +
         "  var r=await fetch(u,{method:'POST',headers:H(),credentials:'include'});st=r.status;" +
@@ -217,8 +220,8 @@ public final class CheckinJs {
          * checkin 接口的 stats 有时并不回写。先查日志确证，
          * 命中就直接判成功，完全不碰人机验证。 */
         "var lb0=await todayBonusLog();" +
-        "if(lb0.found){finish(true,true,lb0.reward,true," +
-        "  lb0.reward>0?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
+        "if(lb0.found){finish(true,true,lb0.reward,lb0.known," +
+        "  (lb0.known&&lb0.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
         "  '来源: 站点日志今日签到记录');return;}" +
         "if(!s1.ok&&(s1.http===401||AUTHBAD.test(String(s1.message||'')))){" +
         "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
@@ -246,8 +249,8 @@ public final class CheckinJs {
          * 人机验证只是签到按钮的附加校验。日志里若已有今日签到记录，
          * 说明奖励其实已到账，不该再报失败。奖励可能为 0（本站当日不发）。 */
         "    var lb=await todayBonusLog();" +
-        "    if(lb.found){finish(true,true,lb.reward,true," +
-        "      lb.reward>0?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
+        "    if(lb.found){finish(true,true,lb.reward,lb.known," +
+        "      (lb.known&&lb.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
         "      '来源: 站点日志今日签到记录（人机验证未完成但奖励已发）');return;}" +
         "    finish(false,false,0,false,'人机验证未通过'+(tsErr?('（'+tsErr+'）'):'')," +
         "      'sitekey='+String(sitekey).slice(0,10)+'…');return;}" +

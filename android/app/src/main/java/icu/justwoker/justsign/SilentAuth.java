@@ -308,6 +308,25 @@ public final class SilentAuth {
                             if (login.isEmpty()) login = usr.optString("login", "");
                         }
                         if (!token.isEmpty()) {
+                            /* 关键校验：离屏 WebView 复用的是系统当前的 GitHub 会话，
+                             * 它未必是本账号对应的 GitHub 用户。多账号同站时若不校验，
+                             * 后授权的账号会被写入前一个账号的 token —— 表现为
+                             * 两个账号额度、奖励完全相同（实测 JWT sub 均为同一 uid）。
+                             * 身份不符时拒绝落库，交给可见授权页让用户切换账号登录。 */
+                            String want = expectUser();
+                            if (!want.isEmpty() && login != null && !login.isEmpty()
+                                    && !sameUser(want, login)) {
+                                try {
+                                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                            "GitHub 身份不符，已拒绝写入",
+                                            "期望 " + want + "，实际登录 " + login
+                                                    + "；需在授权页切换到该账号", "auto");
+                                } catch (Exception ignored) {}
+                                final String bad = login;
+                                main.post(() -> finish(false, true, bad,
+                                        "当前 GitHub 登录的是 " + bad + "，请手动授权切换到 " + want));
+                                return;
+                            }
                             saveToken(token, login);
                             final String fl = login;
                             main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
@@ -389,6 +408,26 @@ public final class SilentAuth {
             return null;
         }
 
+        /** 该账号期望的 GitHub 用户名（来自凭据库 githubUser，回退别名）；空=不校验 */
+        private String expectUser() {
+            try {
+                JSONObject acc = store.findAccount(accountKey);
+                if (acc == null) return "";
+                String cid = acc.optString("credentialId", "");
+                if (!cid.isEmpty()) {
+                    JSONObject c = store.findCredential(cid);
+                    if (c != null) {
+                        String gu = c.optString("githubUser", "");
+                        if (!gu.isEmpty()) return gu;
+                    }
+                }
+                return acc.optString("alias", "");
+            } catch (Exception e) { return ""; }
+        }
+        /** 大小写无关比较 GitHub 用户名 */
+        private static boolean sameUser(String a, String b) {
+            return a != null && b != null && a.trim().equalsIgnoreCase(b.trim());
+        }
         private void saveToken(String token, String login) {
             try {
                 JSONObject patch = new JSONObject()
