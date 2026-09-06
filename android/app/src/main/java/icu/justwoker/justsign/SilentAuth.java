@@ -344,13 +344,43 @@ public final class SilentAuth {
                             main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
                             return;
                         }
+                        /* 站点成功但没给 token：把站点说了什么记下来 */
+                        try {
+                            store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                    "站点响应缺少 token", body.length() > 300 ? body.substring(0, 300) : body, "auto");
+                        } catch (Exception ignored) {}
+                        main.post(() -> { exchanging = false; finish(false, true, null, "站点响应缺少 token"); });
+                        return;
                     }
+                    /* 站点明确失败（success=false）：把站点原始理由（年龄限制/风控等）记下来 */
+                    String reason = r.optString("message", r.optString("error", body));
+                    if (reason.length() > 200) reason = reason.substring(0, 200);
+                    try {
+                        store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                "站点拒绝交换: " + reason, "HTTP " + resp.code(), "auto");
+                    } catch (Exception ignored) {}
+                    final String rr = reason;
+                    main.post(() -> { exchanging = false; finish(false, true, null, "站点拒绝: " + rr); });
+                    return;
                 }
-            } catch (Exception ignored) {
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                            "站点返回空响应", "HTTP " + resp.code(), "auto");
+                } catch (Exception ignored) {}
+                final int emptyCode = resp.code();
+                main.post(() -> { exchanging = false; finish(false, true, null, "站点返回空响应 (HTTP " + emptyCode + ")"); });
+                return;
+            } catch (Exception e) {
+                String em = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                            "交换请求异常: " + (em.length() > 150 ? em.substring(0, 150) : em), "", "auto");
+                } catch (Exception ignored) {}
+                main.post(() -> { exchanging = false; finish(false, true, null, "交换请求异常: " + em); });
+                return;
             } finally {
                 if (resp != null) try { resp.close(); } catch (Exception ignored) {}
             }
-            main.post(() -> { exchanging = false; finish(false, true, null, "凭据交换响应失败"); });
         }
 
         private String[] fetchStateAndClient() {
