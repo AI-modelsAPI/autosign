@@ -470,6 +470,56 @@ public class Engine {
         return out.put("message", "已划转 $" + String.format("%.2f", aff / (double) unit))
                 .put("newQuota", newQuota);
     }
+    /**
+     * v0.6.0：API Key 管理（New API 系 /api/token/ 三件套）。
+     * list: GET /api/token/?p=1&size=100 → data.items[]
+     * create: POST /api/token/ {"name":...} → 返回含完整 key，自动复制
+     * delete: DELETE /api/token/{id}
+     */
+    public JSONObject tokenList(String key) throws Exception {
+        JSONObject acc = store.findAccount(key);
+        if (acc == null) throw new Exception("账号不存在");
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
+        JSONObject r = callWithAuth(site, key, "GET", "/api/token/?p=1&size=100");
+        int http = r.optInt("http");
+        JSONObject rd = r.optJSONObject("data");
+        if (http != 200 || rd == null) throw new Exception("站点返回 HTTP " + http);
+        /* data 可能直接是数组（部分变体站）或 {items:[]} */
+        org.json.JSONArray items;
+        if (rd.has("items")) items = rd.optJSONArray("items");
+        else if (r.opt("data") instanceof org.json.JSONArray) items = r.optJSONArray("data");
+        else items = new org.json.JSONArray();
+        return new JSONObject().put("items", items);
+    }
+    public JSONObject tokenCreate(String key, String name) throws Exception {
+        JSONObject acc = store.findAccount(key);
+        if (acc == null) throw new Exception("账号不存在");
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
+        JSONObject r = callWithAuth(site, key, "POST", "/api/token/",
+                "{\"name\":" + org.json.JSONObject.quote(name) + "}");
+        int http = r.optInt("http");
+        JSONObject rd = r.optJSONObject("data");
+        boolean ok = http == 200 && rd != null && rd.optBoolean("success", false);
+        String msg = rd != null ? rd.optString("message", "") : "";
+        if (!ok) throw new Exception(msg.isEmpty() ? ("站点返回 HTTP " + http) : msg);
+        /* 建成功后部分站不回 key，需再拉一次列表 */
+        return new JSONObject().put("ok", true);
+    }
+    public JSONObject tokenDelete(String key, long tokenId) throws Exception {
+        JSONObject acc = store.findAccount(key);
+        if (acc == null) throw new Exception("账号不存在");
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
+        JSONObject r = callWithAuth(site, key, "DELETE", "/api/token/" + tokenId);
+        int http = r.optInt("http");
+        JSONObject rd = r.optJSONObject("data");
+        boolean ok = http == 200 && rd != null && rd.optBoolean("success", false);
+        String msg = rd != null ? rd.optString("message", "") : "";
+        if (!ok) throw new Exception(msg.isEmpty() ? ("站点返回 HTTP " + http) : msg);
+        return new JSONObject().put("ok", true);
+    }
     public JSONObject checkinStatus(String key, long unit) throws Exception {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");

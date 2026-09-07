@@ -1006,14 +1006,15 @@ singleBusy = true;
 
     private void accountMenu(JSONObject site, JSONObject acc) {
         final String key = acc.optString("key");
-        String[] items = { "刷新该账号", "重新授权", "查看日志", "绑定凭据", "删除账号" };
+        String[] items = { "刷新该账号", "API Key 管理", "重新授权", "查看日志", "绑定凭据", "删除账号" };
         new AlertDialog.Builder(this)
                 .setTitle(acc.optString("alias", key))
                 .setItems(items, (d, w) -> {
-                    if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
-                    else if (w == 1) startAuth(site, acc);
-                    else if (w == 2) LogPopup.show(this);
-                    else if (w == 3) pickCredential(site, acc);
+if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
+                    else if (w == 1) KeyManagerDialog.show(this, site, acc);
+                    else if (w == 2) startAuth(site, acc);
+                    else if (w == 3) LogPopup.show(this);
+                    else if (w == 4) pickCredential(site, acc);
                     else confirmRemoveAccount(acc);
                 }).show();
     }

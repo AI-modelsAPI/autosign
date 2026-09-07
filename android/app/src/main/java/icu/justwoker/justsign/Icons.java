@@ -406,6 +406,12 @@ p.lineTo(10.8f * s, 15.6f * s);
                 cv.drawCircle(15.5f * s, 5f * s, 2f * s, fl);
                 break;
             }
+            /* v0.6.0：复制（两个叠放圆角矩形）——API Key 复制按钮 */
+            case "copy": {
+                cv.drawRoundRect(r(s, 8f, 3f, 19f, 14f), 2f * s, 2f * s, st);
+                cv.drawRoundRect(r(s, 5f, 8f, 16f, 19f), 2f * s, 2f * s, fl);
+                break;
+            }
 
             default:
                 break;
