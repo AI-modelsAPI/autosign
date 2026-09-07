@@ -519,6 +519,9 @@ public class AuthActivity extends Activity {
         }
     }
 
+    /* 首次授权用户确认标志（v0.3.7 无锚点兜底） */
+    private volatile boolean idConfirmed = false;
+
     private void finishOk(JSONObject bundle, String token, String setCookie, String loginFromResp) {
         if (done) return;
         Store store = new Store(this);
@@ -551,6 +554,15 @@ public class AuthActivity extends Activity {
             respGhId = String.valueOf(gidO).trim();
             if ("null".equals(respGhId)) respGhId = "";
         }
+        /* 锚点链 v0.3.7：github_id → github_user_id → null（AgentRouter 老用户两者皆 null） */
+        String respGhId2 = "";
+        if (respGhId.isEmpty() && bundle.has("github_user_id") && !bundle.isNull("github_user_id")) {
+            Object gid2 = bundle.opt("github_user_id");
+            if (gid2 != null) {
+                respGhId2 = String.valueOf(gid2).trim();
+                if ("null".equals(respGhId2)) respGhId2 = "";
+            }
+        }
         boolean mismatch = false;
         String mmWhy = "";
         if (!respGhId.isEmpty()) {
@@ -562,8 +574,19 @@ public class AuthActivity extends Activity {
         } else if (expect != null && !expect.isEmpty()
                 && login != null && !login.isEmpty()
                 && !expect.trim().equalsIgnoreCase(login.trim())) {
-            mismatch = true;
-            mmWhy = "GitHub 用户名不符：期望 " + expect + "，实际 " + login;
+            /* 站内名是 github_<站内id>，与 GitHub 名无必然关系：
+             * 无可用锚点时改为「首次授权用户确认」而非直接拒（审计定稿）。 */
+            boolean confirmed = idConfirmed;
+            if (!confirmed && setCookie != null && !setCookie.isEmpty()) {
+                /* cookie 型站首次授权：弹确认框让用户核对站内用户名 */
+                lastBundle = bundle; lastToken = token; lastCookie = setCookie; lastLogin = login;
+                showConfirmDialog(login, expect);
+                return;   // 等用户确认后带 confirmed=true 重新进入
+            }
+            if (!confirmed) {
+                mismatch = true;
+                mmWhy = "GitHub 用户名不符：期望 " + expect + "，实际 " + login;
+            }
         }
         if (mismatch) {
             exchanging = false;
@@ -621,6 +644,35 @@ public class AuthActivity extends Activity {
         }
         finish();
     }
+
+    /* v0.3.7：无锚点时首次授权用户确认（审计定稿：仅交互式 AuthActivity 弹，SilentAuth 不弹） */
+    private void showConfirmDialog(String siteUsername, String expectGithub) {
+        Store store = new Store(this);
+        runOnUiThread(() -> {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("请核对授权身份")
+                    .setMessage("站点返回的站内用户名是：" + siteUsername
+                            + "\n\n请在站点网页的「个人设置」核对该用户名属于你的 GitHub 账号（"
+                            + expectGithub + "）。\n\n确认无误请点「确认是本人」，否则点「取消授权」。")
+                    .setPositiveButton("确认是本人", (dg, w) -> {
+                        idConfirmed = true;
+                        store.opLog(siteKey, accountKey, "授权", "info",
+                                "用户确认站内身份", "站内名 " + siteUsername, "user");
+                        finishOk(lastBundle, lastToken, lastCookie, lastLogin);
+                    })
+                    .setNegativeButton("取消授权", (dg, w) -> {
+                        store.opLog(siteKey, accountKey, "授权", "err",
+                                "用户取消：站内身份不符", "站内名 " + siteUsername, "user");
+                        setResult(RESULT_CANCELED, new Intent().putExtra("error", "用户确认身份不符"));
+                        finish();
+                    })
+                    .setCancelable(false)
+                    .show();
+        });
+    }
+
+    /* showConfirmDialog 重入所需快照 */
+    private JSONObject lastBundle; private String lastToken, lastCookie, lastLogin;
 
     /** org.json optString 对 JSON null 值返回字面 "null" 字符串（而非 fallback）——显式拦截 */
     static String jsonStr(JSONObject o, String key) {
