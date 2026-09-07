@@ -61,6 +61,10 @@ public class Engine {
     /* opus4.8 审计·B-03：cookie 型站点（AgentRouter 等 New API 变体）支持。
      * cookie 为空时走旧签名（纯 Bearer），完全向后兼容。 */
     private JSONObject call(JSONObject site, String token, String cookie, String accSiteUserId, String method, String path) throws Exception {
+        return call(site, token, cookie, accSiteUserId, method, path, null);
+    }
+    /** v0.6.0：带 JSON body 版 */
+    private JSONObject call(JSONObject site, String token, String cookie, String accSiteUserId, String method, String path, String jsonBody) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
@@ -72,7 +76,7 @@ public class Engine {
             /* 站内用户ID 从账号读（授权响应 data.id 落库），随请求透传 */
             if (accSiteUserId != null) siteUserId = accSiteUserId;
         } catch (Exception ignored) {}
-        JSONObject r = attempt(url, token, cookie, siteUserId, method, buildClient(useProxy, proxy));
+        JSONObject r = attempt(url, token, cookie, siteUserId, method, buildClient(useProxy, proxy), jsonBody);
         /* 429 = 当前代理节点被 WAF/限流盯上。自动探测本机其它存活代理端口，
          * 找到就持久化切过去并重试一次（60s 冷却防横跳）。 */
         if (r != null && r.optInt("http") == 429 && useProxy) {
@@ -81,10 +85,10 @@ public class Engine {
                 store.opLog("", "", "代理", "info",
                         "429 触发换代理节点", switched.optString("host") + ":" + switched.optInt("port"), "auto");
                 r = attempt(url, token, cookie, siteUserId, method,
-                        buildClient(true, store.config().optJSONObject("proxy")));
+                        buildClient(true, store.config().optJSONObject("proxy")), jsonBody);
             }
         }
-        if (r == null && useProxy) r = attempt(url, token, cookie, siteUserId, method, plain);
+        if (r == null && useProxy) r = attempt(url, token, cookie, siteUserId, method, plain, jsonBody);
         if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
                 + (lastError.isEmpty() ? "" : ": " + lastError));
         return r;
@@ -125,6 +129,10 @@ public class Engine {
      * SilentAuth 内部也有同账号串行 + 8s 复用 + 失败 90s 冷却三重保护。
      */
     public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path) throws Exception {
+        return callWithAuth(site, accountKey, method, path, null);
+    }
+    /** v0.6.0：带 JSON body 版（aff_transfer 等写操作） */
+    public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path, String jsonBody) throws Exception {
         String token = cachedToken(accountKey);
         if (token.isEmpty()) {
             /* 先按 JWT exp 判定：过期/即将过期就直接换，不等 401 再补救（省一次往返） */
@@ -144,9 +152,8 @@ public class Engine {
                 if (accSiteUserId == null || "null".equals(accSiteUserId)) accSiteUserId = "";
             }
         } catch (Exception ignored) {}
-        JSONObject r = call(site, token, cookie, accSiteUserId, method, path);
+        JSONObject r = call(site, token, cookie, accSiteUserId, method, path, jsonBody);
         if (r.optInt("http") != 401) return r;
-
         /* 仍然 401（token 被服务端提前作废）→ 再换一次 */
         String freshToken = SilentAuth.exchangeSync(ctx, store, site, accountKey);
         /* opus4.8 复审 P2-2：cookie 型站 exchangeSync 返回空 token 但会刷新
@@ -164,7 +171,7 @@ public class Engine {
         if (tokenChanged || cookieChanged) {
             if (tokenChanged) cacheToken(accountKey, freshToken);
             String useToken = tokenChanged ? freshToken : token;
-            JSONObject r2 = call(site, useToken, freshCookie, accSiteUserId, method, path);
+            JSONObject r2 = call(site, useToken, freshCookie, accSiteUserId, method, path, jsonBody);
             try { r2.put("reauthed", true); } catch (Exception ignored) {}
             return r2;
         }
@@ -202,6 +209,10 @@ public class Engine {
     }
 
     private JSONObject attempt(String url, String token, String cookie, String siteUserId, String method, OkHttpClient client) {
+        return attempt(url, token, cookie, siteUserId, method, client, null);
+    }
+    /** v0.6.0：带 JSON body 的请求（aff_transfer 等写操作用） */
+    private JSONObject attempt(String url, String token, String cookie, String siteUserId, String method, OkHttpClient client, String jsonBody) {
         Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
@@ -218,7 +229,7 @@ public class Engine {
             if (siteUserId != null && !siteUserId.isEmpty() && !"null".equals(siteUserId))
                 rb.header("New-Api-User", siteUserId);
             if ("POST".equalsIgnoreCase(method))
-                rb.post(RequestBody.create("{}", MediaType.parse("application/json")));
+                rb.post(RequestBody.create(jsonBody == null ? "{}" : jsonBody, MediaType.parse("application/json")));
             resp = client.newCall(rb.build()).execute();
             String txt = resp.body() != null ? resp.body().string() : "";
             /* v0.4.3（glm-5.3 审计方案1）：WAF 假 200——HTTP 200 但 body 是拦截页 HTML。
@@ -401,8 +412,64 @@ public class Engine {
             out.put("todayRewardKnown", false);
         }
         return out;
+}
+    /**
+     * v0.6.0：邀请额度自动划转（AgentRouter 实测：POST /api/user/aff_transfer，
+     * body {"quota": N}，N 为 quota 原始值；站点最小划转 $1，不足报「邀请额度不足」）。
+     * 流程：读 self 的 aff_quota → ≥1$ 就全额划转 → 返回划转结果（成功金额/失败原因）。
+     * 全程走 callWithAuth（token 过期自动换、cookie 型站带会话头）。
+     */
+    public JSONObject affTransfer(String key) throws Exception {
+        JSONObject acc = store.findAccount(key);
+        if (acc == null) throw new Exception("账号不存在");
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
+        String sKey = site.optString("key", "");
+        /* 1. 读当前邀请额度 */
+        JSONObject self = callWithAuth(site, key, "GET", "/api/user/self");
+        JSONObject selfU = userOf(self);
+        long aff = (long) selfU.optDouble("aff_quota", 0);
+        long unit = store.siteMetaLong(sKey, "quotaPerUnit", 0);
+        if (unit <= 0) {
+            JSONObject stat;
+            try { stat = call(site, null, "GET", "/api/status"); }
+            catch (Exception e) { stat = new JSONObject(); }
+            unit = dd(stat).optLong("quota_per_unit", QUOTA_PER_UNIT_DEFAULT);
+            if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
+        }
+        JSONObject out = new JSONObject().put("unit", unit);
+        if (aff <= 0) {
+            return out.put("ok", false).put("skipped", true)
+                    .put("message", "无可划转的邀请额度");
+        }
+        if (aff < unit) {
+            /* 站点最小划转 $1：不足 $1 划了必失败，直接跳过并说明 */
+            return out.put("ok", false).put("skipped", true)
+                    .put("affQuota", aff)
+                    .put("message", "邀请额度不足 $1（当前 " + String.format("%.2f", aff / (double) unit) + "$），暂不能划转");
+        }
+        /* 2. 全额划转 */
+        JSONObject r = callWithAuth(site, key, "POST", "/api/user/aff_transfer",
+                "{\"quota\":" + aff + "}");
+        int http = r.optInt("http");
+        JSONObject rd = r.optJSONObject("data");
+        boolean ok = http == 200 && rd != null && rd.optBoolean("success", false);
+        String msg = rd != null ? rd.optString("message", "") : "";
+        out.put("ok", ok).put("affQuota", aff).put("http", http);
+        if (!ok) {
+            /* 站点原文透传（如「转移额度最小为$1」「邀请额度不足」），不猜原因 */
+            if (msg.isEmpty()) msg = "站点返回 HTTP " + http;
+            return out.put("message", msg);
+        }
+        /* 3. 划转成功：读新余额 */
+        long newQuota = -1;
+        try {
+            JSONObject self2 = callWithAuth(site, key, "GET", "/api/user/self");
+            newQuota = (long) userOf(self2).optDouble("quota", -1);
+        } catch (Exception ignored) {}
+        return out.put("message", "已划转 $" + String.format("%.2f", aff / (double) unit))
+                .put("newQuota", newQuota);
     }
-
     public JSONObject checkinStatus(String key, long unit) throws Exception {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");

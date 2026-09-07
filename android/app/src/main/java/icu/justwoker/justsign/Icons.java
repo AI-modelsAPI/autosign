@@ -393,9 +393,17 @@ public final class Icons {
                 cv.drawCircle(12f * s, 12f * s, 9f * s, st);
                 Path p = new Path();
                 p.moveTo(7.6f * s, 12.4f * s);
-                p.lineTo(10.8f * s, 15.6f * s);
+p.lineTo(10.8f * s, 15.6f * s);
                 p.lineTo(16.4f * s, 8.8f * s);
                 cv.drawPath(p, st);
+                break;
+            }
+            /* v0.6.0：礼物盒（邀请额度划转开关）——扁平单色：盒身+盖+两个蝴蝶结圆点 */
+            case "gift": {
+                cv.drawRect(r(s, 4f, 9f, 20f, 19f), fl);
+                cv.drawRect(r(s, 3f, 6f, 21f, 9f), fl);
+                cv.drawCircle(8.5f * s, 5f * s, 2f * s, fl);
+                cv.drawCircle(15.5f * s, 5f * s, 2f * s, fl);
                 break;
             }
 

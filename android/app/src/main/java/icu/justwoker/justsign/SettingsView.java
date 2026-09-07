@@ -173,6 +173,11 @@ public class SettingsView extends FrameLayout {
                 store.uiPref("autoSubmitLogin", true),
                 on -> new Store(act).setUiPref("autoSubmitLogin", on)));
         g3.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
+        g3.addView(switchItem("gift", "邀请额度自动划转",
+                "刷新时自动把邀请奖励转入可用余额（站点最小划转 $1）",
+                store.uiPref("autoAffTransfer", false),
+                on -> new Store(act).setUiPref("autoAffTransfer", on)));
+        g3.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
         g3.addView(item("trash", "清空操作日志",
                 "当前 " + store.opLogs().length() + " 条", null, v ->
                 new AlertDialog.Builder(act).setTitle("清空日志")

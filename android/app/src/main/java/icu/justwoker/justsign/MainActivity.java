@@ -961,13 +961,38 @@ singleBusy = true;
             try {
                 JSONObject st = engine.status(key);
                 store.patchAccount(key, buildStatusPatch(st));
+                /* v0.6.0：邀请额度自动划转（开关开启时）——刷新顺带把邀请收益转进余额 */
+                String affMsg = "";
+                if (st != null && st.optBoolean("ok", false)
+                        && store.uiPref("autoAffTransfer", false)) {
+                    try {
+                        JSONObject aff = engine.affTransfer(key);
+                        if (aff.optBoolean("ok", false)) {
+                            affMsg = aff.optString("message", "");
+                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "ok",
+                                    "邀请额度已自动划转", affMsg, "auto");
+                            /* 划转成功后重读额度，看板立即反映新余额 */
+                            JSONObject st2 = engine.status(key);
+                            store.patchAccount(key, buildStatusPatch(st2));
+                        } else if (!aff.optBoolean("skipped", false)) {
+                            affMsg = "邀请划转失败：" + aff.optString("message", "");
+                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
+                                    "邀请额度划转失败", aff.optString("message", ""), "auto");
+                        }
+                    } catch (Exception ae) {
+                        store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
+                                "邀请额度划转异常", String.valueOf(ae.getMessage()), "auto");
+                    }
+                }
                 /* v0.4.3（glm-5.3 审计方案2）：刷新失败必须用通俗文案告知用户，
                  * WAF 拦截时明确引导「更换代理节点」，技术细节只进日志。 */
                 final String failMsg = st == null ? "" : st.optString("message", "");
                 final boolean okRefresh = st != null && st.optBoolean("ok", false);
+                final String fAff = affMsg;
                 h.post(() -> {
                     busyEnd(); pushLog(store); render();
                     if (!okRefresh && !failMsg.isEmpty()) toast(failMsg);
+                    else if (!fAff.isEmpty()) toast(fAff);
                 });
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
