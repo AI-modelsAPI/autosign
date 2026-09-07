@@ -53,6 +53,16 @@ public final class WebViewProfileUtil {
      * 十六进制（产物仅 [0-9a-f]，前缀 p_，全长 18 字符），对任何限制都安全，
      * 且对同一 (siteKey, accountKey) 稳定可复现（跨离屏/前台一致）。
      */
+    /** v0.4.7：删除账号时同步删除其 Profile（清掉该账号的 GitHub 会话与站点 Cookie 分区）。
+     * 不删除会残留孤儿数据（隐私泄漏 + 存储占用）。多 Profile 不支持时无分区可删，安全跳过。 */
+    public static void deleteProfileFor(@Nullable String siteKey, @Nullable String accountKey) {
+        if (!multiProfileSupported()) return;
+        try {
+            String name = profileNameFor(siteKey, accountKey);
+            ProfileStore.getInstance().deleteProfile(name);
+        } catch (Exception ignored) {}
+    }
+
     @NonNull
     public static String profileNameFor(@Nullable String siteKey, @Nullable String accountKey) {
         String raw = (siteKey == null ? "" : siteKey) + "|" + (accountKey == null ? "" : accountKey);

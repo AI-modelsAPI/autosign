@@ -1009,9 +1009,18 @@ singleBusy = true;
     private void confirmRemoveAccount(JSONObject acc) {
         new AlertDialog.Builder(this)
                 .setTitle("删除账号")
-                .setMessage("删除「" + acc.optString("alias", acc.optString("key")) + "」？")
+                .setMessage("删除「" + acc.optString("alias", acc.optString("key")) + "」？\n\n将同时清除该账号的登录会话（WebView 分区），重新添加需重新授权一次。")
                 .setPositiveButton("删除", (d, w) -> {
-                    new Store(this).removeAccount(acc.optString("key"));
+                    String accKey = acc.optString("key");
+                    String siteKey = acc.optString("siteKey", "");
+                    if (siteKey.isEmpty()) {
+                        JSONObject st = new Store(this).siteOfAccount(accKey);
+                        if (st != null) siteKey = st.optString("key", "");
+                    }
+                    new Store(this).removeAccount(accKey);
+                    /* v0.4.7：同步删除该账号的 Profile（GitHub 会话 + 站点 Cookie 分区），
+                     * 不留孤儿数据；删除后重新添加走全新授权（凭据库还在，自动填充）。 */
+                    WebViewProfileUtil.deleteProfileFor(siteKey, accKey);
                     render();
                 })
                 .setNegativeButton("取消", null).show();
