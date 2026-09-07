@@ -81,6 +81,11 @@ public class AuthActivity extends Activity {
                             case "submit2fa":   label = "已自动提交 2FA 验证码"; break;
                             case "switch2fa":   label = "已切换到验证器 App 验证"; break;
                             case "expand2fa":   label = "已展开其他验证方式"; break;
+                            case "submitAborted":
+                                label = "未自动提交：" + ("captcha".equals(r.optString("reason", ""))
+                                        ? "页面有待完成的人机验证" : "登录按钮未就绪");
+                                break;
+                            case "autoOff":     label = "未自动提交：未存密码，仅自动填充"; break;
                             default:            label = act; break;
                         }
                         showTip(label);

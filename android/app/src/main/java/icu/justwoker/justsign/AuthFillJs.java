@@ -85,6 +85,7 @@ public final class AuthFillJs {
         "if(window.__jsfill)return;window.__jsfill=1;" +
         "var ACC=/*__ACC__*/null;var PWD=/*__PWD__*/null;var OTP=/*__OTP__*/null;" +
         "var AUTO=/*__AUTO__*/false;" +
+        "var autoOffReported=false;" +
         "var R=function(o){try{window.JustSign.onFill(JSON.stringify(o))}catch(e){}};" +
         /* 高亮已填字段 0.5s */
         "function mark(el){try{var o=el.style.outline;el.style.outline='2px solid #22C55E';" +
@@ -209,6 +210,8 @@ public final class AuthFillJs {
         "      if(pEl){submittedLogin=true;" +
         "        var fs=[{el:pEl,min:1}];if(ACC&&aEl)fs.push({el:aEl,min:1});" +
         "        stableClick(function(){return submitBtn(pwdField());},fs,'submitLogin');}}}" +
+        "  if(!AUTO&&doneAcc&&!autoOffReported){autoOffReported=true;" +
+        "    R({ok:true,action:\"autoOff\",filledAccount:true,filledPassword:donePwd});}" +
         "  return doneAcc||donePwd||doneOtp;}" +
         "tryFill();" +
         /* SPA 动态渲染：监听 DOM 变化继续尝试，45s 后停（2FA 页往往要等一会儿） */

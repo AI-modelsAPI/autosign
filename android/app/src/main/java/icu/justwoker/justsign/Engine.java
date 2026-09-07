@@ -382,6 +382,12 @@ public class Engine {
                         .put("rewardUSD", probe.optDouble("rewardUSD", 0))
                         .put("rewardKnown", probe.optBoolean("rewardKnown", false));
             }
+            /* v0.4.4（审计方案A）：/api/user/self 的 checked_in 是站点已签的直接信号
+             * （checkin() 已采信同一信号），日志接口被 WAF 拦时也能正确显示已签。 */
+            if (cs == null && selfU.has("checked_in")) {
+                cs = new JSONObject().put("checked", selfU.optBoolean("checked_in", false))
+                        .put("rewardUSD", 0).put("rewardKnown", false);
+            }
             if (cs != null && cs.optBoolean("checked")) {
                 out.put("todayChecked", true);
                 out.put("todayRewardUSD", cs.optDouble("rewardUSD", 0));
@@ -551,12 +557,28 @@ public class Engine {
      * 返回的对象额外带 rewardUSD / rewardKnown 两个字段。
      */
     public JSONObject todayBonus(String key) throws Exception {
+        JSONObject site = store.siteOfAccount(key);
+        String sKey = site == null ? "" : site.optString("key", "");
         JSONObject lg = logs(key, "系统", 30);
-        if (!lg.optBoolean("ok")) return null;
+        /* v0.4.4（审计方案A）：失败原因显式写 opLog，用户能从悬浮日志看到为何奖励没显示 */
+        if (!lg.optBoolean("ok")) {
+            store.opLog(sKey, key, "奖励检测", "warn", "签到奖励未显示：日志接口失败",
+                    "GET /api/log/self http=" + lg.optInt("http", 0), "user");
+            return null;
+        }
         JSONObject lb = lg.optJSONObject("lastBonus");
-        if (lb == null || !lb.has("time")) return null;
+        if (lb == null || !lb.has("time")) {
+            store.opLog(sKey, key, "奖励检测", "warn", "签到奖励未显示：近30条系统日志无签到记录",
+                    "接口返回正常但无「每日签到」类文案（站点可能当日未发奖励）", "user");
+            return null;
+        }
         long t = parseTimeMs(lb.optString("time"));
-        if (t <= 0 || !isToday(t)) return null;
+        if (t <= 0 || !isToday(t)) {
+            String ts = new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US).format(new java.util.Date(t > 0 ? t : 0));
+            store.opLog(sKey, key, "奖励检测", "warn", "签到奖励未显示：最近签到记录非今日",
+                    "最近一条签到时间：" + ts, "user");
+            return null;
+        }
         double usd = lb.optDouble("usd", -1);
         lb.put("rewardUSD", usd >= 0 ? usd : 0);
         lb.put("rewardKnown", usd >= 0);
@@ -618,6 +640,12 @@ public class Engine {
                 + "&limit=" + limit + "&page=1";
         JSONObject r = callWithAuth(site, key, "GET", path);
         int code = r.optInt("http");
+        /* v0.4.4（审计方案A）：WAF 间歇拦截（实测 aliyun_waf 连拦数分钟后放行）——退避 2.5s 重试一次 */
+        if (code == 503) {
+            try { Thread.sleep(2500L); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            r = callWithAuth(site, key, "GET", path);
+            code = r.optInt("http");
+        }
         JSONObject out = new JSONObject().put("ok", code == 200).put("http", code);
         if (code != 200) out.put("message", httpHint(code));
         JSONArray rows = new JSONArray();
@@ -769,8 +797,16 @@ public class Engine {
                         .setRequiredNetworkType(NetworkType.CONNECTED).build());
         if (initialDelayMin > 0) b.setInitialDelay(initialDelayMin, TimeUnit.MINUTES);
 
+        /* v0.4.4（审计方案C）：CANCEL_AND_REENQUEUE 每次打开 App 都重置 initialDelay，
+         * 频繁开 App 会把任务永远推迟。改为：配置指纹变化才重排，否则 KEEP 保持原计划。 */
+        String fp = sch.optString("mode", "daily") + ":" + sch.optInt("hour", 8)
+                + ":" + sch.optInt("minute", 30) + ":" + sch.optInt("intervalHours", 12);
+        android.content.SharedPreferences sp = c.getSharedPreferences("sched", 0);
+        boolean fpChanged = !fp.equals(sp.getString("fp", ""));
         wm.enqueueUniquePeriodicWork("justsign-check",
-                ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, b.build());
+                fpChanged ? ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE
+                        : ExistingPeriodicWorkPolicy.KEEP, b.build());
+        if (fpChanged) sp.edit().putString("fp", fp).apply();
     }
 
     private static long minutesUntil(int hour, int minute) {
