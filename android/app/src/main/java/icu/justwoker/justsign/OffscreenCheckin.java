@@ -180,11 +180,11 @@ public final class OffscreenCheckin {
         }
 
         /* ---------- 账号快照（只读一次，避免过程中被并发写入影响） ---------- */
-        private String snapToken, snapSiteKey;
+        private String snapToken, snapSiteKey, snapSiteUserId;
 
         private void loadSnapshot() {
             if (snapToken != null) return;
-            String tk = "", sk = "";
+            String tk = "", sk = "", su = "";
             try {
                 Store st = new Store(ctx);
                 JSONObject r = st.findAccount(accountKey);
@@ -192,6 +192,8 @@ public final class OffscreenCheckin {
                     tk = r.optString("token", "");
                     /* 兼容 v0.1.6 存在账号里的旧值 */
                     sk = r.optString("turnstileSiteKey", "");
+                   su = r.optString("siteUserId", "");
+                    if ("null".equals(su)) su = "";
                 }
                 /* 站点级 meta 优先（v0.1.8 新增，账号间共享） */
                 String siteLevel = st.siteMeta(siteKey, "turnstileSiteKey", "");
@@ -199,11 +201,12 @@ public final class OffscreenCheckin {
             } catch (Exception ignored) {}
             snapToken = tk == null ? "" : tk;
             snapSiteKey = sk == null ? "" : sk;
+            snapSiteUserId = su == null ? "" : su;
         }
 
         private String js() {
             loadSnapshot();
-            return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken);
+            return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken, snapSiteUserId);
         }
 
         private synchronized void finish(boolean ok, boolean already, double reward,

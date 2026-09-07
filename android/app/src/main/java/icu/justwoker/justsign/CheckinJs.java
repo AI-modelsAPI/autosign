@@ -36,10 +36,16 @@ public final class CheckinJs {
     public static final String SIGNAL_NEED_UI = "__NEED_UI__";
 
     public static String render(String sid, String sitekey, String seedToken) {
+        return render(sid, sitekey, seedToken, "");
+    }
+    /** v0.3.9：siteUserId 为站点数字用户 ID（New API 系请求须带 New-Api-User 头）。
+     * 空串时不加该头（兼容非 New API 站/旧数据）。 */
+    public static String render(String sid, String sitekey, String seedToken, String siteUserId) {
         return TEMPLATE
                 .replace("/*__SID__*/null", jsStr(sid))
                 .replace("/*__SITEKEY__*/null", jsStr(sitekey))
-                .replace("/*__TOKEN__*/null", jsStr(seedToken));
+                .replace("/*__TOKEN__*/null", jsStr(seedToken))
+                .replace("/*__SITEUID__*/null", jsStr(siteUserId));
     }
 
     static String jsStr(String s) {
@@ -65,13 +71,14 @@ public final class CheckinJs {
         "var R=function(o){try{window.JustSign.onResult(JSON.stringify(o))}catch(e){}};" +
         "var P=function(m){try{window.JustSign.onProgress(String(m))}catch(e){}};" +
         "try{" +
-        "var sid=/*__SID__*/null;var sitekey=/*__SITEKEY__*/null;var seedtk=/*__TOKEN__*/null;" +
+        "var sid=/*__SID__*/null;var sitekey=/*__SITEKEY__*/null;var seedtk=/*__TOKEN__*/null;var siteuid=/*__SITEUID__*/null;" +
         "if(seedtk&&!window.__jstoken)window.__jstoken=seedtk;" +
         "var UNIT=500000;var CHECKIN_ON=true;var TS_ON=false;var tsErr='';" +
         "var usd=function(q){q=Number(q||0);if(!isFinite(q)||q<=0)return 0;" +
         "  return q>=1000?Math.round(q/UNIT*100)/100:q;};" +
         "var H=function(){var hh={'Accept':'application/json'};" +
-        "  if(window.__jstoken)hh['Authorization']='Bearer '+window.__jstoken;return hh;};" +
+        "  if(window.__jstoken)hh['Authorization']='Bearer '+window.__jstoken;" +
+        "  if(siteuid)hh['New-Api-User']=siteuid;return hh;};" +
         "function pad2(n){return n<10?('0'+n):(''+n)}" +
         "function today(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());}" +
         "function month(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1);}" +
