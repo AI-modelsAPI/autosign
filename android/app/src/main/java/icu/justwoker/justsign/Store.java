@@ -109,6 +109,19 @@ public class Store {
                 }
                 sp.edit().putBoolean("migrated_v4_catalog", true).putString("config", cfg.toString()).commit();
             }
+            /* v5（v0.5.0）：只保留四个内置站——其余站点（含其下账号）全部删除，
+             * 用户明确要求「其余站点信息一个不留」。 */
+            if (!sp.getBoolean("migrated_v5_prune", false)) {
+                JSONArray sites = cfg.optJSONArray("sites");
+                JSONArray kept = new JSONArray();
+                for (int i = 0; sites != null && i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    if (Catalog.byKey(s.optString("key", "")) != null) kept.put(s);
+                }
+                cfg.put("sites", kept);
+                sp.edit().putBoolean("migrated_v5_prune", true).putString("config", cfg.toString()).commit();
+            }
         } catch (Exception ignored) {}
     }
 

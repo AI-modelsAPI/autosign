@@ -166,6 +166,13 @@ public class AuthActivity extends Activity {
             }
             @Override public void onPageFinished(WebView v, String url) {
                 maybeFill(url);
+                /* v0.5.0：2FA 页定期重注入（每 25s）——TOTP 码 30s 窗口轮换后旧码过期，
+                 * 且「切换到验证器」点击后输入框可能延迟出现；重置 filled 让 maybeFill
+                 * 用新算的 OTP 重新渲染脚本，解决偶发不自动填 2FA。 */
+                if (url != null && (url.contains("two-factor") || url.contains("/sessions"))) {
+                    h.removeCallbacks(otpReinject);
+                    h.postDelayed(otpReinject, 25000);
+                }
                 if (url != null && interceptCallback(url)) return;
                 /* OAuth 确认页自动授权（需求2）：800ms 后自动点 Authorize，
                  * 配合登录页自动填充+自动提交，实现授权全程无手动 */
@@ -530,6 +537,13 @@ public class AuthActivity extends Activity {
 
     /* 首次授权用户确认标志（v0.3.7 无锚点兜底） */
     private volatile boolean idConfirmed = false;
+    /* v0.5.0：2FA 页 25s 重注入（新 OTP） */
+    private final Runnable otpReinject = new Runnable() {
+        @Override public void run() {
+            if (done) return;
+            filled = false;   // 允许 maybeFill 重新注入（新 OTP 已在 render 时重算）
+        }
+    };
 
     private void finishOk(JSONObject bundle, String token, String setCookie, String loginFromResp) {
         if (done) return;

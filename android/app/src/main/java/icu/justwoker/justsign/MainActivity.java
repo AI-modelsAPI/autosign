@@ -475,7 +475,11 @@ public class MainActivity extends Activity {
     private View accountItem(JSONObject site, JSONObject acc) {
         final String key = acc.optString("key");
         final String token = acc.optString("token", "");
-        final boolean authed = !token.isEmpty();
+        /* v0.5.0：cookie 型站（AgentRouter 等）token 为空但 siteCookie 是真凭据，
+         * 只看 token 会误判「待授权」。两者任一存在即已授权。 */
+        String siteCookie = acc.optString("siteCookie", "");
+        if (siteCookie == null || "null".equals(siteCookie)) siteCookie = "";
+        final boolean authed = !token.isEmpty() || !siteCookie.isEmpty();
         final boolean checked = Engine.isCheckedToday(acc);
         JSONObject st = acc.optJSONObject("lastStatus");
         boolean stOk = st != null && st.optBoolean("ok");

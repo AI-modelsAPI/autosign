@@ -23,7 +23,7 @@ public final class Catalog {
         {"AgentRouter",  "https://agentrouter.org",    "login",  "注册 $175 + 每日签到 $25", "GPT5.6SoL / Claude Opus 4.8 / Claude Opus 5", "https://agentrouter.org/register?aff=nc7C"},
         {"JustDoWork",   "https://api.justwoker.icu",  "newapi", "注册 $90 + 每日签到 $20",  "Claude Opus 4.8 / Claude Opus 5",              "https://api.justwoker.icu/sign-up?aff=wFQu"},
         {"GoRouter",     "https://gorouter.app",       "login",  "注册 $70 + 每日签到 $10",  "Claude Opus 4.8 / Claude Opus 5",              "https://gorouter.app/sign-up?aff=Dr35"},
-        {"KKtoken AI",   "https://kktoken.cc",         "newapi", "注册 $75 + 每日签到 $25",  "Claude Opus 4.8 / Claude Opus 5",              "https://kktoken.cc/sign-up?aff=BpD"},
+        {"KKtoken AI",   "https://kktoken.cc",         "newapi", "注册 $75 + 每日签到 $25",  "Claude Opus 4.8 / Claude Opus 5",              "https://kktoken.cc/sign-up?aff=BpDr"},
     };
 
     public static ArrayList<JSONObject> all() {
