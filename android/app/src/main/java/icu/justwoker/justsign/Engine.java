@@ -56,13 +56,18 @@ public class Engine {
     public Engine(Context c) { store = new Store(c); ctx = c.getApplicationContext(); }
     /* ================= HTTP ================= */
     private JSONObject call(JSONObject site, String token, String method, String path) throws Exception {
+        return call(site, token, "", method, path);
+    }
+    /* opus4.8 审计·B-03：cookie 型站点（AgentRouter 等 New API 变体）支持。
+     * cookie 为空时走旧签名（纯 Bearer），完全向后兼容。 */
+    private JSONObject call(JSONObject site, String token, String cookie, String method, String path) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
         if (base.isEmpty()) throw new Exception("站点 baseUrl 为空");
         String url = base + path;
         lastError = "";
-        JSONObject r = attempt(url, token, method, buildClient(useProxy, proxy));
+        JSONObject r = attempt(url, token, cookie, method, buildClient(useProxy, proxy));
         /* 429 = 当前代理节点被 WAF/限流盯上。自动探测本机其它存活代理端口，
          * 找到就持久化切过去并重试一次（60s 冷却防横跳）。 */
         if (r != null && r.optInt("http") == 429 && useProxy) {
@@ -70,11 +75,11 @@ public class Engine {
             if (switched != null) {
                 store.opLog("", "", "代理", "info",
                         "429 触发换代理节点", switched.optString("host") + ":" + switched.optInt("port"), "auto");
-                r = attempt(url, token, method,
+                r = attempt(url, token, cookie, method,
                         buildClient(true, store.config().optJSONObject("proxy")));
             }
         }
-        if (r == null && useProxy) r = attempt(url, token, method, plain);
+        if (r == null && useProxy) r = attempt(url, token, cookie, method, plain);
         if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
                 + (lastError.isEmpty() ? "" : ": " + lastError));
         return r;
@@ -122,14 +127,36 @@ public class Engine {
             if (!token.isEmpty()) cacheToken(accountKey, token);
         }
 
-        JSONObject r = call(site, token, method, path);
+        /* opus4.8 审计·B-03：cookie 型站点（AgentRouter 等）用 siteCookie 维持会话。 */
+        String cookie = "";
+        try {
+            JSONObject acc0 = store.findAccount(accountKey);
+            if (acc0 != null) {
+                cookie = acc0.optString("siteCookie", "");
+                if (cookie == null || cookie.isEmpty() || "null".equals(cookie)) cookie = "";
+            }
+        } catch (Exception ignored) {}
+        JSONObject r = call(site, token, cookie, method, path);
         if (r.optInt("http") != 401) return r;
 
         /* 仍然 401（token 被服务端提前作废）→ 再换一次 */
         String freshToken = SilentAuth.exchangeSync(ctx, store, site, accountKey);
-        if (!freshToken.isEmpty() && !freshToken.equals(token)) {
-            cacheToken(accountKey, freshToken);
-            JSONObject r2 = call(site, freshToken, method, path);
+        /* opus4.8 复审 P2-2：cookie 型站 exchangeSync 返回空 token 但会刷新
+         * siteCookie —— 重试条件须覆盖「token 或 cookie 任一变化」。 */
+        String freshCookie = cookie;
+        try {
+            JSONObject acc1 = store.findAccount(accountKey);
+            if (acc1 != null) {
+                String c1 = acc1.optString("siteCookie", "");
+                if (c1 != null && !c1.isEmpty() && !"null".equals(c1)) freshCookie = c1;
+            }
+        } catch (Exception ignored) {}
+        boolean tokenChanged = !freshToken.isEmpty() && !freshToken.equals(token);
+        boolean cookieChanged = !freshCookie.equals(cookie);
+        if (tokenChanged || cookieChanged) {
+            if (tokenChanged) cacheToken(accountKey, freshToken);
+            String useToken = tokenChanged ? freshToken : token;
+            JSONObject r2 = call(site, useToken, freshCookie, method, path);
             try { r2.put("reauthed", true); } catch (Exception ignored) {}
             return r2;
         }
@@ -166,12 +193,15 @@ public class Engine {
         } catch (Exception e) { return plain; }
     }
 
-    private JSONObject attempt(String url, String token, String method, OkHttpClient client) {
+    private JSONObject attempt(String url, String token, String cookie, String method, OkHttpClient client) {
         Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
                     .header("User-Agent", UA).header("Accept", "application/json");
-            if (token != null && !token.isEmpty()) rb.header("Authorization", "Bearer " + token);
+            if (token != null && !token.isEmpty() && !"null".equals(token)) rb.header("Authorization", "Bearer " + token);
+            /* opus4.8 审计·B-03：cookie 型站点会话头（New API gin session）。
+             * 服务端 UserAuth 先查 session 再回退 Authorization，两者同带无害。 */
+            if (cookie != null && !cookie.isEmpty()) rb.header("Cookie", cookie);
             if ("POST".equalsIgnoreCase(method))
                 rb.post(RequestBody.create("{}", MediaType.parse("application/json")));
             resp = client.newCall(rb.build()).execute();

@@ -138,6 +138,24 @@ public final class SilentAuth {
         } catch (Exception e) { return false; }
     }
 
+    /** opus4.8 审计·B-02：从 OkHttp 响应头拼装 Cookie 头值。
+     * 只保留有值的 cookie（删除态 Max-Age=0/空值跳过），形如 "session=xxx; other=yyy"。 */
+    private static String extractCookies(java.util.List<String> setCookies) {
+        if (setCookies == null || setCookies.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String sc : setCookies) {
+            int semi = sc.indexOf(';');
+            String pair = (semi >= 0 ? sc.substring(0, semi) : sc).trim();
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String val = pair.substring(eq + 1).trim();
+            if (val.isEmpty() || "deleted".equalsIgnoreCase(val)) continue;
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(pair);
+        }
+        return sb.toString();
+    }
+
     /* ================= JWT 剩余期判定 =================
      * TokenKeeper 已删除，但「这个 token 还能用多久」仍需判断：
      * 签到/刷新前若发现剩余不足 SKEW，直接先换新的，别等 401 再补救（省一次往返）。 */
@@ -316,33 +334,90 @@ public final class SilentAuth {
                         .header("User-Agent", UA);
                 resp = c.newCall(rb.build()).execute();
                 String body = resp.body() != null ? resp.body().string() : "";
+                /* opus4.8 审计·B-02：New API 系登录凭据是 Set-Cookie session（gin），
+                 * access_token 是可选系统令牌（未生成为 JSON null）。必须抓 Set-Cookie。 */
+                final String setCookie = extractCookies(resp.headers("Set-Cookie"));
                 if (!body.trim().isEmpty()) {
                     JSONObject r = new JSONObject(body);
                     JSONObject d = r.optJSONObject("data");
                     if (r.optBoolean("success") && d != null) {
-                        String token = d.optString("access_token", d.optString("accessToken", ""));
-                        String login = null;
-                        JSONObject usr = d.optJSONObject("user");
-                        if (usr != null) {
-                            login = usr.optString("username", "");
-                            if (login.isEmpty()) login = usr.optString("login", "");
-                        }
-                        if (!token.isEmpty()) {
-                            /* 身份校验落库（B1）：不符拒绝写入并转手动授权 */
-                            boolean saved = saveTokenChecked(token, login);
-                            if (saved) {
-                                /* 需求3：落盘本账号 Profile 会话（持久化，
-                                 * 之后刷新/签到后台自动交换，无需再授权） */
-                                WebViewProfileUtil.flush(mProfile);
-                                final String fl = login;
-                                main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
-                            } else {
-                                final String gl = login;
-                                main.post(() -> finish(false, true, gl,
-                                        "后台会话账号 " + (gl == null ? "?" : gl) + " 与所选不符，请手动授权切换"));
+                        /* token 尽力而为：仅当为非空字符串才用（JSON null/缺失一律视为无）。
+                         * 兼容三字段（New API 新旧版本）。 */
+                        String token = "";
+                        if (d.has("access_token") && !d.isNull("access_token")) {
+                            Object at = d.get("access_token");
+                            if (at instanceof String) {
+                                String s = ((String) at).trim();
+                                if (!s.isEmpty() && !"null".equals(s)) token = s;
                             }
+                        }
+                        if (token.isEmpty() && d.has("accessToken") && !d.isNull("accessToken")) {
+                            Object at = d.get("accessToken");
+                            if (at instanceof String) {
+                                String s = ((String) at).trim();
+                                if (!s.isEmpty() && !"null".equals(s)) token = s;
+                            }
+                        }
+                        if (token.isEmpty() && d.has("token") && !d.isNull("token")) {
+                            Object at = d.get("token");
+                            if (at instanceof String) {
+                                String s = ((String) at).trim();
+                                if (!s.isEmpty() && !"null".equals(s)) token = s;
+                            }
+                        }
+                        /* 身份标识：data 直接是用户对象（AgentRouter 型），
+                         * 旧版在 data.user 里——两层都试。 */
+                        String login = d.optString("username", "");
+                        if (login.isEmpty() || "null".equals(login)) login = "";
+                        if (login.isEmpty()) {
+                            JSONObject usr = d.optJSONObject("user");
+                            if (usr != null) {
+                                login = usr.optString("username", "");
+                                if (login.isEmpty() || "null".equals(login)) login = usr.optString("login", "");
+                                if (login == null || "null".equals(login)) login = "";
+                            }
+                        }
+                        /* B1 身份校验：响应 username 与所选账号不符 → 拒绝 */
+                        String want = expectGithubLogin();
+                        if (!want.isEmpty() && !login.isEmpty()
+                                && !want.trim().equalsIgnoreCase(login.trim())) {
+                            try {
+                                store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                        "GitHub 身份不符，已拒绝写入防串号",
+                                        "期望 " + want + "，实际 " + login, "auto");
+                            } catch (Exception ignored) {}
+                            final String gl = login;
+                            main.post(() -> finish(false, true, gl,
+                                    "后台会话账号 " + gl + " 与所选不符，请手动授权切换"));
                             return;
                         }
+                        /* 凭据有效性：cookie 型站必须有 Set-Cookie；token 型站有 token。
+                         * 两者皆无 → 失败（不再把 "null" 假成功）。 */
+                        final String fLogin = login;
+                        if (setCookie.isEmpty() && token.isEmpty()) {
+                            try {
+                                store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                        "授权响应无 Cookie 也无 token",
+                                        "data keys 见授权页日志", "auto");
+                            } catch (Exception ignored) {}
+                            main.post(() -> finish(false, true, fLogin, "授权响应缺少会话凭据"));
+                            return;
+                        }
+                        /* 落库：token（可空）+ siteCookie（cookie 型站真凭据） */
+                        try {
+                            JSONObject patch = new JSONObject()
+                                    .put("siteKey", siteKey)
+                                    .put("updatedAt", System.currentTimeMillis());
+                            if (!token.isEmpty()) patch.put("token", token);
+                            if (!setCookie.isEmpty()) patch.put("siteCookie", setCookie);
+                            if (login != null && !login.isEmpty()) patch.put("githubAccount", login);
+                            store.patchAccount(accountKey, patch);
+                        } catch (Exception ignored) {}
+                        /* 需求3：落盘本账号 Profile 会话 */
+                        WebViewProfileUtil.flush(mProfile);
+                        final String fl = login;
+                        main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
+                        return;
                     }
                 }
             } catch (Exception ignored) {

@@ -66,7 +66,7 @@ public class AuthActivity extends Activity {
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
             if (done) return;
-            h.post(() -> handleBundle(json));
+            h.post(() -> handleBundle(json, ""));
         }
         @JavascriptInterface public void onFill(String json) {
             h.post(() -> {
@@ -281,10 +281,12 @@ public class AuthActivity extends Activity {
             resp = c.newCall(rb.build()).execute();
             int http = resp.code();
             String body = resp.body() != null ? resp.body().string() : "";
+            /* opus4.8 审计·B-02：New API 系真凭据是 Set-Cookie session，必须抓取 */
+            final String sc = extractCookies(resp.headers("Set-Cookie"));
             if (body.trim().isEmpty()) err = "站点返回空响应（HTTP " + http + "）";
             else {
                 final String fb = body;
-                h.post(() -> handleBundle(fb));
+                h.post(() -> handleBundle(fb, sc));
                 return;
             }
         } catch (Exception e) {
@@ -299,14 +301,46 @@ public class AuthActivity extends Activity {
         });
     }
 
-    private void handleBundle(String json) {
+    private void handleBundle(String json, String setCookie) {
         if (done) return;
         try {
             JSONObject r = new JSONObject(json);
             JSONObject d = r.optJSONObject("data");
             if (r.optBoolean("success") && d != null) {
-                String token = d.optString("access_token", d.optString("accessToken", ""));
-                if (!token.isEmpty()) { finishOk(d, token); return; }
+                /* opus4.8 审计：token 尽力而为（JSON null/缺失视为无，三字段回退）；
+                 * cookie 型站（AgentRouter）以 setCookie 为真凭据。 */
+                String token = "";
+                for (String k : new String[]{"access_token", "accessToken", "token"}) {
+                    if (d.has(k) && !d.isNull(k)) {
+                        Object at = d.get(k);
+                        if (at instanceof String) {
+                            String sv = ((String) at).trim();
+                            if (!sv.isEmpty() && !"null".equals(sv)) { token = sv; break; }
+                        }
+                    }
+                }
+                /* 身份标识：data 直接是用户对象（AgentRouter 型）或 data.user */
+                String login = d.optString("username", "");
+                if (login.isEmpty() || "null".equals(login)) login = "";
+                if (login.isEmpty()) {
+                    JSONObject usr = d.optJSONObject("user");
+                    if (usr != null) {
+                        login = usr.optString("username", "");
+                        if (login.isEmpty() || "null".equals(login)) login = usr.optString("login", "");
+                        if (login == null || "null".equals(login)) login = "";
+                    }
+                }
+                if (!token.isEmpty() || !setCookie.isEmpty()) {
+                    finishOk(d, token, setCookie, login);
+                    return;
+                }
+                /* 两者皆无：诊断（data keys）帮助适配 */
+                java.util.Iterator<String> ks = d.keys();
+                StringBuilder kb = new StringBuilder();
+                int kn = 0;
+                while (ks.hasNext() && kn < 20) { kb.append(ks.next()).append(','); kn++; }
+                exchanging = false;
+                showLoadError("授权响应缺少会话凭据（data keys: " + kb + "…）");
             }
             String msg = r.optString("message", "交换失败");
             exchanging = false;
@@ -485,15 +519,23 @@ public class AuthActivity extends Activity {
         }
     }
 
-    private void finishOk(JSONObject bundle, String token) {
+    private void finishOk(JSONObject bundle, String token, String setCookie, String loginFromResp) {
         if (done) return;
         Store store = new Store(this);
-        JSONObject userObj = bundle.optJSONObject("user");
-        String login = null;
-        if (userObj != null) {
-            login = userObj.optString("username", "");
-            if (login.isEmpty()) login = userObj.optString("login", "");
-            if (login.isEmpty()) login = null;
+        /* 登录名优先用授权响应里的真实 username（AgentRouter 型 data 直层），
+         * 回退旧结构 data.user，最后回退 bundle.username */
+        String login = (loginFromResp != null && !loginFromResp.isEmpty()) ? loginFromResp : null;
+        if (login == null) {
+            JSONObject userObj = bundle.optJSONObject("user");
+            if (userObj != null) {
+                login = userObj.optString("username", "");
+                if (login.isEmpty()) login = userObj.optString("login", "");
+                if (login.isEmpty() || "null".equals(login)) login = null;
+            }
+        }
+        if (login == null && bundle.has("username") && !bundle.isNull("username")) {
+            String u0 = bundle.optString("username", "");
+            if (!u0.isEmpty() && !"null".equals(u0)) login = u0;
         }
         /* 身份校验（opus4.8 审计方案 B1，防串号根治）：
          * 站点返回的实际 GitHub 用户必须 == 本账号期望的 GitHub 用户，
@@ -516,13 +558,17 @@ public class AuthActivity extends Activity {
         }
         done = true;
         try {
+            /* token 不再无条件落库（cookie 型站 token 为空，脏值拦截在下方） */
             JSONObject patch = new JSONObject()
                     .put("siteKey", siteKey)
-                    .put("token", token)
                     .put("updatedAt", System.currentTimeMillis());
             if (alias != null && !alias.isEmpty()) patch.put("alias", alias);
             if (login != null) patch.put("githubAccount", login);
             if (credentialId != null && !credentialId.isEmpty()) patch.put("credentialId", credentialId);
+        /* opus4.8 审计·B-02：cookie 型站点的真会话凭据（gin session） */
+        if (setCookie != null && !setCookie.isEmpty()) patch.put("siteCookie", setCookie);
+        /* token 允许为空（cookie 型站）；脏值不落库 */
+        if (token != null && !token.trim().isEmpty() && !"null".equals(token.trim())) patch.put("token", token.trim());
 
             JSONObject rec = store.findAccount(accountKey);
             if (rec == null) {
@@ -555,6 +601,33 @@ public class AuthActivity extends Activity {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
         }
         finish();
+    }
+
+    /** org.json optString 对 JSON null 值返回字面 "null" 字符串（而非 fallback）——显式拦截 */
+    static String jsonStr(JSONObject o, String key) {
+        if (o == null || !o.has(key) || o.isNull(key)) return "";
+        String v = o.optString(key, "");
+        if (v == null) return "";
+        v = v.trim();
+        if (v.isEmpty() || v.equals("null") || v.equals("undefined")) return "";
+        return v;
+    }
+
+    /** opus4.8 审计·B-02：从 OkHttp 响应头拼装 Cookie 头值（仅保留有值 cookie） */
+    private static String extractCookies(java.util.List<String> setCookies) {
+        if (setCookies == null || setCookies.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String sc : setCookies) {
+            int semi = sc.indexOf(';');
+            String pair = (semi >= 0 ? sc.substring(0, semi) : sc).trim();
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String val = pair.substring(eq + 1).trim();
+            if (val.isEmpty() || "deleted".equalsIgnoreCase(val)) continue;
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(pair);
+        }
+        return sb.toString();
     }
 
     /** 本账号期望的 GitHub 用户名：凭据 githubUser 优先，回退账号别名；空=不校验 */
