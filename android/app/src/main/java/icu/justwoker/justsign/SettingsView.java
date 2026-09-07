@@ -194,13 +194,8 @@ public class SettingsView extends FrameLayout {
         } catch (Exception ignored) {}
         g4.addView(item("info", "版本", null, ver, null));
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g4.addView(item("pkg", "开源主页", "AI-modelsAPI/justsign", null, v -> {
-            try {
-                act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
-                        android.net.Uri.parse("https://github.com/AI-modelsAPI/justsign")));
-            } catch (Exception e) { act.toast("无法打开链接"); }
-        }));
-        g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
+        /* 开源主页入口暂时隐藏（未开源阶段），开源后恢复：
+           item("pkg", ...) → ACTION_VIEW 仓库地址。 */
         g4.addView(item("chat", "QQ 交流群", "1060200469", null, v -> {
             try {
                 act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
