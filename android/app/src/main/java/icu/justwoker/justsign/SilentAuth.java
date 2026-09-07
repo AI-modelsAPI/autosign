@@ -214,6 +214,8 @@ public final class SilentAuth {
 
         private WebView wv;
         private String baseUrl = "", siteHost = "";
+        /** 本轮 state；同域回调必须严格匹配后才允许交换。 */
+        private volatile String expectedOauthState = "";
         private volatile boolean done = false;
         private volatile boolean exchanging = false;
         private Runnable watchdog;
@@ -250,6 +252,7 @@ public final class SilentAuth {
 
         private void startOffscreen(String clientId, String state) {
             if (done) return;
+            expectedOauthState = state == null ? "" : state;
             try {
                 wv = new WebView(ctx); // 离屏运行，零 UI
                 /* 需求3（opus4.8 审计）：绑定「站点×账号」专属 Profile。
@@ -267,6 +270,9 @@ public final class SilentAuth {
                     @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                         if (req == null || req.getUrl() == null) return false;
                         return intercept(req.getUrl().toString());
+                    }
+                    @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
+                        intercept(url);
                     }
                     @Override public void onPageFinished(WebView v, String url) {
                         if (done || url == null) return;
@@ -309,23 +315,34 @@ public final class SilentAuth {
 
         private boolean intercept(String url) {
             if (done || exchanging || url == null) return false;
-            try {
-                java.net.URL u = new java.net.URL(url);
-                if (siteHost == null || siteHost.isEmpty()) return false;
-                if (!u.getHost().equalsIgnoreCase(siteHost)) return false;
-                String path = u.getPath();
-                if (path == null || !path.startsWith("/oauth/")) return false;
-                String provider = path.substring("/oauth/".length());
-                if (provider.contains("/")) provider = provider.substring(0, provider.indexOf('/'));
-                if (!provider.matches("[a-zA-Z0-9_-]{1,32}")) return false;
-                String code = param(u.getQuery(), "code");
-                String st = param(u.getQuery(), "state");
-                if (code.isEmpty()) return false;
+            OAuthCallback.Result r = OAuthCallback.parse(url, siteHost, expectedOauthState);
+            if (r.shouldExchange()) {
                 exchanging = true;
-                final String fp = provider, fc = code, fs = st;
-                new Thread(() -> exchange(fp, fc, fs), "silent-auth-exchange").start();
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "info",
+                            "已拦截授权回调", r.safe + "；state 校验通过", "auto");
+                } catch (Exception ignored) {}
+                final String fc = r.code, fs = r.state;
+                new Thread(() -> exchange("github", fc, fs), "silent-auth-exchange").start();
                 return true;
-            } catch (Exception e) { return false; }
+            }
+            if (r.badState()) {
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                            "拒绝异常授权回调", r.safe + "；state 缺失或不匹配", "auto");
+                } catch (Exception ignored) {}
+                finish(false, true, null, "授权回调校验失败，需要重新授权");
+                return true;
+            }
+            if (r.missingCode()) {
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                            "未获取到授权码", r.safe, "auto");
+                } catch (Exception ignored) {}
+                finish(false, true, null, "未获取到授权码，需要重新授权");
+                return true;
+            }
+            return false;
         }
 
         private void exchange(String provider, String code, String state) {

@@ -21,7 +21,7 @@ v0.2.1 起使用仓库内固定签名，可直接覆盖安装；**从 v0.2.0 及
 | [AgentRouter](https://agentrouter.org/register?aff=nc7C) | $175 | $25 | GPT5.6SoL / Claude Opus 4.8 / Claude Opus 5 |
 | [JustDoWork](https://api.justwoker.icu/sign-up?aff=wFQu) | $90 | $20 | Claude Opus 4.8 / Claude Opus 5 |
 | [GoRouter](https://gorouter.app/sign-up?aff=Dr35) | $70 | $10 | Claude Opus 4.8 / Claude Opus 5 |
-| [KKtoken AI](https://kktoken.cc/sign-up?aff=BpD) | $75 | $25 | Claude Opus 4.8 / Claude Opus 5 |
+| [KKtoken AI](https://kktoken.cc/sign-up?aff=BpDr) | $75 | $25 | Claude Opus 4.8 / Claude Opus 5 |
 
 卡片左上角站点名点击即跳转注册页（带邀请码，注册双方得额度）。
 
@@ -34,7 +34,9 @@ v0.2.1 起使用仓库内固定签名，可直接覆盖安装；**从 v0.2.0 及
 
 站点管理页里三种形态可手动切换，内置站与自定义站完全平权（都能增删改）。
 
-## 版本演进（v0.4.x 系列·关键能力）
+## 版本演进（v0.5.x / v0.4.x·关键能力）
+- **v0.5.1** OAuth 回调不再限定 `/oauth/*`：按站点同域 + code + 本轮 state 严格拦截，兼容根路径/API 路径/hash 路由；授权关键阶段写脱敏日志，缺授权码会明确报错
+- **v0.5.0** 2FA 动态码定时重注入、cookie 型站授权状态修复、仅保留四个内置站及数据迁移清理
 - **v0.4.7** 删除账号时同步清除该账号的 WebView 会话分区（不留孤儿数据；重新添加走全新授权，凭据库自动填充）
 - **v0.4.6** 定时签到完成后自动刷新三额度（与手动签到行为对齐）
 - **v0.4.5** 奖励显示根因修复（日志接口倒序返回，取最新签到记录而非最旧）；浏览器预填密码时 Sign in 仍自动点击；定时任务改 KEEP 策略 + 前台补跑兜底

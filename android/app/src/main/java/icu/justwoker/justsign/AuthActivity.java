@@ -54,7 +54,11 @@ public class AuthActivity extends Activity {
     private volatile boolean exchanging = false;
     private volatile boolean filled = false;
     private volatile String authUrl = "";
+    /** 本轮 /api/oauth/state 返回值；回调必须严格匹配，防串流/CSRF。 */
+    private volatile String expectedOauthState = "";
     private volatile int reauthTries = 0;
+    /** 同一安全 URL 只记录一次，避免 onPageStarted/onPageFinished 双重刷日志。 */
+    private volatile String lastNavLog = "";
 
     private String credAccount = "", credPassword = "", credOtp = "";
     /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
@@ -162,7 +166,10 @@ public class AuthActivity extends Activity {
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                 if (req == null || req.getUrl() == null) return false;
-                return interceptCallback(req.getUrl().toString());
+                return inspectNavigation(req.getUrl().toString(), "导航请求");
+            }
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
+                inspectNavigation(url, "开始加载");
             }
             @Override public void onPageFinished(WebView v, String url) {
                 maybeFill(url);
@@ -173,7 +180,7 @@ public class AuthActivity extends Activity {
                     h.removeCallbacks(otpReinject);
                     h.postDelayed(otpReinject, 25000);
                 }
-                if (url != null && interceptCallback(url)) return;
+                if (url != null && inspectNavigation(url, "加载完成")) return;
                 /* OAuth 确认页自动授权（需求2）：800ms 后自动点 Authorize，
                  * 配合登录页自动填充+自动提交，实现授权全程无手动 */
                 if (url != null && url.toLowerCase(java.util.Locale.US).contains("/login/oauth/authorize")) {
@@ -240,47 +247,59 @@ public class AuthActivity extends Activity {
         startAuthFlow();
     }
 
-    private boolean interceptCallback(String url) {
-        if (done || exchanging || url == null) return false;
-        try {
-            java.net.URL u = new java.net.URL(url);
-            if (siteHost == null || siteHost.isEmpty()) return false;
-            if (!u.getHost().equalsIgnoreCase(siteHost)) return false;
-            String path = u.getPath();
-            if (path == null || !path.startsWith("/oauth/")) return false;
-            String provider = path.substring("/oauth/".length());
-            if (provider.contains("/")) provider = provider.substring(0, provider.indexOf('/'));
-            if (!provider.matches("[a-zA-Z0-9_-]{1,32}")) return false;
+    private boolean inspectNavigation(String url, String stage) {
+        if (done || url == null) return false;
+        OAuthCallback.Result r = OAuthCallback.parse(url, siteHost, expectedOauthState);
+        if (!r.validUrl) return false;
 
-            String q = u.getQuery();
-            String code = param(q, "code"), state = param(q, "state");
-            if (code.isEmpty()) return false;
-
-            exchanging = true;
-            showTip("正在交换授权凭证…");
-            final String fp = provider, fc = code, fs = state;
-            new Thread(() -> exchange(fp, fc, fs), "oauth-exchange").start();
-            return true;
-        } catch (Exception e) { return false; }
-    }
-
-    private static String param(String query, String key) {
-        if (query == null) return "";
-        for (String kv : query.split("&")) {
-            int i = kv.indexOf('=');
-            if (i <= 0) continue;
-            if (kv.substring(0, i).equals(key)) {
-                try { return java.net.URLDecoder.decode(kv.substring(i + 1), "UTF-8"); }
-                catch (Exception e) { return kv.substring(i + 1); }
+        /* 关键链路只记安全摘要，绝不把 OAuth code/state 写入日志。 */
+        if (r.sameHost || r.callbackPath) {
+            String sig = stage + "|" + r.safe;
+            if (!sig.equals(lastNavLog)) {
+                lastNavLog = sig;
+                authLog("info", "授权跳转·" + stage,
+                        r.safe + " callbackPath=" + r.callbackPath
+                                + " code=" + r.hasCode + " state=" + r.hasState
+                                + " stateMatch=" + r.stateMatches);
             }
         }
-        return "";
+        if (exchanging) return r.sameHost;
+
+        if (r.shouldExchange()) {
+            exchanging = true;
+            showTip("已获取授权码，正在交换凭证…");
+            authLog("info", "已拦截授权回调",
+                    r.safe + "；使用固定 github 交换端点；state 校验通过");
+            final String fc = r.code, fs = r.state;
+            new Thread(() -> exchange("github", fc, fs), "oauth-exchange").start();
+            return true;
+        }
+        if (r.badState()) {
+            authLog("err", "拒绝异常授权回调", r.safe + "；state 缺失或不匹配");
+            showLoadError("授权回调校验失败，请点重试重新授权");
+            return true;
+        }
+        if (r.missingCode()) {
+            String why = r.error.isEmpty() ? "回调未携带授权码" : ("GitHub 返回 " + r.error);
+            authLog("err", "未获取到授权码", r.safe + "；" + why);
+            showLoadError("未获取到授权码，请点重试重新授权");
+            return true;
+        }
+        return false;
+    }
+
+    private void authLog(String level, String summary, String detail) {
+        try {
+            new Store(this).opLog(siteKey, accountKey, "授权链路", level,
+                    summary, detail == null ? "" : detail, "auto");
+        } catch (Exception ignored) {}
     }
 
     private void exchange(String provider, String code, String state) {
         Response resp = null;
         String err = null;
         try {
+            authLog("info", "开始交换授权凭证", "endpoint=/api/oauth/github；code/state 已脱敏");
             OkHttpClient c = withProxy(new OkHttpClient.Builder()
                     .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build(),
                     new Store(this).config().optJSONObject("proxy"));
@@ -295,6 +314,8 @@ public class AuthActivity extends Activity {
             String body = resp.body() != null ? resp.body().string() : "";
             /* opus4.8 审计·B-02：New API 系真凭据是 Set-Cookie session，必须抓取 */
             final String sc = extractCookies(resp.headers("Set-Cookie"));
+            authLog(http >= 200 && http < 300 ? "info" : "err", "授权交换响应",
+                    "HTTP " + http + "；body=" + body.length() + "B；setCookie=" + !sc.isEmpty());
             if (body.trim().isEmpty()) err = "站点返回空响应（HTTP " + http + "）";
             else {
                 final String fb = body;
@@ -413,6 +434,10 @@ public class AuthActivity extends Activity {
     }
 
     private void startAuthFlow() {
+        expectedOauthState = "";
+        exchanging = false;
+        lastNavLog = "";
+        authLog("info", "开始可见授权", "siteHost=" + siteHost + "；账号使用专属会话分区");
         applyProxyThen(() -> new Thread(this::authFlowNetwork, "auth-flow").start());
     }
 
@@ -509,6 +534,9 @@ public class AuthActivity extends Activity {
             h.post(() -> {
                 if (done || isFinishing()) return;
                 if (st2 == null) { showLoadError("获取授权会话失败: " + (er == null ? "未知原因" : er)); return; }
+                if (cid == null || cid.isEmpty()) { showLoadError("站点未提供 GitHub 授权配置，请稍后重试"); return; }
+                expectedOauthState = st2;
+                authLog("info", "已获取授权会话", "clientId=" + !cid.isEmpty() + "；stateMethod=" + (stateUseGet ? "GET" : "POST") + "；state 已脱敏");
                 boot.setVisibility(View.GONE);
                 wv.setVisibility(View.VISIBLE);
                 AlphaAnimation a = new AlphaAnimation(0f, 1f);
