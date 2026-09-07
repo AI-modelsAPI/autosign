@@ -280,9 +280,16 @@ public class AuthActivity extends Activity {
             return true;
         }
         if (r.missingCode()) {
-            String why = r.error.isEmpty() ? "回调未携带授权码" : ("GitHub 返回 " + r.error);
-            authLog("err", "未获取到授权码", r.safe + "；" + why);
-            showLoadError("未获取到授权码，请点重试重新授权");
+            /* GitHub 侧主动拒绝（回调带 error 参数）：access_denied 多为该账号
+             * 曾拒绝此 OAuth App 并被 GitHub 记住，需到 GitHub 设置撤销授权记录 */
+            String why = r.error.isEmpty() ? "回调未携带授权码" : r.error;
+            authLog("err", "未获取到授权码", r.safe + "；" + why
+                    + (r.error.equals("access_denied")
+                        ? "；GitHub 拒绝授权（该账号可能曾拒绝过本应用，到 github.com/settings/applications 撤销该应用授权后重试）"
+                        : ""));
+            showLoadError(r.error.equals("access_denied")
+                    ? "GitHub 拒绝了授权。请到 GitHub → Settings → Applications 撤销本应用的授权记录后，点重试重新授权"
+                    : "未获取到授权码，请点重试重新授权");
             return true;
         }
         return false;

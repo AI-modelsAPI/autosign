@@ -337,10 +337,12 @@ public class KeyPanel {
     }
 
     private void confirmDelete(String name, long id) {
+        if (id <= 0) { toast("该 Key 无有效 ID，无法删除"); return; }
         new AlertDialog.Builder(act)
                 .setTitle("删除 API Key")
                 .setMessage("确定删除 Key「" + name + "」吗？\n删除后使用该 Key 的应用将立即失效。")
                 .setPositiveButton("删除", (d, w) -> {
+                    toast("正在删除…");
                     new Thread(() -> {
                         String err = "";
                         try { new Engine(act).tokenDelete(accountKey, id); }
@@ -348,15 +350,16 @@ public class KeyPanel {
                         final String fErr = err;
                         act.runOnUiThread(() -> {
                             if (!fErr.isEmpty()) { toast("删除失败：" + fErr); return; }
-                            toast("已删除");
+                            toast("已删除「" + name + "」");
                             new Store(act).opLog(siteKey, accountKey, "Key 管理", "ok",
-                                    "删除 API Key", name, "user");
-                            reload();
+                                    "删除 API Key", name + " (id=" + id + ")", "user");
+                            /* 站点列表接口有短暂延迟：立即刷会读到旧数据，误导用户以为没删掉。延迟 800ms 再刷 */
+                            listBody.postDelayed(this::reload, 800);
                         });
                     }, "token-delete").start();
                 })
                 .setNegativeButton("取消", null)
-                .show();
+.show();
     }
 
     private void copyToClipboard(String text) {
