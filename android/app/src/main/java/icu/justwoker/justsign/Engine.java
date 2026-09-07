@@ -504,18 +504,26 @@ public class Engine {
         } catch (Exception ignored) {}
         if (http != 200) throw new Exception("站点返回 HTTP " + http
                 + (rd != null && !rd.optString("message", "").isEmpty() ? "：" + rd.optString("message") : ""));
-        if (rd == null) {
-            /* data 是数组（部分变体站直接返回数组） */
-            if (dataObj instanceof org.json.JSONArray) {
-                return new JSONObject().put("items", (org.json.JSONArray) dataObj);
-            }
-            throw new Exception("响应无 data 字段（" + dataShape + "）");
+        if (rd == null) throw new Exception("响应无 data 字段（" + dataShape + "）");
+        if (!rd.optBoolean("success", false)) {
+            String msg = rd.optString("message", "");
+            throw new Exception(msg.isEmpty() ? "站点返回 success=false" : msg);
         }
-        /* data 可能是 {items:[]} 或直接数组 */
-        org.json.JSONArray items;
-        if (rd.has("items")) items = rd.optJSONArray("items");
-        else if (dataObj instanceof org.json.JSONArray) items = r.optJSONArray("data");
-        else items = new org.json.JSONArray();
+        /* 注意层级：attempt 把整个响应包在 r.data 里，即 r.data = {success,message,data:{...}}。
+         * items 的真实位置是 r.data.data.items（标准 New API）。
+         * 兼容三种形态：data.items / data 是数组 / data.data 是数组。 */
+        Object inner = rd.opt("data");
+        org.json.JSONArray items = null;
+        if (inner instanceof org.json.JSONArray) {
+            items = (org.json.JSONArray) inner;                       // data 直接是数组
+        } else if (inner instanceof JSONObject) {
+            JSONObject id = (JSONObject) inner;
+            Object it = id.opt("items");
+            if (it instanceof org.json.JSONArray) items = (org.json.JSONArray) it;  // data.data.items
+            else if (id.opt("records") instanceof org.json.JSONArray) items = id.optJSONArray("records");
+        } else if (rd.opt("items") instanceof org.json.JSONArray) {
+            items = rd.optJSONArray("items");                          // data.items（极少变体）
+        }
         /* 调试日志：解析出的条目数 */
         try {
             store.opLog(sKey, key, "Key 管理", "info", "Key 列表解析",

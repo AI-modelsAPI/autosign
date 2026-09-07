@@ -9,7 +9,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
@@ -118,28 +117,11 @@ public class KeyPanel {
         addBtn.setPadding(Ui.dp(act,12), Ui.dp(act,7), Ui.dp(act,12), Ui.dp(act,7));
         addBtn.setOnClickListener(v -> promptCreate());
         footer.addView(addBtn);
-        TextView upHint = Ui.tv(act, "  上滑或点 ↑ 收起", 11, 0xFF7A8E8D);
+        TextView upHint = Ui.tv(act, "  点 ↑ 收起", 11, 0xFF7A8E8D);
         footer.addView(upHint, new LinearLayout.LayoutParams(0, -2, 1f));
         panel.addView(footer);
 
-        /* 上滑手势收起（面板区域整体监听，MOVE 超阈值触发） */
-        panel.setOnTouchListener((v, ev) -> {
-            if (!expanded) return false;
-            switch (ev.getAction()) {
-                case MotionEvent.ACTION_DOWN:
-                    downY = ev.getRawY();
-                    return false;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL:
-                    return false;
-                default:
-                    if (ev.getAction() == MotionEvent.ACTION_MOVE) {
-                        float dy = ev.getRawY() - downY;
-                        if (dy < -Ui.dp(act,48)) { collapse(); return true; }
-                    }
-                    return false;
-            }
-        });
+        /* 上滑手势已移除（与页面滚动冲突，v0.6.3 用户要求）：仅保留右上角箭头收起 */
     }
 
     private View divider() {
@@ -258,7 +240,9 @@ public class KeyPanel {
         box.setPadding(0, Ui.dp(act,6), 0, Ui.dp(act,6));
 
         final String name = t.optString("name", "未命名");
-        final String keyStr = t.optString("key", "");
+        /* New API 站点返回的 key 无 sk- 前缀（实测 agentrouter），补齐后才是可用形式 */
+        String rawKey = t.optString("key", "");
+        final String keyStr = rawKey.isEmpty() ? "" : (rawKey.startsWith("sk-") ? rawKey : "sk-" + rawKey);
         final long id = t.optLong("id", 0);
         final int status = t.optInt("status", 1);
         double used = t.optDouble("used_quota", 0);
