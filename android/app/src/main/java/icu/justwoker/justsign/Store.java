@@ -88,6 +88,27 @@ public class Store {
                 }
                 sp.edit().putBoolean("migrated_v3_kind", true).putString("config", cfg.toString()).commit();
             }
+            /* v4（v0.4.9）：内置站信息跟随新 Catalog 同步——affUrl（邀请链接）、
+             * checkinType、reward、note 都以 Catalog 为准（站点清单已精简为四个
+             * 实测站）。已添加的账号与其它字段保持不动。 */
+            if (!sp.getBoolean("migrated_v4_catalog", false)) {
+                JSONArray sites = cfg.optJSONArray("sites");
+                for (int i = 0; sites != null && i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONObject cat = Catalog.byKey(s.optString("key", ""));
+                    if (cat == null) continue;   // 自定义站不动
+                    String aff = cat.optString("affUrl", "");
+                    if (!aff.isEmpty()) s.put("affUrl", aff);
+                    String want = cat.optString("checkinType", "");
+                    if (!want.isEmpty()) s.put("checkinType", want);
+                    String rw = cat.optString("reward", "");
+                    if (!rw.isEmpty()) s.put("reward", rw);
+                    String nt = cat.optString("note", "");
+                    if (!nt.isEmpty()) s.put("note", nt);
+                }
+                sp.edit().putBoolean("migrated_v4_catalog", true).putString("config", cfg.toString()).commit();
+            }
         } catch (Exception ignored) {}
     }
 

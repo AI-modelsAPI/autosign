@@ -399,9 +399,12 @@ public class MainActivity extends Activity {
         TextView name = Ui.textIcon(this, site.optString("name", siteKey), "chevron", 15, Ui.BLUE, true);
         name.setClickable(true);
         name.setOnClickListener(v -> {
-            String home = site.optString("homeUrl", site.optString("baseUrl", ""));
-            if (home.isEmpty()) return;
-            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(home))); }
+            /* v0.4.9：优先邀请链接（affUrl）——用户通过站名注册可获得邀请额度 */
+            String link = site.optString("affUrl", "");
+            if (link == null || link.isEmpty())
+                link = site.optString("homeUrl", site.optString("baseUrl", ""));
+            if (link.isEmpty()) return;
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(link))); }
             catch (Exception e) { toast("无法打开链接"); }
         });
         info.addView(name, new LinearLayout.LayoutParams(-2, -2));
@@ -516,11 +519,15 @@ public class MainActivity extends Activity {
                 else if (rw > 0) toast("今日签到奖励 +$" + Ui.usd(rw));
                 else toast("今日已签到 · 本站签到不发奖励");
             });
+        } else if (Engine.isWebOnly(site)) {
+            main = Ui.btn(this, "去网页", 11, Ui.BLUE, Ui.BLUE_BG, 12, 4);
+            main.setOnClickListener(v -> doCheckin(key, main));
+        } else if ("login".equals(Engine.siteKind(site))) {
+            /* v0.4.9：登录即得型站点不显示签到按钮——刷新已取奖励并置已签，
+             * 单独的「签到」是多余操作。只留账号条目上的右滑刷新。 */
+            main = Ui.btn(this, "已授权", 11, Ui.GREEN_D, Ui.GREEN_BG, 10, 4);
         } else {
-            boolean webOnly = Engine.isWebOnly(site);
-            main = webOnly
-                    ? Ui.btn(this, "去网页", 11, Ui.BLUE, Ui.BLUE_BG, 12, 4)
-                    : Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
+            main = Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
             main.setOnClickListener(v -> doCheckin(key, main));
         }
         r1.addView(main);

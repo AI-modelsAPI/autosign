@@ -15,26 +15,15 @@ public final class Catalog {
     private Catalog() {}
 
     private static final String[][] SITES = {
-        // name, homeUrl, checkinType, reward, note
+        // name, homeUrl, checkinType, reward, note, affUrl（邀请链接，卡片站名跳转用）
         // checkinType 说明：
         //   newapi  = New API 系（有 GET/POST /api/user/checkin），可全自动签到
-        //   login   = 登录即发额度，无独立签到接口（点签到 = 查当日奖励记录）
+        //   login   = 登录即发额度，无独立签到接口（刷新即取奖励并置已签）
         //   web     = 非 New API 或接口不通，只能开站点主页人工处理
-        {"AgentRouter",      "https://agentrouter.org",         "login",  "注册 $100 + 邀请 $50",                 "New API 变体：无 checkin POST，登录即发额度"},
-        {"JustDoWork",       "https://api.justwoker.icu",       "newapi", "注册 $70 + 每日签到 $22 起",           "New API 原生，Turnstile 人机验证"},
-        {"RawChat",          "https://new.sharedchat.cc/list/", "web",    "每日 $50 额度池（0 点重置）",          "独立网关，需在控制台手动领取"},
-        {"Matrix",           "https://matrix.mzsjai.com",       "web",    "邀请注册送 600 积分",                  "非 New API，接口未开放"},
-        {"TaBiAI",           "https://tabitoken.com",           "web",    "注册 $100 + 邀请 $20",                 "Cloudflare 拦截接口访问"},
-        {"GoRouter",         "https://gorouter.app",            "web",    "注册 $50 + 邀请 $20",                  "Cloudflare 拦截接口访问"},
-        {"肖恩Ai",           "https://free.supxh.xin",          "web",    "注册 5000 点 + 每日签到",              "非标准路由，存活率低"},
-        {"SeekAI",           "https://seekai.cc",               "newapi", "—",                                    "New API 原生，Turnstile 人机验证"},
-        {"NOFX",             "https://nofx.one",                "web",    "注册 20 积分 + 签到 5/日",             "非 New API，任务型积分站"},
-        {"KKtoken AI",       "https://kktoken.cc",              "newapi", "注册 $100 + 每日签到 $20",             "New API 原生，Turnstile 人机验证"},
-        {"维云",             "https://vsllm.com",               "login",  "—",                                    "New API 变体，签到未开放"},
-        {"DoCode",           "https://docode.cc",               "login",  "注册 $300 + 邀请 $60",                 "New API 变体，签到未开放；无 GitHub 登录"},
-        {"TrueSOTA",         "https://true-sota.com",           "web",    "邀请 $20/人（周上限 10 人）",          "非 New API"},
-        {"幻城网安",         "https://api.hcnsec.cn",           "newapi", "每日签到，余额可兑 SVIP",              "New API 变体，无人机验证；无 GitHub 登录"},
-        {"Vyce AI",          "https://vyceai.com",              "web",    "邀请注册双方各得 $10",                 "非 New API"},
+        {"AgentRouter",  "https://agentrouter.org",    "login",  "注册 $175 + 每日签到 $25", "GPT5.6SoL / Claude Opus 4.8 / Claude Opus 5", "https://agentrouter.org/register?aff=nc7C"},
+        {"JustDoWork",   "https://api.justwoker.icu",  "newapi", "注册 $90 + 每日签到 $20",  "Claude Opus 4.8 / Claude Opus 5",              "https://api.justwoker.icu/sign-up?aff=wFQu"},
+        {"GoRouter",     "https://gorouter.app",       "login",  "注册 $70 + 每日签到 $10",  "Claude Opus 4.8 / Claude Opus 5",              "https://gorouter.app/sign-up?aff=Dr35"},
+        {"KKtoken AI",   "https://kktoken.cc",         "newapi", "注册 $75 + 每日签到 $25",  "Claude Opus 4.8 / Claude Opus 5",              "https://kktoken.cc/sign-up?aff=BpD"},
     };
 
     public static ArrayList<JSONObject> all() {
@@ -44,7 +33,8 @@ public final class Catalog {
                 out.add(new JSONObject()
                         .put("key", Store.siteKeyOf(s[1]))
                         .put("name", s[0]).put("homeUrl", s[1])
-                        .put("checkinType", s[2]).put("reward", s[3]).put("note", s[4]));
+                        .put("checkinType", s[2]).put("reward", s[3]).put("note", s[4])
+                        .put("affUrl", s[5]));
             } catch (Exception ignored) {}
         }
         return out;
