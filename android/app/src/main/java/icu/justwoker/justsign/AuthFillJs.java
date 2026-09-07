@@ -189,8 +189,12 @@ public final class AuthFillJs {
         "var submittedLogin=false,submittedOtp=false;" +
         "function tryFill(){" +
         "  var filled=[];" +
-        "  if(!doneAcc&&ACC){var a=accField();if(a&&!a.value){if(setVal(a,ACC)){doneAcc=true;filled.push('account');}}}" +
-        "  if(!donePwd&&PWD){var p=pwdField();if(p&&!p.value){if(setVal(p,PWD)){donePwd=true;filled.push('password');}}}" +
+        "  if(!doneAcc&&ACC){var a=accField();if(a){" +
+        "    if(!a.value){if(setVal(a,ACC)){doneAcc=true;filled.push('account');}}" +
+        "    else if(a.value.length>=1){doneAcc=true;} /* v0.4.5：浏览器已预填也算就绪 */}}" +
+        "  if(!donePwd&&PWD){var p=pwdField();if(p){" +
+        "    if(!p.value){if(setVal(p,PWD)){donePwd=true;filled.push('password');}}" +
+        "    else if(p.value.length>=1){donePwd=true;} /* v0.4.5：浏览器已预填密码也算就绪，否则 Sign in 永不自动点 */}}" +
         /* OTP 为空串（账号没有 2FA）时整段不执行 —— 不聚焦、不切换、不跳转 */
         "  if(!doneOtp&&OTP){" +
         "    var o=otpField();" +

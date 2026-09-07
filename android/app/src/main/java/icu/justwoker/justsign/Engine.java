@@ -674,8 +674,11 @@ public class Engine {
                         .put("usd", usdFromText);
                 rows.put(row);
                 /* 只认「签到」类文案：同为 type=4 的还有注册赠送、邀请赠送，
-                 * 那些不是每日签到，不能拿来当今日已签的依据。 */
-                if (isCheckinText(text)) lastBonus = row;
+                 * 那些不是每日签到，不能拿来当今日已签的依据。
+                 * v0.4.5 根因修复：接口按时间倒序（最新在前），旧代码取
+                 * 「最后一条匹配」=最旧记录（实测 08-28 覆盖了 09-07），
+                 * 导致今日已签却判定「非今日」。改为命中第一条（最新）即停。 */
+                if (isCheckinText(text) && lastBonus == null) lastBonus = row;
             }
         }
         out.put("rows", rows);
@@ -723,6 +726,8 @@ public class Engine {
                 if (key.isEmpty()) continue;
                 if (isCheckedToday(tk)) {
                     store.appendLog(sKey, key, "cron-skip", "今日已签");
+                    /* v0.4.5：跳过也写 opLog，用户能看到定时任务确实跑了（只是跳过） */
+                    store.opLog(sKey, key, "定时签到", "info", "今日已签，跳过", "", "auto");
                     continue;
                 }
                 try {

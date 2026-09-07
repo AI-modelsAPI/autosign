@@ -73,6 +73,37 @@ public class MainActivity extends Activity {
         Ui.initIcons(this);
         engine = new Engine(this);
         Engine.schedule(this);
+        /* v0.4.5（审计C）：前台补跑兜底——ColorOS 杀后台导致 WorkManager 没跑时，
+         * 打开 App 即检查：已过设定时间且今日未跑 → 立即补跑。零权限。 */
+        try {
+            JSONObject sch = new Store(this).schedule();
+            if (sch.optBoolean("enabled", true)) {
+                java.util.Calendar now = java.util.Calendar.getInstance();
+                java.util.Calendar due = java.util.Calendar.getInstance();
+                due.set(java.util.Calendar.HOUR_OF_DAY, sch.optInt("hour", 8));
+                due.set(java.util.Calendar.MINUTE, sch.optInt("minute", 30));
+                due.set(java.util.Calendar.SECOND, 0);
+                boolean pastDue = now.after(due);
+                boolean ranToday = false;
+                try {
+                    JSONObject cfg = new Store(this).config();
+                    JSONArray sites = cfg.optJSONArray("sites");
+                    if (sites != null) for (int i = 0; i < sites.length(); i++) {
+                        JSONArray accs = sites.optJSONObject(i).optJSONArray("accounts");
+                        if (accs == null) continue;
+                        for (int j = 0; j < accs.length(); j++) {
+                            JSONObject tk = accs.optJSONObject(j);
+                            if (tk != null && !Engine.isCheckedToday(tk)) { ranToday = false; i = sites.length(); break; }
+                            ranToday = true;
+                        }
+                    }
+                } catch (Exception ignored) {}
+                if (pastDue && !ranToday) {
+                    new Store(this).opLog("", "", "定时签到", "info", "检测到今日定时任务未执行，正在补跑", "", "auto");
+                    new Thread(() -> engine.runAllOnce()).start();
+                }
+            }
+        } catch (Exception ignored) {}
 
         LinearLayout root = Ui.col(this);
         root.setBackgroundColor(Ui.BG);
