@@ -348,12 +348,16 @@ public class Engine {
         if (selfHttp == 200) {
             JSONObject cs = null;
             try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
+            StringBuilder diag = new StringBuilder();
             if (cs == null) {
                 JSONObject probe = null;
-                try { probe = todayBonus(key); } catch (Exception ignored) {}
+                try { probe = todayBonusDiag(key, diag); } catch (Exception ignored) {}
                 if (probe != null) cs = new JSONObject().put("checked", true)
                         .put("rewardUSD", probe.optDouble("rewardUSD", 0))
                         .put("rewardKnown", probe.optBoolean("rewardKnown", false));
+            }
+            if (cs == null && diag.length() > 0) {
+                out.put("bonusDiag", diag.toString());
             }
             if (cs != null && cs.optBoolean("checked")) {
                 out.put("todayChecked", true);
@@ -472,13 +476,19 @@ public class Engine {
             String rewardNote = "";
             if (ci) {
                 try {
-                    JSONObject tbR = todayBonus(key);
+                    StringBuilder dg = new StringBuilder();
+                    JSONObject tbR = todayBonusDiag(key, dg);
+                    if (tbR == null && dg.length() > 0)
+                        rewardNote = " · " + dg;
                     if (tbR != null) {
                         reward = tbR.optDouble("rewardUSD", 0);
                         known = tbR.optBoolean("rewardKnown", false);
                         rewardNote = " · 今日奖励 " + Ui.usd(reward);
                     } else {
-                        rewardNote = " · 今日签到记录尚未生成（站点按日发放）";
+                        StringBuilder dg2 = new StringBuilder();
+                        try { todayBonusDiag(key, dg2); } catch (Exception ignored) {}
+                        rewardNote = dg2.length() > 0 ? (" · " + dg2)
+                                : " · 今日签到记录尚未生成（站点按日发放）";
                     }
                 } catch (Exception ignored) {}
             }
@@ -542,12 +552,31 @@ public class Engine {
      * 返回的对象额外带 rewardUSD / rewardKnown 两个字段。
      */
     public JSONObject todayBonus(String key) throws Exception {
+        return todayBonusDiag(key, null);
+    }
+    /** v0.4.1：带诊断输出——lastBonusTime 存最近一条签到记录的时间，
+     * 便于区分「无记录」与「有记录但非今日」（时区/发放延迟）。 */
+    public JSONObject todayBonusDiag(String key, StringBuilder diag) throws Exception {
         JSONObject lg = logs(key, "系统", 30);
-        if (!lg.optBoolean("ok")) return null;
+        if (!lg.optBoolean("ok")) {
+            if (diag != null) diag.append("日志请求失败 http=").append(lg.optInt("http"));
+            return null;
+        }
         JSONObject lb = lg.optJSONObject("lastBonus");
-        if (lb == null || !lb.has("time")) return null;
+        if (lb == null || !lb.has("time")) {
+            if (diag != null) diag.append("最近30条系统日志无签到记录");
+            return null;
+        }
         long t = parseTimeMs(lb.optString("time"));
-        if (t <= 0 || !isToday(t)) return null;
+        if (t <= 0) {
+            if (diag != null) diag.append("签到记录时间解析失败: ").append(lb.optString("time"));
+            return null;
+        }
+        if (!isToday(t)) {
+            if (diag != null) diag.append("最近签到记录非今日: ")
+                    .append(new java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US).format(new java.util.Date(t)));
+            return null;
+        }
         double usd = lb.optDouble("usd", -1);
         lb.put("rewardUSD", usd >= 0 ? usd : 0);
         lb.put("rewardKnown", usd >= 0);
