@@ -609,6 +609,30 @@ public class AuthActivity extends Activity {
             if (credentialId != null && !credentialId.isEmpty()) patch.put("credentialId", credentialId);
         /* opus4.8 审计·B-02：cookie 型站点的真会话凭据（gin session） */
         if (setCookie != null && !setCookie.isEmpty()) patch.put("siteCookie", setCookie);
+        /* v0.3.8：落 ghAnchor（确认过的站内名）+ siteUserId（站点数字ID，字符串防精度丢失）
+         * 供后台静默比对与 New-Api-User 头使用 */
+        if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
+        Object sid = bundle.opt("id");
+        if (sid != null) {
+            String su = String.valueOf(sid).trim();
+            if (!su.isEmpty() && !"null".equals(su)) patch.put("siteUserId", su);
+        }
+        /* v0.3.8：落 ghAnchor（确认过的站内名）+ siteUserId（站点数字ID，字符串防精度丢失）
+         * 供后台静默比对与 New-Api-User 头使用 */
+        if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
+        Object sid2 = bundle.opt("id");
+        if (sid != null) {
+            String su = String.valueOf(sid2).trim();
+            if (!su.isEmpty() && !"null".equals(su)) patch.put("siteUserId", su);
+        }
+        /* v0.3.8：落 ghAnchor（确认过的站内名）+ siteUserId（站点数字ID，字符串防精度丢失）
+         * 供后台静默比对与 New-Api-User 头使用 */
+        if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
+        Object sid3 = bundle.opt("id");
+        if (sid3 != null) {
+            String su3 = String.valueOf(sid3).trim();
+            if (!su3.isEmpty() && !"null".equals(su3)) patch.put("siteUserId", su3);
+        }
         /* token 允许为空（cookie 型站）；脏值不落库 */
         if (token != null && !token.trim().isEmpty() && !"null".equals(token.trim())) patch.put("token", token.trim());
 

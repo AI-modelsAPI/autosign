@@ -389,6 +389,14 @@ public final class SilentAuth {
                             respGhId = String.valueOf(gid).trim();
                             if ("null".equals(respGhId)) respGhId = "";
                         }
+                        /* v0.3.8：锚点链扩至 github_user_id，再空则无锚点 */
+                        if (respGhId.isEmpty() && d.has("github_user_id") && !d.isNull("github_user_id")) {
+                            Object g2 = d.get("github_user_id");
+                            if (g2 != null) {
+                                respGhId = String.valueOf(g2).trim();
+                                if ("null".equals(respGhId)) respGhId = "";
+                            }
+                        }
                         boolean mm = false;
                         String mmWhy = "";
                         if (!respGhId.isEmpty()) {
@@ -414,8 +422,31 @@ public final class SilentAuth {
                             }
                         } else if (!want.isEmpty() && !login.isEmpty()
                                 && !want.trim().equalsIgnoreCase(login.trim())) {
-                            mm = true;
-                            mmWhy = "GitHub 用户名不符：期望 " + want + "，实际 " + login;
+                            /* v0.3.8（审计定稿）：无锚点时不再按用户名比对拒绝。
+                             * Profile 隔离 + 首次授权确认框已保证身份；此处以
+                             * siteUserId 静默比对兜底（响应 data.id vs 账号已存值），
+                             * 一致（或双方皆无可比值）才接受，且不弹任何页面。 */
+                            String accUid = "";
+                            try {
+                                JSONObject accU = store.findAccount(accountKey);
+                                if (accU != null) {
+                                    accUid = accU.optString("siteUserId", "");
+                                    if ("null".equals(accUid)) accUid = "";
+                                }
+                            } catch (Exception ignored) {}
+                            String respUid = "";
+                            Object sidO = d.opt("id");
+                            if (sidO != null) {
+                                respUid = String.valueOf(sidO).trim();
+                                if ("null".equals(respUid)) respUid = "";
+                            }
+                            boolean idOk = accUid.isEmpty() || respUid.isEmpty()
+                                    || accUid.equals(respUid);
+                            if (!idOk) {
+                                mm = true;
+                                mmWhy = "站内用户ID 不符：已存 " + accUid + "，本次 " + respUid;
+                            }
+                            /* idOk 时 mm=false，静默接受（不弹页面） */
                         }
                         if (mm) {
                             try {
@@ -446,6 +477,18 @@ public final class SilentAuth {
                                     .put("updatedAt", System.currentTimeMillis());
                             if (!token.isEmpty()) patch.put("token", token);
                             if (!setCookie.isEmpty()) patch.put("siteCookie", setCookie);
+                            if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
+                            Object sidO2 = d.opt("id");
+                            if (sidO2 != null) {
+                                String su2 = String.valueOf(sidO2).trim();
+                                if (!su2.isEmpty() && !"null".equals(su2)) patch.put("siteUserId", su2);
+                            }
+                            if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
+                            Object sidO3 = d.opt("id");
+                            if (sidO2 != null) {
+                                String su2 = String.valueOf(sidO3).trim();
+                                if (!su2.isEmpty() && !"null".equals(su2)) patch.put("siteUserId", su2);
+                            }
                             if (login != null && !login.isEmpty()) patch.put("githubAccount", login);
                             store.patchAccount(accountKey, patch);
                         } catch (Exception ignored) {}
