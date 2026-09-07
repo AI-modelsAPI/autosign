@@ -412,6 +412,20 @@ p.lineTo(10.8f * s, 15.6f * s);
                 cv.drawRoundRect(r(s, 5f, 8f, 16f, 19f), 2f * s, 2f * s, fl);
                 break;
             }
+            /* v0.6.1：钥匙（API Key 入口）——圆头+齿 */
+            case "key": {
+                cv.drawCircle(7.5f * s, 8.5f * s, 4f * s, st);
+                cv.drawLine(10.5f * s, 11.5f * s, 18.5f * s, 19.5f * s, st);
+                cv.drawLine(15.5f * s, 16.5f * s, 18f * s, 14f * s, st);
+                cv.drawLine(13.5f * s, 14.5f * s, 16f * s, 12f * s, st);
+                break;
+            }
+            /* v0.6.1：向上箭头（面板收起） */
+            case "collapse": {
+                cv.drawLine(6f * s, 14f * s, 12f * s, 8f * s, st);
+                cv.drawLine(12f * s, 8f * s, 18f * s, 14f * s, st);
+                break;
+            }
 
             default:
                 break;

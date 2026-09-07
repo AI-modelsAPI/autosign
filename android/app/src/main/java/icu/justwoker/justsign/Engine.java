@@ -481,16 +481,47 @@ public class Engine {
         if (acc == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        String sKey = site.optString("key", "");
+        /* 调试日志（排查取不到 key）：记录请求前状态，不记敏感值 */
+        boolean hasToken = !acc.optString("token", "").isEmpty();
+        boolean hasCookie = !acc.optString("siteCookie", "").isEmpty();
+        String uid = acc.optString("siteUserId", "");
+        try {
+            store.opLog(sKey, key, "Key 管理", "info", "开始获取 Key 列表",
+                    "token=" + hasToken + " cookie=" + hasCookie + " uid=" + (uid.isEmpty() ? "无" : "有"), "auto");
+        } catch (Exception ignored) {}
         JSONObject r = callWithAuth(site, key, "GET", "/api/token/?p=1&size=100");
         int http = r.optInt("http");
         JSONObject rd = r.optJSONObject("data");
-        if (http != 200 || rd == null) throw new Exception("站点返回 HTTP " + http);
-        /* data 可能直接是数组（部分变体站）或 {items:[]} */
+        /* 调试日志：HTTP 状态 + data 结构形态 */
+        Object dataObj = r.opt("data");
+        String dataShape = dataObj == null ? "null"
+                : (dataObj instanceof org.json.JSONArray ? "array[" + ((org.json.JSONArray) dataObj).length() + "]"
+                : (dataObj instanceof JSONObject ? "object{" + ((JSONObject) dataObj).length() + "keys}" : "other"));
+        try {
+            store.opLog(sKey, key, "Key 管理", "info", "Key 列表响应",
+                    "HTTP " + http + " data=" + dataShape + " success=" + (rd != null && rd.optBoolean("success", false)), "auto");
+        } catch (Exception ignored) {}
+        if (http != 200) throw new Exception("站点返回 HTTP " + http
+                + (rd != null && !rd.optString("message", "").isEmpty() ? "：" + rd.optString("message") : ""));
+        if (rd == null) {
+            /* data 是数组（部分变体站直接返回数组） */
+            if (dataObj instanceof org.json.JSONArray) {
+                return new JSONObject().put("items", (org.json.JSONArray) dataObj);
+            }
+            throw new Exception("响应无 data 字段（" + dataShape + "）");
+        }
+        /* data 可能是 {items:[]} 或直接数组 */
         org.json.JSONArray items;
         if (rd.has("items")) items = rd.optJSONArray("items");
-        else if (r.opt("data") instanceof org.json.JSONArray) items = r.optJSONArray("data");
+        else if (dataObj instanceof org.json.JSONArray) items = r.optJSONArray("data");
         else items = new org.json.JSONArray();
-        return new JSONObject().put("items", items);
+        /* 调试日志：解析出的条目数 */
+        try {
+            store.opLog(sKey, key, "Key 管理", "info", "Key 列表解析",
+                    "items=" + (items == null ? 0 : items.length()), "auto");
+        } catch (Exception ignored) {}
+        return new JSONObject().put("items", items == null ? new org.json.JSONArray() : items);
     }
     public JSONObject tokenCreate(String key, String name) throws Exception {
         JSONObject acc = store.findAccount(key);
