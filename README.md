@@ -15,15 +15,22 @@
 v0.2.1 起使用仓库内固定签名，可直接覆盖安装；**从 v0.2.0 及更早版本升级需要先卸载**
 （可先用 `tools/migrate_prefs.py` 备份并迁移配置）。
 
-## 三种站点形态
-
-15 个内置站点实测后发现它们并不是一类东西，App 按形态分别处理：
-
-| 形态 | 判据 | App 行为 | 实测站点 |
+## 内置站点（四个实测站）
+| 站点 | 注册奖励 | 每日签到 | 可用模型 |
 | :--- | :--- | :--- | :--- |
-| `newapi` | 有 `GET/POST /api/user/checkin` | 全自动签到，可拿到确切奖励金额 | JustDoWork、SeekAI、KKtoken、幻城网安 |
-| `login` | New API 变体，`POST /api/user/checkin` 返回 404 | 登录保活刷额度，查当日奖励记录 | AgentRouter、维云、DoCode |
-| `web` | 非 New API 或接口被 Cloudflare 拦截 | 点「去网页」打开站点，人工处理 | RawChat、Matrix、TaBiAI、GoRouter、肖恩Ai、NOFX、TrueSOTA、Vyce |
+| [AgentRouter](https://agentrouter.org/register?aff=nc7C) | $175 | $25 | GPT5.6SoL / Claude Opus 4.8 / Claude Opus 5 |
+| [JustDoWork](https://api.justwoker.icu/sign-up?aff=wFQu) | $90 | $20 | Claude Opus 4.8 / Claude Opus 5 |
+| [GoRouter](https://gorouter.app/sign-up?aff=Dr35) | $70 | $10 | Claude Opus 4.8 / Claude Opus 5 |
+| [KKtoken AI](https://kktoken.cc/sign-up?aff=BpD) | $75 | $25 | Claude Opus 4.8 / Claude Opus 5 |
+
+卡片左上角站点名点击即跳转注册页（带邀请码，注册双方得额度）。
+
+## 三种站点形态
+| 形态 | 判据 | App 行为 |
+| :--- | :--- | :--- |
+| `newapi` | 有 `GET/POST /api/user/checkin` | 全自动签到，可拿到确切奖励金额 |
+| `login` | 登录即发额度（无签到接口） | 刷新即取奖励并置已签，不显示签到按钮 |
+| `web` | 非 New API 或接口被拦截 | 点「去网页」打开站点，人工处理 |
 
 站点管理页里三种形态可手动切换，内置站与自定义站完全平权（都能增删改）。
 
