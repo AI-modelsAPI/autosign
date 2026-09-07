@@ -1166,6 +1166,29 @@ singleBusy = true;
                 String user = data == null ? "" : data.getStringExtra("user");
                 store.opLog("", "", "授权", "ok", "授权成功" + (user == null || user.isEmpty() ? "" : (" · " + user)), "", "user");
                 toast("授权成功");
+                /* v0.4.8：授权成功后立即刷新该账号额度——授权页落库了 token/cookie，
+                 * 但看板额度要等下一次手动刷新才出来，用户以为没授权成功。 */
+                String ak = data == null ? "" : data.getStringExtra("accountKey");
+                if (ak == null || ak.isEmpty()) {
+                    try {
+                        JSONObject cfg = store.config();
+                        JSONArray sites = cfg.optJSONArray("sites");
+                        if (sites != null) for (int i = 0; i < sites.length(); i++) {
+                            JSONArray accs = sites.optJSONObject(i).optJSONArray("accounts");
+                            if (accs == null) continue;
+                            for (int j = 0; j < accs.length(); j++) {
+                                JSONObject a = accs.optJSONObject(j);
+                                if (a != null && (a.optJSONObject("lastStatus") == null
+                                        || !a.optJSONObject("lastStatus").optBoolean("ok"))) {
+                                    ak = a.optString("key");
+                                    break;
+                                }
+                            }
+                            if (!ak.isEmpty()) break;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (!ak.isEmpty()) refreshOne(ak);
             } else {
                 String err = data == null ? "" : data.getStringExtra("error");
                 store.opLog("", "", "授权", "err", err == null || err.isEmpty() ? "授权未完成" : err, "", "user");

@@ -586,8 +586,17 @@ public class AuthActivity extends Activity {
             /* 站内名是 github_<站内id>，与 GitHub 名无必然关系：
              * 无可用锚点时改为「首次授权用户确认」而非直接拒（审计定稿）。 */
             boolean confirmed = idConfirmed;
+            /* v0.4.8：授权运行在账号专属 Profile（多 Profile 分区）时自动确认——
+             * OAuth code 由该账号分区里的 GitHub 会话产生，站点换到的身份必然
+             * 属于该账号（会话隔离从机制上保证），无需用户再核对。仅降级到
+             * Default 分区（无多 Profile 支持）时才弹确认框。 */
+            if (!confirmed && mProfile != null) {
+                confirmed = true;
+                store.opLog(siteKey, accountKey, "授权", "info",
+                        "身份自动确认（专属会话分区）", "站内名 " + login, "auto");
+            }
             if (!confirmed && setCookie != null && !setCookie.isEmpty()) {
-                /* cookie 型站首次授权：弹确认框让用户核对站内用户名 */
+                /* cookie 型站首次授权（降级路径）：弹确认框让用户核对站内用户名 */
                 lastBundle = bundle; lastToken = token; lastCookie = setCookie; lastLogin = login;
                 showConfirmDialog(login, expect);
                 return;   // 等用户确认后带 confirmed=true 重新进入
@@ -671,6 +680,7 @@ public class AuthActivity extends Activity {
             Intent out = new Intent();
             out.putExtra("ok", true);
             out.putExtra("user", login == null ? "" : login);
+            out.putExtra("accountKey", accountKey == null ? "" : accountKey);
             setResult(RESULT_OK, out);
         } catch (Exception e) {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
