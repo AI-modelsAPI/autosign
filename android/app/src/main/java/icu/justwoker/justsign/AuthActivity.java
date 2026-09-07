@@ -466,7 +466,11 @@ public class AuthActivity extends Activity {
                     JSONObject j;
                     try { j = new JSONObject(body); }
                     catch (Exception pe) {
-                        err = "站点响应非 JSON（HTTP " + code + "）";
+                        if (code == 200) {
+                            err = "站点防护拦截，请更换代理节点后重试";
+                        } else {
+                            err = "站点响应异常（HTTP " + code + "），请稍后重试";
+                        }
                         if (!useGet) { stateUseGet = true; continue; }
                         break;
                     }

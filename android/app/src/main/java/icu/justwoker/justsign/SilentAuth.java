@@ -235,7 +235,12 @@ public final class SilentAuth {
             new Thread(() -> {
                 String[] pair = fetchStateAndClient();
                 if (pair == null) {
-                    main.post(() -> finish(false, true, null, "获取授权会话失败"));
+                    /* v0.4.3（审计方案3）：WAF 拦截必须明确告知用户换节点，禁技术术语 */
+                    String why = wafHit()
+                            ? "站点防护拦截，请更换代理节点后重试；多次失败请稍后再试"
+                            : "获取授权会话失败";
+                    final String msg = why;
+                    main.post(() -> finish(false, true, null, msg));
                     return;
                 }
                 final String cid = pair[0], state = pair[1];
@@ -528,16 +533,45 @@ public final class SilentAuth {
                         }
                     }
                 } finally { if (st != null) try { st.close(); } catch (Exception ignored) {} }
-                if (clientId.isEmpty()) return null;
-
-                String state = postState(c);
-                if (state == null) state = getState(c);
-                if (state == null || state.isEmpty()) return null;
+                if (clientId.isEmpty()) {
+                    if (lastBodyWaf) fetchWafBlocked = true;
+                    return null;
+                }
+                String state = fetchStateProbe(c);
+                if (state == null || state.isEmpty()) {
+                    if (lastBodyWaf) fetchWafBlocked = true;
+                    return null;
+                }
                 return new String[]{ clientId, state };
             } catch (Exception e) { return null; }
         }
 
-        private String postState(OkHttpClient c) {
+        /* v0.4.3（glm-5.3 审计方案5）：gorouter 等站 /api/oauth/state 404，
+         * 按候选路径探测，成功即缓存到站点 meta（oauthStatePath），下次直接用。 */
+        private static final String[] STATE_PATHS = {
+                "/api/oauth/state", "/v1/oauth/state", "/api/user/oauth/state" };
+        private volatile boolean lastBodyWaf = false;
+        private volatile boolean fetchWafBlocked = false;
+        boolean wafHit() { return fetchWafBlocked; }
+        private String fetchStateProbe(OkHttpClient c) {
+            String cached = store.siteMeta(siteKey, "oauthStatePath", "");
+            java.util.ArrayList<String> order = new java.util.ArrayList<>();
+            if (!cached.isEmpty()) order.add(cached);
+            for (String pth : STATE_PATHS) if (!order.contains(pth)) order.add(pth);
+            for (String pth : order) {
+                lastBodyWaf = false;
+                String s = postState(c, pth);
+                if (s == null) s = getState(c, pth);
+                if (s != null && !s.isEmpty()) {
+                    if (!pth.equals(cached)) store.putSiteMeta(siteKey, "oauthStatePath", pth);
+                    return s;
+                }
+                /* WAF 拦截：立即中止探测，避免放大请求触发更严限流（审计风险边界） */
+                if (lastBodyWaf) { fetchWafBlocked = true; return null; }
+            }
+            return null;
+        }
+        private String postState(OkHttpClient c, String path) {
             Response r = null;
             try {
                 r = c.newCall(new Request.Builder().url(baseUrl + "/api/oauth/state")
@@ -545,18 +579,22 @@ public final class SilentAuth {
                         .post(RequestBody.create("{\"provider\":\"github\",\"intent\":\"login\"}",
                                 MediaType.parse("application/json"))).build()).execute();
                 if (r.code() != 200) return null;
-                return pickState(r.body() != null ? r.body().string() : "");
+                String body = r.body() != null ? r.body().string() : "";
+                if (Engine.wafBlocked(body)) { lastBodyWaf = true; return null; }
+                return pickState(body);
             } catch (Exception e) { return null; }
             finally { if (r != null) try { r.close(); } catch (Exception ignored) {} }
         }
 
-        private String getState(OkHttpClient c) {
+        private String getState(OkHttpClient c, String path) {
             Response r = null;
             try {
-                r = c.newCall(new Request.Builder().url(baseUrl + "/api/oauth/state?mode=login")
+                r = c.newCall(new Request.Builder().url(baseUrl + path + "?mode=login")
                         .header("Accept", "application/json").header("User-Agent", UA).build()).execute();
                 if (r.code() != 200) return null;
-                return pickState(r.body() != null ? r.body().string() : "");
+                String body = r.body() != null ? r.body().string() : "";
+                if (Engine.wafBlocked(body)) { lastBodyWaf = true; return null; }
+                return pickState(body);
             } catch (Exception e) { return null; }
             finally { if (r != null) try { r.close(); } catch (Exception ignored) {} }
         }

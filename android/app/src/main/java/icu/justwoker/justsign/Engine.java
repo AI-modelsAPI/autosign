@@ -41,7 +41,7 @@ import okhttp3.Response;
  */
 public class Engine {
     public static final long QUOTA_PER_UNIT_DEFAULT = 500000L;
-    private static final String UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
+    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110 Build/UKQ1; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36";
 
     private final Store store;
     private final Context ctx;
@@ -205,7 +205,9 @@ public class Engine {
         Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
-                    .header("User-Agent", UA).header("Accept", "application/json");
+                    .header("User-Agent", UA).header("Accept", "application/json")
+                    /* v0.4.3（复审②）：带 Referer 降低 WAF 误拦（模拟浏览器内 API 调用） */
+                    .header("Referer", url.substring(0, url.indexOf('/', 8)) + "/");
             if (token != null && !token.isEmpty() && !"null".equals(token)) rb.header("Authorization", "Bearer " + token);
             /* opus4.8 审计·B-03：cookie 型站点会话头（New API gin session）。
              * 服务端 UserAuth 先查 session 再回退 Authorization，两者同带无害。 */
@@ -219,6 +221,14 @@ public class Engine {
                 rb.post(RequestBody.create("{}", MediaType.parse("application/json")));
             resp = client.newCall(rb.build()).execute();
             String txt = resp.body() != null ? resp.body().string() : "";
+            /* v0.4.3（glm-5.3 审计方案1）：WAF 假 200——HTTP 200 但 body 是拦截页 HTML。
+             * 归一化为 http=503 + waf=true + 通俗 message，上层据此不覆盖额度、
+             * toast 提示换代理节点；技术细节只进日志。 */
+            if (resp.code() == 200 && wafBlocked(txt)) {
+                lastError = "WAF200: " + txt.substring(0, Math.min(120, txt.length()));
+                return new JSONObject().put("http", 503).put("waf", true)
+                        .put("message", "站点防护拦截了本次请求，请更换代理节点后重试");
+            }
             JSONObject out = new JSONObject().put("http", resp.code());
             try { out.put("data", new JSONObject(txt)); }
             catch (Exception e) { out.put("data", new JSONObject()); }
@@ -231,6 +241,18 @@ public class Engine {
         }
     }
 
+    /** WAF 拦截页特征（v0.4.3，glm-5.3 审计）：只认明确标记，宁缺勿滥——
+     * 普通 HTML 404/错误页不算，避免误伤。只扫前 4KB，防超大 body。 */
+    public static boolean wafBlocked(String body) {
+        if (body == null || body.isEmpty()) return false;
+        String b = body.length() > 4096 ? body.substring(0, 4096) : body;
+        String l = b.toLowerCase(java.util.Locale.US);
+        return l.contains("aliyun_waf")
+                || l.contains("errors.aliyun.com")
+                || (l.contains("cloudflare") && (l.contains("just a moment") || l.contains("attention required")))
+                || l.contains("waf.tencent-cloud.com")
+                || l.contains("safedog");
+    }
     private static JSONObject dd(JSONObject resp) {
         if (resp == null) return new JSONObject();
         JSONObject d = resp.optJSONObject("data");
@@ -249,12 +271,13 @@ public class Engine {
     }
 
     private static String httpHint(int code) {
-        if (code == 429) return "站点限流（429），当前代理节点可能已被 WAF 拦截，请换代理节点后重试";
-        if (code == 401) return "授权已过期（401），GitHub 会话失效需手动登录一次";
-        if (code == 403) return "站点拒绝访问（403），可能触发人机验证";
-        if (code >= 500) return "站点服务异常（" + code + "）";
-        if (code == 0) return "网络不可达";
-        return "HTTP " + code;
+        if (code == 401) return "登录已过期，请重新授权";
+        if (code == 403) return "站点拒绝访问，请稍后重试或更换代理节点";
+        if (code == 429) return "请求太频繁被限制，请稍等片刻再试，或更换代理节点";
+        if (code >= 500) return "站点服务暂时不可用，请稍后重试";
+        if (code == 404) return "站点接口不存在，请联系开发者";
+        if (code == 0) return "网络连接失败，请检查网络或代理设置";
+        return "站点响应异常，请稍后重试";
     }
 
     /* ================= 站点类型 ================= */
@@ -326,7 +349,11 @@ public class Engine {
                 .put("availableUSD", Math.round(quota / unit * 100.0) / 100.0)
                 .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user);
-        if (selfHttp != 200) out.put("message", httpHint(selfHttp));
+        if (selfHttp != 200) {
+            /* v0.4.3：WAF 归一化响应自带通俗 message，优先透传 */
+            String wm = self.optString("message", "");
+            out.put("message", wm.isEmpty() ? httpHint(selfHttp) : wm);
+        }
 
         /* 今日消耗 */
         double todayUsed = -1;

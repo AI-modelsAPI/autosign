@@ -919,11 +919,18 @@ singleBusy = true;
             try {
                 JSONObject st = engine.status(key);
                 store.patchAccount(key, buildStatusPatch(st));
-                h.post(() -> { busyEnd(); pushLog(store); render(); });
+                /* v0.4.3（glm-5.3 审计方案2）：刷新失败必须用通俗文案告知用户，
+                 * WAF 拦截时明确引导「更换代理节点」，技术细节只进日志。 */
+                final String failMsg = st == null ? "" : st.optString("message", "");
+                final boolean okRefresh = st != null && st.optBoolean("ok", false);
+                h.post(() -> {
+                    busyEnd(); pushLog(store); render();
+                    if (!okRefresh && !failMsg.isEmpty()) toast(failMsg);
+                });
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
                         "刷新失败", String.valueOf(e.getMessage()), "user");
-                h.post(() -> { busyEnd(); pushLog(store); toast("刷新失败: " + e.getMessage()); });
+                h.post(() -> { busyEnd(); pushLog(store); toast("刷新失败，请检查网络后重试"); });
             }
         }).start();
     }
