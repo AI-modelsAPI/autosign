@@ -228,8 +228,19 @@ public class Engine {
              * 仅在账号有 siteUserId 时追加（按站点特性，不影响非 New API 站）。 */
             if (siteUserId != null && !siteUserId.isEmpty() && !"null".equals(siteUserId))
                 rb.header("New-Api-User", siteUserId);
-            if ("POST".equalsIgnoreCase(method))
+            if ("POST".equalsIgnoreCase(method)) {
                 rb.post(RequestBody.create(jsonBody == null ? "{}" : jsonBody, MediaType.parse("application/json")));
+            } else if ("DELETE".equalsIgnoreCase(method)) {
+                /* v0.6.5：必须显式设置 DELETE。旧实现只处理 POST，其余默认 GET，
+                 * 导致“删除 Key”实际请求成 GET /api/token/{id}，站点报 unrelated message。 */
+                rb.delete();
+            } else if ("PUT".equalsIgnoreCase(method)) {
+                rb.put(RequestBody.create(jsonBody == null ? "{}" : jsonBody, MediaType.parse("application/json")));
+            } else if ("PATCH".equalsIgnoreCase(method)) {
+                rb.patch(RequestBody.create(jsonBody == null ? "{}" : jsonBody, MediaType.parse("application/json")));
+            } else {
+                rb.get();
+            }
             resp = client.newCall(rb.build()).execute();
             String txt = resp.body() != null ? resp.body().string() : "";
             /* v0.4.3（glm-5.3 审计方案1）：WAF 假 200——HTTP 200 但 body 是拦截页 HTML。
@@ -551,11 +562,25 @@ public class Engine {
         if (acc == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
-        JSONObject r = callWithAuth(site, key, "DELETE", "/api/token/" + tokenId);
+        String sKey = site.optString("key", "");
+        String path = "/api/token/" + tokenId;
+        try {
+            store.opLog(sKey, key, "Key 管理", "info", "开始删除 API Key",
+                    "method=DELETE path=/api/token/{id} id=" + tokenId
+                            + " token=" + !acc.optString("token", "").isEmpty()
+                            + " cookie=" + !acc.optString("siteCookie", "").isEmpty()
+                            + " uid=" + !acc.optString("siteUserId", "").isEmpty(), "auto");
+        } catch (Exception ignored) {}
+        JSONObject r = callWithAuth(site, key, "DELETE", path);
         int http = r.optInt("http");
         JSONObject rd = r.optJSONObject("data");
         boolean ok = http == 200 && rd != null && rd.optBoolean("success", false);
         String msg = rd != null ? rd.optString("message", "") : "";
+        try {
+            store.opLog(sKey, key, "Key 管理", ok ? "ok" : "err", "删除 API Key 响应",
+                    "method=DELETE HTTP=" + http + " success=" + ok
+                            + " message=" + (msg.isEmpty() ? "(空)" : msg), "auto");
+        } catch (Exception ignored) {}
         if (!ok) throw new Exception(msg.isEmpty() ? ("站点返回 HTTP " + http) : msg);
         return new JSONObject().put("ok", true);
     }

@@ -47,20 +47,26 @@ public final class AuthFillJs {
                 "try{" +
                 "if(window.__jsAuthorize)return;window.__jsAuthorize=1;" +
                 "var tries=0;" +
+                "function safeText(b){try{return((b.innerText||b.value||b.getAttribute('aria-label')||'')+'').trim().slice(0,40);}catch(e){return '';}}" +
+                "function meta(b){try{return{id:(b&&b.id||'').slice(0,40),name:(b&&b.name||'').slice(0,40),type:(b&&b.type||'').slice(0,20),text:safeText(b),host:location.host,path:location.pathname};}catch(e){return{};}}" +
+                "function report(action,b,extra){try{var o=meta(b);o.ok=true;o.action=action;if(extra)for(var k in extra)o[k]=extra[k];window.JustSign.onFill(JSON.stringify(o));}catch(e){}}" +
                 "function find(){var b=document.querySelector('button[name=authorize]');" +
                 "  if(!b)b=document.getElementById('js-oauth-authorize-btn');" +
-                "  if(!b){var c=document.querySelectorAll('button.btn-primary,button[type=submit]');" +
-                "    for(var i=0;i<c.length;i++){var t=((c[i].innerText||'')+'').toLowerCase();" +
-                "      if(t.indexOf('authorize')>=0||t.indexOf('授权')>=0)return c[i];}}" +
+                "  if(!b){var c=document.querySelectorAll('button.btn-primary,button[type=submit],input[type=submit]');" +
+                "    for(var i=0;i<c.length;i++){var t=safeText(c[i]).toLowerCase();" +
+                /* 授权确认页只匹配明确的 Allow/Authorize 语义，绝不匹配 Continue 等模糊按钮，防误点 Deny */
+                "      if(t.indexOf('authorize')>=0||t.indexOf('授权')>=0||t.indexOf('allow')>=0)return c[i];}}" +
                 "  return b;}" +
+                "report('authorizeScan',null,{title:(document.title||'').slice(0,60),authorizeCount:document.querySelectorAll('button[name=authorize],#js-oauth-authorize-btn').length,cancelCount:document.querySelectorAll('button[name=cancel],#js-oauth-cancel-btn').length,loginForm:!!document.querySelector('#login_field,input[type=password]')});" +
                 "var iv=setInterval(function(){tries++;" +
                 "  var b=find();" +
                 "  if(b&&!b.disabled){clearInterval(iv);" +
+                "    report('authorizeFound',b,{tries:tries});" +
                 "    try{b.scrollIntoView({block:'center'});}catch(e){}" +
                 "    b.click();" +
-                "    try{window.JustSign.onFill(JSON.stringify({ok:true,action:'autoAuthorize'}));}catch(e){}}" +
-                "  else if(tries>=25){clearInterval(iv);}},200);" +
-                "}catch(e){}})();";
+                "    report('autoAuthorize',b,{tries:tries});}" +
+                "  else if(tries>=25){clearInterval(iv);report('authorizeMissing',null,{tries:tries,title:(document.title||'').slice(0,60),buttons:document.querySelectorAll('button,input[type=submit]').length});}},200);" +
+                "}catch(e){try{window.JustSign.onFill(JSON.stringify({ok:false,action:'authorizeError',error:String(e).slice(0,80),host:location.host,path:location.pathname}));}catch(e2){}}})()";
     }
 
     /**

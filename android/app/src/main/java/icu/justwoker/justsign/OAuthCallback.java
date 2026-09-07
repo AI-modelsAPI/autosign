@@ -26,12 +26,13 @@ final class OAuthCallback {
         final String code;
         final String state;
         final String error;
+        final String errorDescription;
         final String path;
         final String safe;
 
         Result(boolean validUrl, boolean sameHost, boolean callbackPath,
                boolean hasCode, boolean hasState, boolean stateMatches,
-               String code, String state, String error, String path, String safe) {
+               String code, String state, String error, String errorDescription, String path, String safe) {
             this.validUrl = validUrl;
             this.sameHost = sameHost;
             this.callbackPath = callbackPath;
@@ -41,6 +42,7 @@ final class OAuthCallback {
             this.code = code;
             this.state = state;
             this.error = error;
+            this.errorDescription = errorDescription;
             this.path = path;
             this.safe = safe;
         }
@@ -90,9 +92,10 @@ final class OAuthCallback {
             String code = n(params.get("code"));
             String state = n(params.get("state"));
             String error = n(params.get("error"));
+            String errorDescription = n(params.get("error_description"));
             String expected = n(expectedState);
             boolean stateMatches = !expected.isEmpty() && expected.equals(state);
-            if (error.isEmpty()) error = n(params.get("error_description"));
+            if (error.isEmpty()) error = errorDescription;
             /* 参数名也可能含敏感业务字段，只记录 OAuth 诊断所需的固定布尔项。 */
             Set<String> safeKeys = new LinkedHashSet<>();
             for (String k : new String[]{"code", "state", "error", "error_description"}) {
@@ -101,10 +104,10 @@ final class OAuthCallback {
             String safe = (u.getScheme() == null ? "" : u.getScheme() + "://")
                     + host + path + " oauthParams=" + safeKeys;
             return new Result(true, sameHost, callbackPath, !code.isEmpty(), !state.isEmpty(),
-                    stateMatches, code, state, error, path, safe);
+                    stateMatches, code, state, error, errorDescription, path, safe);
         } catch (Exception e) {
             return new Result(false, false, false, false, false, false,
-                    "", "", "", "", "invalid-url:" + e.getClass().getSimpleName());
+                    "", "", "", "", "", "invalid-url:" + e.getClass().getSimpleName());
         }
     }
 

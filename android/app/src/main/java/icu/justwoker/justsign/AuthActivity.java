@@ -59,6 +59,8 @@ public class AuthActivity extends Activity {
     private volatile int reauthTries = 0;
     /** 同一安全 URL 只记录一次，避免 onPageStarted/onPageFinished 双重刷日志。 */
     private volatile String lastNavLog = "";
+    /** 授权导航单调序号：定位“确认页未完成加载就被回调拒绝”的时序问题。 */
+    private final java.util.concurrent.atomic.AtomicInteger authNavSeq = new java.util.concurrent.atomic.AtomicInteger();
 
     private String credAccount = "", credPassword = "", credOtp = "";
     /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
@@ -76,8 +78,35 @@ public class AuthActivity extends Activity {
             h.post(() -> {
                 try {
                     JSONObject r = new JSONObject(json);
-                    if (!r.optBoolean("ok")) return;
                     String act = r.optString("action", "");
+                    /* OAuth 确认页诊断：即使 ok=false（authorizeError）也必须落日志。
+                     * 只记 host/path/title/按钮元数据；不记 query/code/state/账号/密码。 */
+                    if (act.startsWith("authorize") || "autoAuthorize".equals(act)) {
+                        String safeDetail = "host=" + r.optString("host", "")
+                                + " path=" + r.optString("path", "")
+                                + " title=" + r.optString("title", "")
+                                + " id=" + r.optString("id", "")
+                                + " name=" + r.optString("name", "")
+                                + " type=" + r.optString("type", "")
+                                + " text=" + r.optString("text", "")
+                                + " authorizeCount=" + r.optInt("authorizeCount", -1)
+                                + " cancelCount=" + r.optInt("cancelCount", -1)
+                                + " loginForm=" + r.optBoolean("loginForm", false)
+                                + " buttons=" + r.optInt("buttons", -1)
+                                + " tries=" + r.optInt("tries", -1)
+                                + (r.has("error") ? " error=" + r.optString("error", "") : "");
+                        String summary;
+                        String level = "info";
+                        switch (act) {
+                            case "authorizeScan": summary = "扫描 GitHub 授权确认页"; break;
+                            case "authorizeFound": summary = "找到 GitHub 授权按钮"; break;
+                            case "autoAuthorize": summary = "已点击 GitHub 授权按钮"; break;
+                            case "authorizeMissing": summary = "未找到 GitHub 授权按钮"; level = "warn"; break;
+                            default: summary = "GitHub 授权脚本异常"; level = "err"; break;
+                        }
+                        authLog(level, summary, safeDetail);
+                    }
+                    if (!r.optBoolean("ok")) return;
                     if (!act.isEmpty()) {
                         String label;
                         switch (act) {
@@ -166,10 +195,10 @@ public class AuthActivity extends Activity {
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                 if (req == null || req.getUrl() == null) return false;
-                return inspectNavigation(req.getUrl().toString(), "导航请求");
+                return inspectNavigation(req.getUrl().toString(), "导航请求#" + authNavSeq.incrementAndGet());
             }
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
-                inspectNavigation(url, "开始加载");
+                inspectNavigation(url, "开始加载#" + authNavSeq.incrementAndGet());
             }
             @Override public void onPageFinished(WebView v, String url) {
                 maybeFill(url);
@@ -180,10 +209,10 @@ public class AuthActivity extends Activity {
                     h.removeCallbacks(otpReinject);
                     h.postDelayed(otpReinject, 25000);
                 }
-                if (url != null && inspectNavigation(url, "加载完成")) return;
-                /* OAuth 确认页自动授权（需求2）：800ms 后自动点 Authorize，
-                 * 配合登录页自动填充+自动提交，实现授权全程无手动 */
+                if (url != null && inspectNavigation(url, "加载完成#" + authNavSeq.incrementAndGet())) return;
+                /* OAuth 确认页自动授权：进入页面即注入扫描/点击脚本；脚本自身会记录安全诊断 */
                 if (url != null && url.toLowerCase(java.util.Locale.US).contains("/login/oauth/authorize")) {
+                    authLog("info", "准备扫描 GitHub 授权确认页", "host=github.com path=/login/oauth/authorize；query 已脱敏");
                     v.evaluateJavascript(AuthFillJs.authorizeJs(), null);
                 }
                 maybeResumeAuthorize(url);
@@ -252,13 +281,22 @@ public class AuthActivity extends Activity {
         OAuthCallback.Result r = OAuthCallback.parse(url, siteHost, expectedOauthState);
         if (!r.validUrl) return false;
 
-        /* 关键链路只记安全摘要，绝不把 OAuth code/state 写入日志。 */
-        if (r.sameHost || r.callbackPath) {
-            String sig = stage + "|" + r.safe;
+        /* 关键链路只记安全摘要，绝不把 OAuth code/state 写入日志。
+         * GitHub 导航也记 host/path（不记 query），用于确认是否真正到达授权确认页。 */
+        boolean githubNav = false;
+        String githubSafe = "";
+        try {
+            java.net.URI nu = new java.net.URI(url);
+            githubNav = "github.com".equalsIgnoreCase(nu.getHost());
+            if (githubNav) githubSafe = "https://github.com" + (nu.getPath() == null ? "/" : nu.getPath());
+        } catch (Exception ignored) {}
+        if (r.sameHost || r.callbackPath || githubNav) {
+            String safeUrl = githubNav ? githubSafe : r.safe;
+            String sig = stage + "|" + safeUrl;
             if (!sig.equals(lastNavLog)) {
                 lastNavLog = sig;
                 authLog("info", "授权跳转·" + stage,
-                        r.safe + " callbackPath=" + r.callbackPath
+                        safeUrl + " callbackPath=" + r.callbackPath
                                 + " code=" + r.hasCode + " state=" + r.hasState
                                 + " stateMatch=" + r.stateMatches);
             }
@@ -280,15 +318,17 @@ public class AuthActivity extends Activity {
             return true;
         }
         if (r.missingCode()) {
-            /* GitHub 侧主动拒绝（回调带 error 参数）：access_denied 多为该账号
-             * 曾拒绝此 OAuth App 并被 GitHub 记住，需到 GitHub 设置撤销授权记录 */
+            /* 回调已经在 shouldOverride/onPageStarted 阶段提前拦截。error=access_denied
+             * 只能说明授权链路返回拒绝，不能据此断言 GitHub 记住了拒绝；原因交由新增
+             * authorizeScan/Found/Clicked 日志判定（是否找到并点击了正确按钮）。 */
             String why = r.error.isEmpty() ? "回调未携带授权码" : r.error;
-            authLog("err", "未获取到授权码", r.safe + "；" + why
-                    + (r.error.equals("access_denied")
-                        ? "；GitHub 拒绝授权（该账号可能曾拒绝过本应用，到 github.com/settings/applications 撤销该应用授权后重试）"
-                        : ""));
+            String safeDesc = r.errorDescription;
+            if (safeDesc.length() > 160) safeDesc = safeDesc.substring(0, 160);
+            authLog("err", "未获取到授权码", r.safe + "；error=" + why
+                    + (safeDesc.isEmpty() ? "" : "；description=" + safeDesc)
+                    + "；回调已提前拦截，需结合授权按钮扫描/点击日志定位拒绝来源");
             showLoadError(r.error.equals("access_denied")
-                    ? "GitHub 拒绝了授权。请到 GitHub → Settings → Applications 撤销本应用的授权记录后，点重试重新授权"
+                    ? "授权服务返回拒绝，请点重试；若仍失败，请查看操作日志中的授权链路诊断"
                     : "未获取到授权码，请点重试重新授权");
             return true;
         }
