@@ -251,7 +251,11 @@ public final class SilentAuth {
                     }
                 });
                 watchdog = () -> { if (!done) finish(false, true, null, "后台交换凭据超时"); };
-                main.postDelayed(watchdog, 30000);
+                /* C1（opus4.8 审计）：会话已登录且期望账号明确时，若卡在授权确认页
+                 *（没人点击）说明后台无法推进 —— 8s 快速转人工，不空等 30s；
+                 * 未登录/无法判定时保留 30s（登录跳转链路更长）。 */
+                boolean fastFail = !expectGithubLogin().isEmpty() && githubLoggedIn();
+                main.postDelayed(watchdog, fastFail ? 8000 : 30000);
 
                 applyProxyThen(() -> {
                     if (done || wv == null) return;
@@ -314,9 +318,16 @@ public final class SilentAuth {
                             if (login.isEmpty()) login = usr.optString("login", "");
                         }
                         if (!token.isEmpty()) {
-                            saveToken(token, login);
-                            final String fl = login;
-                            main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
+                            /* 身份校验落库（B1）：不符拒绝写入并转手动授权 */
+                            boolean saved = saveTokenChecked(token, login);
+                            if (saved) {
+                                final String fl = login;
+                                main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
+                            } else {
+                                final String gl = login;
+                                main.post(() -> finish(false, true, gl,
+                                        "后台会话账号 " + (gl == null ? "?" : gl) + " 与所选不符，请手动授权切换"));
+                            }
                             return;
                         }
                     }
@@ -395,7 +406,20 @@ public final class SilentAuth {
             return null;
         }
 
-        private void saveToken(String token, String login) {
+        /** 带身份校验的落库（opus4.8 审计方案 B1）：通过校验并写入返回 true；
+         * 会话账号与所选账号不符（串号风险）返回 false 且绝不写库。 */
+        private boolean saveTokenChecked(String token, String login) {
+            String expect = expectGithubLogin();
+            if (expect != null && !expect.isEmpty()
+                    && login != null && !login.isEmpty()
+                    && !expect.trim().equalsIgnoreCase(login.trim())) {
+                try {
+                    store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                            "GitHub 身份不符，已拒绝写入防串号",
+                            "期望 " + expect + "，实际 " + login + "；需手动授权切换账号", "auto");
+                } catch (Exception ignored) {}
+                return false;
+            }
             try {
                 JSONObject patch = new JSONObject()
                         .put("siteKey", siteKey)
@@ -403,7 +427,12 @@ public final class SilentAuth {
                         .put("updatedAt", System.currentTimeMillis());
                 if (login != null && !login.isEmpty()) patch.put("githubAccount", login);
                 store.patchAccount(accountKey, patch);
-            } catch (Exception ignored) {}
+                return true;
+            } catch (Exception e) { return false; }
+        }
+
+        private void saveToken(String token, String login) {
+            saveTokenChecked(token, login);
         }
 
         /** 该账号期望的 GitHub 登录名：账号绑定凭据的 githubUser，回退别名；空=无法确定 */

@@ -325,9 +325,12 @@ public class AuthActivity extends Activity {
         if (done || filled || url == null || url.startsWith("about:")) return;
         if (credAccount.isEmpty() && credPassword.isEmpty()) return;
         String u = url.toLowerCase(java.util.Locale.US);
+        /* 授权确认页 URL 是 github.com/login/oauth/authorize，含 github.com/login
+         * 前缀但不是登录页（无表单，填充 no-op 且污染 filled/reauth 时序）——显式排除 */
+        if (u.contains("/oauth/authorize")) return;
         boolean loginish = u.contains("github.com/login") || u.contains("/sessions")
-                || u.contains("two-factor") || u.contains("/login") || u.contains("/signin")
-                || u.contains("/register") || u.contains("/oauth/authorize");
+                || u.contains("two-factor") || u.contains("/signin")
+                || u.contains("/register");
         if (!loginish) return;
         filled = true;
         try {
@@ -453,7 +456,23 @@ public class AuthActivity extends Activity {
                         + "&state=" + enc(st2) + "&scope=user:email"
                         + (credAccount.isEmpty() ? "" : ("&login=" + enc(credAccount)));
                 reauthTries = 0;
-                wv.loadUrl(authUrl);
+                /* 会话强制切换（opus4.8 审计方案 A2-a）：
+                 * WebView 里残留的旧 GitHub 会话会让授权页直接以旧账号确认，
+                 * 站点按错误账号校验 → 授权失败/串号。有凭据能自动登录回来时，
+                 * 先清全部 Cookie 强制走登录页，maybeFill 用所选账号重新登录。
+                 * loadUrl 必须放进 removeAllCookies 的 callback（异步清 Cookie，
+                 * 固定延时是竞态）。无密码凭据不清（清了无法自动登录回来）。 */
+                if (!credAccount.isEmpty() && credPassword != null && !credPassword.isEmpty()) {
+                    showTip("正在切换到目标 GitHub 账号…");
+                    CookieManager cm = CookieManager.getInstance();
+                    cm.removeAllCookies(v -> h.post(() -> {
+                        if (done || isFinishing() || wv == null) return;
+                        cm.flush();
+                        wv.loadUrl(authUrl);
+                    }));
+                } else {
+                    wv.loadUrl(authUrl);
+                }
             });
         } catch (Throwable t) {
             final String er = "授权准备异常: " + t.getMessage();
@@ -463,7 +482,6 @@ public class AuthActivity extends Activity {
 
     private void finishOk(JSONObject bundle, String token) {
         if (done) return;
-        done = true;
         Store store = new Store(this);
         JSONObject userObj = bundle.optJSONObject("user");
         String login = null;
@@ -472,6 +490,26 @@ public class AuthActivity extends Activity {
             if (login.isEmpty()) login = userObj.optString("login", "");
             if (login.isEmpty()) login = null;
         }
+        /* 身份校验（opus4.8 审计方案 B1，防串号根治）：
+         * 站点返回的实际 GitHub 用户必须 == 本账号期望的 GitHub 用户，
+         * 否则拒绝落库 —— token 归属由授权时会话账号唯一决定，会话是 A
+         * 而在给 B 授权时，B 会被写入 A 的 token（历史串号即此）。
+         * 拒绝后不置 done，用户可在授权页切换账号重试。 */
+        String expect = expectGithubLogin();
+        if (expect != null && !expect.isEmpty()
+                && login != null && !login.isEmpty()
+                && !expect.trim().equalsIgnoreCase(login.trim())) {
+            exchanging = false;
+            showLoadError("授权账号不符：期望 " + expect + "，实际授权到的是 " + login
+                    + "。\n请在 GitHub 退出后用 " + expect + " 登录，或到「设置 → 凭据库」核对绑定。");
+            try {
+                store.opLog(siteKey, accountKey, "授权", "err",
+                        "身份不符，拒绝落库防串号",
+                        "期望 " + expect + "，实际 " + login, "auto");
+            } catch (Exception ignored) {}
+            return;   // 关键：不写 token、不置 done
+        }
+        done = true;
         try {
             JSONObject patch = new JSONObject()
                     .put("siteKey", siteKey)
@@ -509,6 +547,32 @@ public class AuthActivity extends Activity {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
         }
         finish();
+    }
+
+    /** 本账号期望的 GitHub 用户名：凭据 githubUser 优先，回退账号别名；空=不校验 */
+    private String expectGithubLogin() {
+        try {
+            Store store = new Store(this);
+            if (credentialId != null && !credentialId.isEmpty()) {
+                JSONObject c = store.findCredential(credentialId);
+                if (c != null) {
+                    String gu = c.optString("githubUser", "");
+                    if (!gu.isEmpty()) return gu;
+                }
+            }
+            JSONObject acc = store.findAccount(accountKey);
+            if (acc != null) {
+                String cid = acc.optString("credentialId", "");
+                if (!cid.isEmpty()) {
+                    JSONObject c = store.findCredential(cid);
+                    if (c != null) {
+                        String gu = c.optString("githubUser", "");
+                        if (!gu.isEmpty()) return gu;
+                    }
+                }
+            }
+            return alias == null ? "" : alias;
+        } catch (Exception e) { return ""; }
     }
 
     private void applyProxyThen(Runnable then) {
