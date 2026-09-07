@@ -14,8 +14,8 @@ android {
         applicationId "icu.justwoker.justsign"
         minSdk 24
         targetSdk 34
-        versionCode 41
-        versionName "0.5.1"
+        versionCode 42
+        versionName "0.5.2"
     }
 
     if (hasKs) {
@@ -34,7 +34,9 @@ android {
             if (hasKs) signingConfig signingConfigs.shared
         }
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (hasKs) signingConfig signingConfigs.shared
         }
     }

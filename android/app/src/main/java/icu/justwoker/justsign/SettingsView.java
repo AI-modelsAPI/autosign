@@ -201,6 +201,20 @@ public class SettingsView extends FrameLayout {
             } catch (Exception e) { act.toast("无法打开链接"); }
         }));
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
+        g4.addView(item("chat", "QQ 交流群", "1060200469", null, v -> {
+            try {
+                act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("mqqopensdkapi://biz/qr/add?group_type=1&uin=1060200469")));
+            } catch (Exception e) {
+                try {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                            act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                    cm.setText("1060200469");
+                    act.toast("群号已复制，请到 QQ 搜索加入");
+                } catch (Exception e2) { act.toast("无法打开，群号 1060200469"); }
+            }
+        }));
+        g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
         g4.addView(item("shield", "凭据加密",
                 Crypto.available() ? "Android Keystore 可用（AES-256-GCM）" : "不可用：本机无法安全保存密码",
                 null, null));
@@ -495,6 +509,7 @@ public class SettingsView extends FrameLayout {
                                     .put("name", c.optString("name"))
                                     .put("baseUrl", c.optString("homeUrl"))
                                     .put("homeUrl", c.optString("homeUrl"))
+                                    .put("affUrl", c.optString("affUrl", ""))
                                     .put("checkinType", c.optString("checkinType", "login"))
                                     .put("reward", c.optString("reward", ""))
                                     .put("note", c.optString("note", ""))
@@ -680,7 +695,7 @@ public class SettingsView extends FrameLayout {
         EditText[] alias = new EditText[1], ghUser = new EditText[1], siteAcc = new EditText[1];
         box.addView(Ui.field(act, "别名（用于区分，如 主号 / 小号）", "主号", alias));
         box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.field(act, "GitHub 用户名（OAuth 授权用）", "AI-modelsAPI", ghUser));
+        box.addView(Ui.field(act, "GitHub 用户名（OAuth 授权用）", "your-github-username", ghUser));
         box.addView(Ui.gapH(act, 10));
         box.addView(Ui.field(act, "站点登录账号 / 邮箱", "user@example.com", siteAcc));
         box.addView(Ui.gapH(act, 10));

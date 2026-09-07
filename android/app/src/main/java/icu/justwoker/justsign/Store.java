@@ -122,6 +122,25 @@ public class Store {
                 cfg.put("sites", kept);
                 sp.edit().putBoolean("migrated_v5_prune", true).putString("config", cfg.toString()).commit();
             }
+            /* v6（v0.5.1）：affUrl 补丁——「添加站点」入口曾漏写 affUrl，导致
+             * 全新安装的用户点卡片站名跳的是无邀请码的 homeUrl。每次启动都把
+             * Catalog 的 affUrl 同步进已存在的内置站（幂等；自定义站不动）。 */
+            {
+                JSONArray sites = cfg.optJSONArray("sites");
+                boolean dirty = false;
+                for (int i = 0; sites != null && i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONObject cat = Catalog.byKey(s.optString("key", ""));
+                    if (cat == null) continue;
+                    String aff = cat.optString("affUrl", "");
+                    if (!aff.isEmpty() && !aff.equals(s.optString("affUrl", ""))) {
+                        s.put("affUrl", aff);
+                        dirty = true;
+                    }
+                }
+                if (dirty) sp.edit().putString("config", cfg.toString()).commit();
+            }
         } catch (Exception ignored) {}
     }
 
