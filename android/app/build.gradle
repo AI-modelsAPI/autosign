@@ -14,8 +14,8 @@ android {
         applicationId "icu.justwoker.justsign"
         minSdk 24
         targetSdk 34
-        versionCode 29
-        versionName "0.3.9"
+        versionCode 30
+        versionName "0.4.0"
     }
 
     if (hasKs) {

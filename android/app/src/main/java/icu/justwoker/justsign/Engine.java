@@ -464,10 +464,28 @@ public class Engine {
         JSONObject su = dd(self);
         if (su != null && su.has("checked_in")) {
             boolean ci = su.optBoolean("checked_in", false);
-            out.put("ok", ci).put("already", ci).put("reward", 0).put("rewardKnown", false)
-               .put("message", ci ? "登录即签到 · 站点已标记今日已签"
+            /* v0.3.10：checked_in 只说明「站点标记已签」，奖励数字仍从
+             * 当日系统日志解析（该站文案「每日签到成功，增加额度 ＄25…」）。
+             * 昨天的记录不代表今天——isToday 过滤后才采信。 */
+            double reward = 0;
+            boolean known = false;
+            String rewardNote = "";
+            if (ci) {
+                try {
+                    JSONObject tbR = todayBonus(key);
+                    if (tbR != null) {
+                        reward = tbR.optDouble("rewardUSD", 0);
+                        known = tbR.optBoolean("rewardKnown", false);
+                        rewardNote = " · 今日奖励 " + Ui.usd(reward);
+                    } else {
+                        rewardNote = " · 今日签到记录尚未生成（站点按日发放）";
+                    }
+                } catch (Exception ignored) {}
+            }
+            out.put("ok", ci).put("already", ci).put("reward", reward).put("rewardKnown", known)
+               .put("message", ci ? ("登录即签到 · 站点已标记今日已签" + rewardNote)
                                   : "站点显示今日未签到，请打开网页登录一次以触发发放");
-            if (ci) markChecked(key, 0, false);
+            if (ci) markChecked(key, reward, known);
             return out;
         }
         out.put("ok", true).put("already", true).put("reward", 0).put("rewardKnown", false)
