@@ -425,6 +425,32 @@ public class Store {
         return a == null ? new JSONArray() : a;
     }
 
+    /** opus4.8 复审：凭据字段合并更新（与 patchAccount 同语义，锁内重读+合并）。
+     * 用于缓存 githubId 等派生字段，不碰加密的 password/twofa。 */
+    public boolean patchCredential(String id, JSONObject patch) {
+        if (id == null || id.isEmpty() || patch == null || patch.length() == 0) return false;
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                JSONArray arr = cfg.optJSONArray("credentials");
+                if (arr == null) return false;
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c != null && id.equals(c.optString("id"))) {
+                        java.util.Iterator<String> it = patch.keys();
+                        while (it.hasNext()) {
+                            String k = it.next();
+                            c.put(k, patch.get(k));
+                        }
+                        saveConfig(cfg);
+                        return true;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
     public JSONObject findCredential(String id) {
         if (id == null || id.isEmpty()) return null;
         JSONArray a = credentials();

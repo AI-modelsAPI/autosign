@@ -377,18 +377,54 @@ public final class SilentAuth {
                                 if (login == null || "null".equals(login)) login = "";
                             }
                         }
-                        /* B1 身份校验：响应 username 与所选账号不符 → 拒绝 */
+                        /* B1 身份校验（opus4.8 复审·锚点分层）：
+                         * 1) 强判据：响应含 github_id 且凭据已缓存 githubId → 不等即拒
+                         *    （站内名 github_<站内id> 与 GitHub 名无关，不可比）。
+                         * 2) 弱判据：无 github_id 数据 → 回退 username 比对（token 型旧路径）。
+                         * 3) 都拿不到 → 跳过校验（不误拒）。 */
                         String want = expectGithubLogin();
-                        if (!want.isEmpty() && !login.isEmpty()
+                        String respGhId = "";
+                        if (d.has("github_id") && !d.isNull("github_id")) {
+                            Object gid = d.get("github_id");
+                            respGhId = String.valueOf(gid).trim();
+                            if ("null".equals(respGhId)) respGhId = "";
+                        }
+                        boolean mm = false;
+                        String mmWhy = "";
+                        if (!respGhId.isEmpty()) {
+                            /* 静默路径无法查 GitHub API（主线程约束+限流），
+                             * 仅用凭据已缓存的 githubId 判定；无缓存 → 跳过 */
+                            String cachedId = "";
+                            try {
+                                JSONObject accX = store.findAccount(accountKey);
+                                if (accX != null) {
+                                    String cid = accX.optString("credentialId", "");
+                                    if (!cid.isEmpty()) {
+                                        JSONObject credJ = store.findCredential(cid);
+                                        if (credJ != null) {
+                                            cachedId = credJ.optString("githubId", "");
+                                            if ("null".equals(cachedId)) cachedId = "";
+                                        }
+                                    }
+                                }
+                            } catch (Exception ignored) {}
+                            if (!cachedId.isEmpty() && !cachedId.equals(respGhId)) {
+                                mm = true;
+                                mmWhy = "GitHub ID 不符：期望 " + want + "(" + cachedId + ")，实际 " + respGhId;
+                            }
+                        } else if (!want.isEmpty() && !login.isEmpty()
                                 && !want.trim().equalsIgnoreCase(login.trim())) {
+                            mm = true;
+                            mmWhy = "GitHub 用户名不符：期望 " + want + "，实际 " + login;
+                        }
+                        if (mm) {
                             try {
                                 store.opLog(siteKey, accountKey, "后台凭据交换", "err",
-                                        "GitHub 身份不符，已拒绝写入防串号",
-                                        "期望 " + want + "，实际 " + login, "auto");
+                                        "GitHub 身份不符，已拒绝写入防串号", mmWhy, "auto");
                             } catch (Exception ignored) {}
-                            final String gl = login;
+                            final String gl = (login == null || login.isEmpty()) ? respGhId : login;
                             main.post(() -> finish(false, true, gl,
-                                    "后台会话账号 " + gl + " 与所选不符，请手动授权切换"));
+                                    "后台会话账号与所选不符，请手动授权切换"));
                             return;
                         }
                         /* 凭据有效性：cookie 型站必须有 Set-Cookie；token 型站有 token。

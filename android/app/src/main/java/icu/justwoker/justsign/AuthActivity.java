@@ -537,22 +537,41 @@ public class AuthActivity extends Activity {
             String u0 = bundle.optString("username", "");
             if (!u0.isEmpty() && !"null".equals(u0)) login = u0;
         }
-        /* 身份校验（opus4.8 审计方案 B1，防串号根治）：
-         * 站点返回的实际 GitHub 用户必须 == 本账号期望的 GitHub 用户，
-         * 否则拒绝落库 —— token 归属由授权时会话账号唯一决定，会话是 A
-         * 而在给 B 授权时，B 会被写入 A 的 token（历史串号即此）。
+                /* 身份校验 B1（opus4.8 复审·锚点分层）：
+         * 1) 强判据：站点响应含 github_id（New API 系 = GitHub 数字 ID，字符串）
+         *    且凭据已缓存 githubId → 两者必须相等，不等即拒（不看 username，
+         *    因为站内名是 github_<站内id> 与 GitHub 名无关）。
+         * 2) 弱判据（fallback）：无 github_id 数据时回退 username 比对（token 型旧路径）。
+         * 3) 都拿不到（无 github_id 数据且缓存缺失）→ 跳过校验，不误拒。
          * 拒绝后不置 done，用户可在授权页切换账号重试。 */
         String expect = expectGithubLogin();
-        if (expect != null && !expect.isEmpty()
+        String respGhId = "";
+        Object gidO = bundle.opt("github_id");
+        if (gidO != null) {
+            respGhId = String.valueOf(gidO).trim();
+            if ("null".equals(respGhId)) respGhId = "";
+        }
+        boolean mismatch = false;
+        String mmWhy = "";
+        if (!respGhId.isEmpty()) {
+            String cachedId = ensureGithubId(expect);
+            if (!cachedId.isEmpty() && !cachedId.equals(respGhId)) {
+                mismatch = true;
+                mmWhy = "GitHub ID 不符：期望 " + expect + "(" + cachedId + ")，实际 " + respGhId;
+            }
+        } else if (expect != null && !expect.isEmpty()
                 && login != null && !login.isEmpty()
                 && !expect.trim().equalsIgnoreCase(login.trim())) {
+            mismatch = true;
+            mmWhy = "GitHub 用户名不符：期望 " + expect + "，实际 " + login;
+        }
+        if (mismatch) {
             exchanging = false;
-            showLoadError("授权账号不符：期望 " + expect + "，实际授权到的是 " + login
+            showLoadError("授权账号不符：" + mmWhy
                     + "。\n请在 GitHub 退出后用 " + expect + " 登录，或到「设置 → 凭据库」核对绑定。");
             try {
                 store.opLog(siteKey, accountKey, "授权", "err",
-                        "身份不符，拒绝落库防串号",
-                        "期望 " + expect + "，实际 " + login, "auto");
+                        "身份不符，拒绝落库防串号", mmWhy, "auto");
             } catch (Exception ignored) {}
             return;   // 关键：不写 token、不置 done
         }
@@ -628,6 +647,46 @@ public class AuthActivity extends Activity {
             sb.append(pair);
         }
         return sb.toString();
+    }
+
+    /** opus4.8 复审·B1 锚点强化：确保凭据缓存了 GitHub 数字 ID（githubId）。
+     * New API 系站点 OAuth 响应里的 username 是站内名（github_<站内id>），
+     * 不能当 GitHub 用户名比对；github_id 列存的是 GitHub API /user 的
+     * 数字 id（字符串形式，官方源码 oauth/github.go 实锤），永久不变。
+     * 已缓存 → 直接返回；未缓存 → 查 api.github.com 缓存（失败返回 ""，
+     * 调用方跳过校验不误拒）。 */
+    private String ensureGithubId(String githubUser) {
+        if (githubUser == null || githubUser.isEmpty()) return "";
+        try {
+            Store store = new Store(this);
+            if (credentialId != null && !credentialId.isEmpty()) {
+                JSONObject c = store.findCredential(credentialId);
+                if (c != null) {
+                    String cached = c.optString("githubId", "");
+                    if (!cached.isEmpty() && !"null".equals(cached)) return cached;
+                }
+            }
+            /* 查询 GitHub 数字 ID（未认证 60 次/时/IP，缓存后只查一次） */
+            OkHttpClient c2 = withProxy(new OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build(),
+                    store.config().optJSONObject("proxy"));
+            Response r = c2.newCall(new Request.Builder()
+                    .url("https://api.github.com/users/" + githubUser)
+                    .header("Accept", "application/vnd.github+json")
+                    .header("User-Agent", "justsign-app").build()).execute();
+            String body = r.body() != null ? r.body().string() : "";
+            try { r.close(); } catch (Exception ignored) {}
+            if (r.code() == 200) {
+                JSONObject ju = new JSONObject(body);
+                long id = ju.optLong("id", 0);
+                if (id > 0 && credentialId != null && !credentialId.isEmpty()) {
+                    store.patchCredential(credentialId,
+                            new JSONObject().put("githubId", String.valueOf(id)));
+                    return String.valueOf(id);
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     /** 本账号期望的 GitHub 用户名：凭据 githubUser 优先，回退账号别名；空=不校验 */
