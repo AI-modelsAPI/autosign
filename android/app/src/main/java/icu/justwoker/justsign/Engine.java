@@ -195,6 +195,15 @@ public class Engine {
         JSONObject inner = d.optJSONObject("data");
         return inner != null ? inner : d;
     }
+    /* New API 变体字段回退链：部分站（如 agentrouter）把用户数据放在
+     * data.user 而非 data 直层。逐级回退，取到哪个用哪个。 */
+    private static JSONObject userOf(JSONObject resp) {
+        JSONObject d = dd(resp);
+        JSONObject u = d.optJSONObject("user");
+        if (u != null && (u.has("quota") || u.has("used_quota"))) return u;
+        if (d.has("quota") || d.has("used_quota")) return d;
+        return u != null ? u : d;
+    }
 
     private static String httpHint(int code) {
         if (code == 429) return "站点限流（429），当前代理节点可能已被 WAF 拦截，请换代理节点后重试";
@@ -259,10 +268,12 @@ public class Engine {
             store.putSiteMeta(sKey, "quotaPerUnit", unit);
         }
 
-        double quota = dd(self).optDouble("quota", 0);
-        double used = dd(self).optDouble("used_quota", 0);
-        String user = dd(self).optString("display_name", null);
-        if (user == null || user.isEmpty()) user = dd(self).optString("username", null);
+        /* userOf：data.user.quota -> data.quota 回退（agentrouter 等变体站字段在 user 内层） */
+        JSONObject selfU = userOf(self);
+        double quota = selfU.optDouble("quota", 0);
+        double used = selfU.optDouble("used_quota", 0);
+        String user = selfU.optString("display_name", null);
+        if (user == null || user.isEmpty()) user = selfU.optString("username", null);
 
         JSONObject out = new JSONObject()
                 .put("ok", selfHttp == 200)

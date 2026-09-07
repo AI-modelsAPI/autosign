@@ -60,6 +60,8 @@ public class AuthActivity extends Activity {
     /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
     private boolean stateUseGet = false;
     private boolean credHasOtp = false;
+    /* 本次授权绑定的「站点×账号」Profile（降级=Default 时为 null） */
+    private androidx.webkit.Profile mProfile;
 
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
@@ -141,6 +143,11 @@ public class AuthActivity extends Activity {
         root.setBackgroundColor(Color.WHITE);
 
         wv = new WebView(this);
+        /* 需求3（opus4.8 审计）：绑定「站点×账号」专属 Profile —— 必须在任何
+         * getSettings/loadUrl 之前。与离屏 SilentAuth 同名 Profile，授权一次
+         * 后该账号会话长期保留在自己的分区里，刷新/签到自动交换不再重复授权。 */
+        mProfile = WebViewProfileUtil.bindProfile(wv,
+                WebViewProfileUtil.profileNameFor(siteKey, accountKey));
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -155,6 +162,11 @@ public class AuthActivity extends Activity {
             @Override public void onPageFinished(WebView v, String url) {
                 maybeFill(url);
                 if (url != null && interceptCallback(url)) return;
+                /* OAuth 确认页自动授权（需求2）：800ms 后自动点 Authorize，
+                 * 配合登录页自动填充+自动提交，实现授权全程无手动 */
+                if (url != null && url.toLowerCase(java.util.Locale.US).contains("/login/oauth/authorize")) {
+                    v.evaluateJavascript(AuthFillJs.authorizeJs(), null);
+                }
                 maybeResumeAuthorize(url);
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest req, android.webkit.WebResourceError err) {
@@ -456,23 +468,16 @@ public class AuthActivity extends Activity {
                         + "&state=" + enc(st2) + "&scope=user:email"
                         + (credAccount.isEmpty() ? "" : ("&login=" + enc(credAccount)));
                 reauthTries = 0;
-                /* 会话强制切换（opus4.8 审计方案 A2-a）：
-                 * WebView 里残留的旧 GitHub 会话会让授权页直接以旧账号确认，
-                 * 站点按错误账号校验 → 授权失败/串号。有凭据能自动登录回来时，
-                 * 先清全部 Cookie 强制走登录页，maybeFill 用所选账号重新登录。
-                 * loadUrl 必须放进 removeAllCookies 的 callback（异步清 Cookie，
-                 * 固定延时是竞态）。无密码凭据不清（清了无法自动登录回来）。 */
-                if (!credAccount.isEmpty() && credPassword != null && !credPassword.isEmpty()) {
-                    showTip("正在切换到目标 GitHub 账号…");
-                    CookieManager cm = CookieManager.getInstance();
-                    cm.removeAllCookies(v -> h.post(() -> {
-                        if (done || isFinishing() || wv == null) return;
-                        cm.flush();
-                        wv.loadUrl(authUrl);
-                    }));
-                } else {
-                    wv.loadUrl(authUrl);
-                }
+                /* 会话切换策略（opus4.8 审计·需求3 修订版）：
+                 * Profile 隔离后，本账号的 Cookie 分区只属于自己 ——
+                 * · 首次授权（账号无 token / 无 githubAccount）：分区是空的，
+                 *   无需清 Cookie（本来就没有旧会话），直接加载走登录页；
+                 *   无密码凭据同样直接加载（靠 login 参数或人工选择账号）。
+                 * · 已授权过：分区里就是本账号的会话，直接加载 → GitHub 自动
+                 *   302 回站点 → exchange 自动完成，全程无需再输密码。
+                 * 注意：绝不清全局 CookieManager（会破坏其他账号分区/Default）。 */
+                showTip(mProfile != null ? "使用账号专属会话分区" : "正在准备授权…");
+                wv.loadUrl(authUrl);
             });
         } catch (Throwable t) {
             final String er = "授权准备异常: " + t.getMessage();
@@ -535,6 +540,9 @@ public class AuthActivity extends Activity {
                     store.saveConfig(cfg);
                 } catch (Exception ignored) {}
             }
+            /* 需求3：落盘本账号 Profile 会话 —— 授权一次后，该账号分区里的
+             * GitHub 会话长期有效，刷新/签到后台自动交换，无需再手动授权 */
+            WebViewProfileUtil.flush(mProfile);
             store.appendLog(siteKey, accountKey, "auth", "via=android user=" + (login == null ? "?" : login));
             store.opLog(siteKey, accountKey, "授权", "ok",
                     "授权成功" + (login == null ? "" : (" · " + login)), "", "user");

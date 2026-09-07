@@ -36,6 +36,34 @@ public final class AuthFillJs {
     private AuthFillJs() {}
 
     /**
+     * OAuth 确认页自动授权（opus4.8 审计方案·需求2）：
+     * GitHub /login/oauth/authorize 页注入，800ms 后点击 Authorize 按钮。
+     * 防重复：window 标志位（SPA 内多次 onPageFinished 只点一次）。
+     * 仅当页面确有授权按钮（button[name=authorize] / #js-oauth-authorize-btn）
+     * 时才点，绝不误点其他按钮。按钮 disabled 时每 200ms 重试（最多 5s）。
+     */
+    public static String authorizeJs() {
+        return "(function(){" +
+                "try{" +
+                "if(window.__jsAuthorize)return;window.__jsAuthorize=1;" +
+                "var tries=0;" +
+                "function find(){var b=document.querySelector('button[name=authorize]');" +
+                "  if(!b)b=document.getElementById('js-oauth-authorize-btn');" +
+                "  if(!b){var c=document.querySelectorAll('button.btn-primary,button[type=submit]');" +
+                "    for(var i=0;i<c.length;i++){var t=((c[i].innerText||'')+'').toLowerCase();" +
+                "      if(t.indexOf('authorize')>=0||t.indexOf('授权')>=0)return c[i];}}" +
+                "  return b;}" +
+                "var iv=setInterval(function(){tries++;" +
+                "  var b=find();" +
+                "  if(b&&!b.disabled){clearInterval(iv);" +
+                "    try{b.scrollIntoView({block:'center'});}catch(e){}" +
+                "    b.click();" +
+                "    try{window.JustSign.onFill(JSON.stringify({ok:true,action:'autoAuthorize'}));}catch(e){}}" +
+                "  else if(tries>=25){clearInterval(iv);}},200);" +
+                "}catch(e){}})();";
+    }
+
+    /**
      * @param account    站点/GitHub 登录账号（空串则不填账号）
      * @param password   密码明文（空串则不填密码）
      * @param twofaCode  2FA 当前验证码（空串 = 该账号没有 2FA，脚本跳过全部 2FA 逻辑）

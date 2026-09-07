@@ -14,8 +14,8 @@ android {
         applicationId "icu.justwoker.justsign"
         minSdk 24
         targetSdk 34
-        versionCode 21
-        versionName "0.3.1"
+        versionCode 22
+        versionName "0.3.2"
     }
 
     if (hasKs) {
@@ -45,6 +45,6 @@ android {
 }
 dependencies {
     implementation 'androidx.work:work-runtime:2.9.1'
-    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 }

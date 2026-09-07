@@ -199,6 +199,8 @@ public final class SilentAuth {
         private volatile boolean done = false;
         private volatile boolean exchanging = false;
         private Runnable watchdog;
+        /* 当前离屏授权绑定的「站点×账号」Profile（降级=Default 时为 null） */
+        private androidx.webkit.Profile mProfile;
 
         Runner(Context ctx, String siteKey, String accountKey, Callback cb) {
             this.ctx = ctx; this.siteKey = siteKey; this.accountKey = accountKey; this.cb = cb;
@@ -227,6 +229,12 @@ public final class SilentAuth {
             if (done) return;
             try {
                 wv = new WebView(ctx); // 离屏运行，零 UI
+                /* 需求3（opus4.8 审计）：绑定「站点×账号」专属 Profile。
+                 * 必须在任何 getSettings/loadUrl 之前调用。该 Profile 的
+                 * Cookie 与其他账号完全隔离且持久化 —— 账号授权一次后，
+                 * 后台刷新/签到永远用自己的会话自动交换，无需再手动授权。 */
+                mProfile = WebViewProfileUtil.bindProfile(wv,
+                        WebViewProfileUtil.profileNameFor(siteKey, accountKey));
                 WebSettings s = wv.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
@@ -253,8 +261,10 @@ public final class SilentAuth {
                 watchdog = () -> { if (!done) finish(false, true, null, "后台交换凭据超时"); };
                 /* C1（opus4.8 审计）：会话已登录且期望账号明确时，若卡在授权确认页
                  *（没人点击）说明后台无法推进 —— 8s 快速转人工，不空等 30s；
-                 * 未登录/无法判定时保留 30s（登录跳转链路更长）。 */
-                boolean fastFail = !expectGithubLogin().isEmpty() && githubLoggedIn();
+                 * 未登录/无法判定时保留 30s（登录跳转链路更长）。
+                 * 需求3：会话判定按本账号 Profile（隔离分区），不再看全局。 */
+                boolean fastFail = !expectGithubLogin().isEmpty()
+                        && WebViewProfileUtil.githubLoggedIn(mProfile);
                 main.postDelayed(watchdog, fastFail ? 8000 : 30000);
 
                 applyProxyThen(() -> {
@@ -321,6 +331,9 @@ public final class SilentAuth {
                             /* 身份校验落库（B1）：不符拒绝写入并转手动授权 */
                             boolean saved = saveTokenChecked(token, login);
                             if (saved) {
+                                /* 需求3：落盘本账号 Profile 会话（持久化，
+                                 * 之后刷新/签到后台自动交换，无需再授权） */
+                                WebViewProfileUtil.flush(mProfile);
                                 final String fl = login;
                                 main.post(() -> finish(true, false, fl, "凭据自动交换成功"));
                             } else {
