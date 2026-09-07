@@ -197,9 +197,11 @@ public class SettingsView extends FrameLayout {
         /* 开源主页入口暂时隐藏（未开源阶段），开源后恢复：
            item("pkg", ...) → ACTION_VIEW 仓库地址。 */
         g4.addView(item("chat", "QQ 交流群", "1060200469", null, v -> {
+            /* QQ 9.x 实测：mqqopensdkapi://biz/qr/add 已失效（只拉起 Splash 无反应），
+             * mqq://card/show_pslcard?card_type=group 可打开群资料页直接加群。 */
             try {
                 act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
-                        android.net.Uri.parse("mqqopensdkapi://biz/qr/add?group_type=1&uin=1060200469")));
+                        android.net.Uri.parse("mqq://card/show_pslcard?src_type=internal&version=1&uin=1060200469&card_type=group")));
             } catch (Exception e) {
                 try {
                     android.content.ClipboardManager cm = (android.content.ClipboardManager)
