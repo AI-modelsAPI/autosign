@@ -305,18 +305,8 @@ public class AuthActivity extends Activity {
             JSONObject r = new JSONObject(json);
             JSONObject d = r.optJSONObject("data");
             if (r.optBoolean("success") && d != null) {
-                /* opus4.8 审计修复：JSON null -> 字面 "null" 陷阱 + 三字段回退 */
-                String token = jsonStr(d, "access_token");
-                if (token.isEmpty()) token = jsonStr(d, "accessToken");
-                if (token.isEmpty()) token = jsonStr(d, "token");
+                String token = d.optString("access_token", d.optString("accessToken", ""));
                 if (!token.isEmpty()) { finishOk(d, token); return; }
-                /* 无 token：把 data 键集打进错误提示，便于适配新字段 */
-                java.util.Iterator<String> ks = d.keys();
-                StringBuilder kb = new StringBuilder();
-                while (ks.hasNext()) { kb.append(ks.next()).append(','); }
-                exchanging = false;
-                showLoadError("授权响应缺少 token（data keys: " + kb + "）");
-                return;
             }
             String msg = r.optString("message", "交换失败");
             exchanging = false;
@@ -497,10 +487,6 @@ public class AuthActivity extends Activity {
 
     private void finishOk(JSONObject bundle, String token) {
         if (done) return;
-        /* 脏值拦截（opus4.8 审计 #4）："null"/"undefined"/空白绝不落库 */
-        if (token == null) return;
-        token = token.trim();
-        if (token.isEmpty() || token.equals("null") || token.equals("undefined")) return;
         Store store = new Store(this);
         JSONObject userObj = bundle.optJSONObject("user");
         String login = null;
@@ -569,17 +555,6 @@ public class AuthActivity extends Activity {
             setResult(RESULT_CANCELED, new Intent().putExtra("error", "保存失败: " + e.getMessage()));
         }
         finish();
-    }
-
-    /** org.json optString 对 JSON null 值返回字面 "null" 字符串（而非 fallback），
-     *  经典陷阱：会以 "null" 当合法凭据落库。此助手显式拦截（与 SilentAuth.jsonStr 同语义）。 */
-    static String jsonStr(JSONObject o, String key) {
-        if (o == null || !o.has(key) || o.isNull(key)) return "";
-        String v = o.optString(key, "");
-        if (v == null) return "";
-        v = v.trim();
-        if (v.isEmpty() || v.equals("null") || v.equals("undefined")) return "";
-        return v;
     }
 
     /** 本账号期望的 GitHub 用户名：凭据 githubUser 优先，回退账号别名；空=不校验 */

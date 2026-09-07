@@ -138,18 +138,6 @@ public final class SilentAuth {
         } catch (Exception e) { return false; }
     }
 
-    /** org.json optString 对 JSON null 值返回字面 "null" 字符串（而非 fallback），
-     *  经典陷阱：会以 "null" 当合法凭据落库。此助手显式拦截：键不存在、
-     *  值为 JSON null、值是字面 "null"/"undefined" 一律返回空串。 */
-    static String jsonStr(JSONObject o, String key) {
-        if (o == null || !o.has(key) || o.isNull(key)) return "";
-        String v = o.optString(key, "");
-        if (v == null) return "";
-        v = v.trim();
-        if (v.isEmpty() || v.equals("null") || v.equals("undefined")) return "";
-        return v;
-    }
-
     /* ================= JWT 剩余期判定 =================
      * TokenKeeper 已删除，但「这个 token 还能用多久」仍需判断：
      * 签到/刷新前若发现剩余不足 SKEW，直接先换新的，别等 401 再补救（省一次往返）。 */
@@ -332,18 +320,12 @@ public final class SilentAuth {
                     JSONObject r = new JSONObject(body);
                     JSONObject d = r.optJSONObject("data");
                     if (r.optBoolean("success") && d != null) {
-                        /* opus4.8 审计修复：AgentRouter 等站 data.access_token
-                         * 键存在但值为 JSON null（真 token 在 data.token），
-                         * optString 会返回字面 "null" 落库 -> Bearer null -> 额度全 0。
-                         * 改用 jsonStr + 三字段回退（New API 新旧版兼容）。 */
-                        String token = jsonStr(d, "access_token");
-                        if (token.isEmpty()) token = jsonStr(d, "accessToken");
-                        if (token.isEmpty()) token = jsonStr(d, "token");
+                        String token = d.optString("access_token", d.optString("accessToken", ""));
                         String login = null;
                         JSONObject usr = d.optJSONObject("user");
                         if (usr != null) {
-                            login = jsonStr(usr, "username");
-                            if (login.isEmpty()) login = jsonStr(usr, "login");
+                            login = usr.optString("username", "");
+                            if (login.isEmpty()) login = usr.optString("login", "");
                         }
                         if (!token.isEmpty()) {
                             /* 身份校验落库（B1）：不符拒绝写入并转手动授权 */
@@ -440,10 +422,6 @@ public final class SilentAuth {
         /** 带身份校验的落库（opus4.8 审计方案 B1）：通过校验并写入返回 true；
          * 会话账号与所选账号不符（串号风险）返回 false 且绝不写库。 */
         private boolean saveTokenChecked(String token, String login) {
-            /* 脏值拦截（opus4.8 审计 #4）："null"/"undefined"/空白绝不落库 */
-            if (token == null) return false;
-            token = token.trim();
-            if (token.isEmpty() || token.equals("null") || token.equals("undefined")) return false;
             String expect = expectGithubLogin();
             if (expect != null && !expect.isEmpty()
                     && login != null && !login.isEmpty()
