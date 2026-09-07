@@ -750,12 +750,36 @@ public class Engine {
                         store.appendLog(sKey, key, ev[0], dt[0]);
                         store.opLog(sKey, key, "定时签到",
                                 ev[0].endsWith("fail") ? "err" : "ok", dt[0], "", "cron");
+                        /* v0.4.6：定时签到完成后刷新三额度（签到奖励到账后的变化要反映到界面）。
+                         * 与手动签到 applyCheckinResult→refreshOne 对齐。 */
+                        if (!ev[0].endsWith("fail")) {
+                            try {
+                                JSONObject st = status(key);
+                                if (st != null && st.optInt("http", 0) == 200) {
+                                    JSONObject patch = new JSONObject().put("lastStatus", st);
+                                    if (st.optBoolean("todayChecked", false)) {
+                                        JSONObject lc2 = new JSONObject()
+                                                .put("date", todayStr())
+                                                .put("time", System.currentTimeMillis());
+                                        if (st.optBoolean("todayRewardKnown", false))
+                                            lc2.put("reward", st.optDouble("todayRewardUSD", 0));
+                                        patch.put("lastCheckin", lc2);
+                                    }
+                                    store.patchAccount(key, patch);
+                                }
+                            } catch (Exception ignored) {}
+                        }
                     } else {
-                        JSONObject r = callWithAuth(site, key, "GET", "/api/user/self");
-                        store.appendLog(sKey, key, "cron-login-refresh", "http=" + r.optInt("http"));
+                        /* v0.4.6：登录保活改走 status()，额度同时写入 lastStatus */
+                        JSONObject r = status(key);
+                        int hc = r == null ? 0 : r.optInt("http");
+                        store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc);
                         store.opLog(sKey, key, "定时刷新",
-                                r.optInt("http") == 200 ? "ok" : "err",
-                                r.optInt("http") == 200 ? "登录保活成功" : httpHint(r.optInt("http")), "", "cron");
+                                hc == 200 ? "ok" : "err",
+                                hc == 200 ? "登录保活成功" : httpHint(hc), "", "cron");
+                        if (hc == 200) {
+                            try { store.patchAccount(key, new JSONObject().put("lastStatus", r)); } catch (Exception ignored) {}
+                        }
                     }
                 } catch (Exception e) {
                     store.appendLog(sKey, key, "cron-error", String.valueOf(e.getMessage()));
