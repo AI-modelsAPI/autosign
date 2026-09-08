@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root {
+    --bg: #f1f5f9; --panel: #ffffff; --line: #e2e8f0;
+    --text: #0f172a; --sub: #64748b; --faint: #94a3b8;
+    --accent: #2563eb; --accent-weak: #eff6ff;
+    --green: #16a34a; --green-bg: #dcfce7; --green-fg: #15803d;
+    --red-bg: #fee2e2; --red-fg: #b91c1c;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { width: 340px; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); font-size: 13px; }
+  .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #0f172a; color: #f1f5f9; }
+  .badge { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    display: flex; align-items: center; justify-content: center; font-weight: 800; color: #fff; font-size: 13px; }
+  .head b { font-size: 14px; }
+  .head .sub { font-size: 10.5px; color: #64748b; }
+  .head .spacer { flex: 1; }
+  .head a { color: #93c5fd; font-size: 12px; cursor: pointer; text-decoration: none; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 14px 4px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat .k { font-size: 10.5px; color: var(--sub); font-weight: 600; }
+  .stat .v { font-size: 17px; font-weight: 800; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .v.green { color: var(--green); } .v.orange { color: #ea580c; }
+  .list { padding: 10px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .acc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .acc-top { display: flex; align-items: center; gap: 8px; }
+  .acc-top b { font-size: 12.5px; }
+  .acc-top .site { color: var(--faint); font-size: 11px; }
+  .acc-top .spacer { flex: 1; }
+  .pill { padding: 3px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+  .pill.ok { background: var(--green-bg); color: var(--green-fg); }
+  .pill.wait { background: #e2e8f0; color: var(--sub); }
+  .pill.err { background: var(--red-bg); color: var(--red-fg); }
+  .money { display: flex; gap: 16px; margin-top: 6px; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .money .k { font-size: 10px; color: var(--faint); display: block; }
+  .money .v { font-weight: 700; }
+  .v-green { color: var(--green); } .v-orange { color: #ea580c; } .v-dim { color: var(--faint); }
+  .ops { display: flex; gap: 6px; margin-top: 8px; }
+  .btn { border: none; border-radius: 7px; padding: 5px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-ghost { background: var(--accent-weak); color: var(--accent); }
+  .btn-outline { background: transparent; color: var(--sub); border: 1px solid var(--line); }
+  .empty { padding: 30px 14px; text-align: center; color: var(--faint); }
+  #toast { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); background: #0f172a; color: #f1f5f9;
+    padding: 8px 14px; border-radius: 8px; font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90%; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="badge">j</div>
+    <div><b>autosign</b><div class="sub">公益站自动签到</div></div>
+    <div class="spacer"></div>
+    <a id="open-mgr">管理页 →</a>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="k">可用额度</div><div class="v green" id="s-avail">—</div></div>
+    <div class="stat"><div class="k">已用额度</div><div class="v orange" id="s-used">—</div></div>
+    <div class="stat"><div class="k">账号</div><div class="v" id="s-count">0</div></div>
+  </div>
+  <div class="list" id="acc-list"><div class="empty">加载中…</div></div>
+  <div id="toast"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

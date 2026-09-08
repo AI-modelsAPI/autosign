@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "autosign — 公益AI中转站自动签到",
+  "version": "0.1.0",
+  "description": "站点→账号两级管理、额度总览、每日自动签到。与桌面端/安卓端同源逻辑（new-api 站点）。",
+  "permissions": ["storage", "alarms", "tabs", "scripting", "offscreen"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "autosign 签到台"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "background": { "service_worker": "background.js" }
+}

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>autosign · 公益AI中转站自动签到台</title>
+<style>
+  :root {
+    --bg: #f1f5f9; --panel: #ffffff; --line: #e2e8f0;
+    --text: #0f172a; --sub: #64748b; --faint: #94a3b8;
+    --accent: #2563eb; --accent-weak: #eff6ff;
+    --green: #16a34a; --green-bg: #dcfce7; --green-fg: #15803d;
+    --orange: #ea580c; --purple: #7c3aed; --red: #dc2626; --red-bg: #fee2e2; --red-fg: #b91c1c;
+    --side: #0f172a; --side-text: #cbd5e1; --side-active: #1e293b;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+    -webkit-font-smoothing: antialiased; user-select: none;
+  }
+  .app { display: grid; grid-template-columns: 216px 1fr; height: 100vh; }
+  .sidebar { background: var(--side); color: var(--side-text); display: flex; flex-direction: column; padding: 18px 12px; }
+  .logo { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; }
+  .logo-badge { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    display: flex; align-items: center; justify-content: center; font-weight: 800; color: #fff; font-size: 17px; }
+  .logo-name { font-weight: 700; color: #f1f5f9; font-size: 15px; letter-spacing: .2px; }
+  .logo-sub { font-size: 11px; color: #64748b; }
+  .nav { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer;
+    color: var(--side-text); font-weight: 500; transition: background .15s, color .15s; }
+  .nav-item:hover { background: rgba(148,163,184,.12); }
+  .nav-item.active { background: var(--side-active); color: #fff; }
+  .nav-item .ico { width: 18px; text-align: center; font-size: 15px; }
+  .side-foot { margin-top: auto; padding: 12px 10px; border-top: 1px solid rgba(148,163,184,.15); font-size: 11.5px; color: #64748b; line-height: 1.9; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .dot.on { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+  .dot.off { background: #ef4444; }
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .topbar { display: flex; align-items: center; gap: 14px; padding: 18px 28px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .topbar h1 { font-size: 18px; font-weight: 700; }
+  .topbar .spacer { flex: 1; }
+  .btn { border: none; border-radius: 9px; padding: 9px 16px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+    transition: filter .15s, transform .05s; font-family: inherit; }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-ghost { background: var(--accent-weak); color: var(--accent); }
+  .btn-outline { background: transparent; color: var(--sub); border: 1px solid var(--line); }
+  .btn-outline:hover { background: #f8fafc; }
+  .btn-danger-t { background: transparent; color: var(--red); padding: 6px 10px; }
+  .btn-danger-t:hover { background: var(--red-bg); }
+  .btn-mini { padding: 5px 10px; font-size: 12px; border-radius: 7px; }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .content { flex: 1; overflow-y: auto; padding: 24px 28px 40px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+  .stat .k { font-size: 12px; color: var(--sub); font-weight: 600; }
+  .stat .v { font-size: 26px; font-weight: 800; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .stat .d { font-size: 11.5px; color: var(--faint); margin-top: 4px; }
+  .v.green { color: var(--green); } .v.orange { color: var(--orange); } .v.purple { color: var(--purple); }
+  .site-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 18px; overflow: hidden; }
+  .site-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #f8fafc, #fff); }
+  .site-head .s-name { font-weight: 800; font-size: 15px; }
+  .site-head .s-url { font-size: 12px; color: var(--faint); font-family: "SF Mono", Menlo, Consolas, monospace; }
+  .site-head .s-type { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: #e2e8f0; color: var(--sub); font-weight: 600; }
+  .site-head .spacer { flex: 1; }
+  .acc-row { padding: 12px 18px; border-bottom: 1px solid #f1f5f9; }
+  .acc-row:last-child { border-bottom: none; }
+  .acc-top { display: flex; align-items: center; gap: 10px; }
+  .acc-name { font-weight: 700; }
+  .gh { color: var(--sub); font-size: 12.5px; }
+  .acc-top .spacer { flex: 1; }
+  .money-row { display: flex; gap: 26px; margin-top: 8px; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .money-row .k { font-size: 11px; color: var(--faint); display: block; margin-bottom: 2px; }
+  .money-row .v { font-weight: 700; }
+  .v-green { color: var(--green); } .v-orange { color: var(--orange); } .v-purple { color: var(--purple); }
+  .v-dim { color: var(--faint); font-weight: 400; }
+  .acc-ops { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700; }
+  .pill.ok { background: var(--green-bg); color: var(--green-fg); }
+  .pill.wait { background: #e2e8f0; color: var(--sub); }
+  .pill.err { background: var(--red-bg); color: var(--red-fg); }
+  .empty { padding: 46px 20px; text-align: center; color: var(--faint); }
+  .empty b { display: block; color: var(--text); font-size: 15px; margin-bottom: 6px; }
+  .logline { display: flex; gap: 14px; padding: 9px 18px; border-bottom: 1px solid #f1f5f9; font-size: 12.5px; }
+  .logline:last-child { border-bottom: none; }
+  .logline .t { color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .logline .ev { color: var(--accent); font-weight: 600; white-space: nowrap; }
+  .logline .dt { color: var(--text); word-break: break-all; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .panel-head { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); font-weight: 700; }
+  .panel-head .hint { margin-left: 10px; font-weight: 400; font-size: 12px; color: var(--faint); }
+  .set-row { display: flex; align-items: center; gap: 14px; padding: 15px 18px; border-bottom: 1px solid #f1f5f9; }
+  .set-row:last-child { border-bottom: none; }
+  .set-row .info { flex: 1; }
+  .set-row .info b { display: block; font-size: 13.5px; }
+  .set-row .info span { font-size: 12px; color: var(--sub); }
+  .switch { position: relative; width: 42px; height: 24px; border-radius: 999px; background: #cbd5e1; cursor: pointer; transition: background .2s; flex: none; }
+  .switch.on { background: var(--accent); }
+  .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+    background: #fff; transition: left .2s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .switch.on::after { left: 21px; }
+  input[type=text], input[type=number] { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-size: 13.5px;
+    font-family: inherit; outline: none; width: 100%; }
+  input[type=text]:focus, input[type=number]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+  .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center;
+    justify-content: center; z-index: 100; animation: fade .15s; }
+  @keyframes fade { from { opacity: 0; } }
+  .modal { background: var(--panel); border-radius: 14px; width: 460px; max-width: calc(100vw - 60px);
+    max-height: calc(100vh - 80px); display: flex; flex-direction: column; box-shadow: 0 24px 60px rgba(15,23,42,.35);
+    animation: pop .18s cubic-bezier(.2,.9,.3,1.2); }
+  @keyframes pop { from { transform: scale(.94); opacity: 0; } }
+  .modal-h { padding: 18px 22px 0; font-size: 16px; font-weight: 800; }
+  .modal-b { padding: 14px 22px; overflow-y: auto; font-size: 13.5px; color: var(--sub); line-height: 1.7; }
+  .modal-f { padding: 14px 22px 18px; display: flex; justify-content: flex-end; gap: 10px; }
+  .mono { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--text); }
+  #toast-root { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 200; }
+  .toast { background: #0f172a; color: #f1f5f9; padding: 12px 18px; border-radius: 10px; font-size: 13px;
+    box-shadow: 0 10px 30px rgba(15,23,42,.35); animation: slide .25s cubic-bezier(.2,.9,.3,1.15); max-width: 380px; }
+  .toast.ok { border-left: 4px solid #22c55e; }
+  .toast.err { border-left: 4px solid #ef4444; }
+  @keyframes slide { from { transform: translateX(30px); opacity: 0; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-badge">j</div>
+      <div><div class="logo-name">autosign</div><div class="logo-sub">公益站自动签到 · 浏览器扩展</div></div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active" data-view="dash"><span class="ico">◧</span>仪表盘</div>
+      <div class="nav-item" data-view="logs"><span class="ico">☰</span>运行日志</div>
+      <div class="nav-item" data-view="settings"><span class="ico">⚙</span>设置</div>
+    </nav>
+    <div class="side-foot">
+      <div><span class="dot on" id="engine-dot"></span>引擎 <span id="engine-state">运行中</span></div>
+      <div>chrome.storage · alarms 调度</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">仪表盘</h1>
+      <div class="spacer"></div>
+      <button class="btn btn-outline" id="btn-refresh">⟳ 刷新</button>
+      <button class="btn btn-primary" id="btn-add">＋ 添加站点</button>
+    </header>
+
+    <section class="content" id="view-dash">
+      <div class="stats">
+        <div class="stat"><div class="k">总可用额度</div><div class="v green" id="s-avail">—</div><div class="d">全部账号合计</div></div>
+        <div class="stat"><div class="k">总已用额度</div><div class="v orange" id="s-used">—</div><div class="d">历史累计消耗</div></div>
+        <div class="stat"><div class="k">今日消耗</div><div class="v purple" id="s-today">—</div><div class="d">今日 0 点起</div></div>
+        <div class="stat"><div class="k">账号</div><div class="v" id="s-count">0</div><div class="d" id="s-okcount">—</div></div>
+      </div>
+      <div id="site-list"></div>
+      <div class="empty" id="site-empty" style="display:none">
+        <b>还没有站点</b>点击右上角「＋ 添加站点」手动接入任意 new-api 站点（名称 + API 地址），<br>
+        每个站点下可添加多个账号，GitHub 授权在打开的标签页中登录后自动完成。
+      </div>
+    </section>
+
+    <section class="content" id="view-logs" style="display:none">
+      <div class="panel">
+        <div class="panel-head">本机运行日志 <span class="hint">最近 300 条 · 授权 / 签到 / 调度</span></div>
+        <div id="log-lines"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+
+    <section class="content" id="view-settings" style="display:none">
+      <div class="panel" style="max-width:720px">
+        <div class="panel-head">常规设置 <span class="hint">保存后立即生效</span></div>
+        <div class="set-row">
+          <div class="info"><b>每日自动签到</b><span>每天在设定时刻自动为所有已授权账号签到/保活（浏览器需处于运行状态）</span></div>
+          <input type="number" id="in-hour" min="0" max="23" style="width:70px" placeholder="3">
+          <span style="color:var(--sub)">:</span>
+          <input type="number" id="in-minute" min="0" max="59" style="width:70px" placeholder="5">
+          <div class="switch" id="sw-sched"></div>
+        </div>
+        <div class="set-row">
+          <div class="info"><b>签到结果通知</b><span>每日批量签到完成后弹系统通知</span></div>
+          <div class="switch" id="sw-notify"></div>
+        </div>
+        <div class="set-row">
+          <div class="spacer" style="flex:1"></div>
+          <button class="btn btn-primary" id="btn-save-set">保存设置</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast-root"></div>
+<div id="modal-root"></div>
+<script src="options.js"></script>
+</body>
+</html>
