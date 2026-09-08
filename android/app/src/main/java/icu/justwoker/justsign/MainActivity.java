@@ -1173,14 +1173,49 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                 toast(msg);
                 new Store(this).opLog(sk, ak, "授权", "info", msg, "转入手动授权", "auto");
             }
+            /* v0.6.6（方案B·防重复建 session）：转手动授权前，若该账号已有凭据
+             * （后台交换其实已成功落库，只是链路误判 needUi），先带凭据探一次 /api/user/self；
+             * 命中即已授权，直接收工，绝不再开 AuthActivity 用新 code 建第二个 session
+             * （justwoker 单账号会话上限 → 409 AUTH_SESSION_LIMIT 的根因）。 */
+            JSONObject accNow = new Store(this).findAccount(ak);
+            boolean hasCred = accNow != null
+                    && (!accNow.optString("token", "").isEmpty()
+                        || !accNow.optString("siteCookie", "").isEmpty());
+            if (hasCred) {
+                busyBegin("正在确认授权状态…");
+                new Thread(() -> {
+                    boolean authed = false;
+                    try {
+                        JSONObject st = new Engine(getApplicationContext()).status(ak);
+                        authed = st != null && st.optInt("http") == 200;
+                    } catch (Exception ignored) {}
+                    final boolean fAuthed = authed;
+                    runOnUiThread(() -> {
+                        busyEnd();
+                        if (fAuthed) {
+                            new Store(this).opLog(sk, ak, "授权", "ok",
+                                    "已确认授权有效（后台会话已建立，跳过重复授权）", "", "auto");
+                            toast("授权已生效");
+                            render();
+                            return;
+                        }
+                        openAuthActivity(sk, ak, al, cid);
+                    });
+                }, "auth-probe").start();
+                return;
+            }
             /* 后台无法完成 → 拉起可见 AuthActivity */
-            Intent it = new Intent(this, AuthActivity.class);
-            it.putExtra("siteKey", sk);
-            it.putExtra("accountKey", ak);
-            it.putExtra("alias", al);
-            it.putExtra("credentialId", cid);
-            startActivityForResult(it, REQ_AUTH);
+            openAuthActivity(sk, ak, al, cid);
         });
+    }
+
+    private void openAuthActivity(String sk, String ak, String al, String cid) {
+        Intent it = new Intent(this, AuthActivity.class);
+        it.putExtra("siteKey", sk);
+        it.putExtra("accountKey", ak);
+        it.putExtra("alias", al);
+        it.putExtra("credentialId", cid);
+        startActivityForResult(it, REQ_AUTH);
     }
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);

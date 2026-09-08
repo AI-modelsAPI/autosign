@@ -287,7 +287,22 @@ public final class SilentAuth {
                         }
                     }
                 });
-                watchdog = () -> { if (!done) finish(false, true, null, "后台交换凭据超时"); };
+                /* v0.6.6：交换请求一旦在途（exchanging=true），watchdog 不得判超时打断——
+                 * justwoker 交换端点 <1s 返回，提前 finish 会让"其实已成功建 session"
+                 * 的交换被误判超时→转手动→用新 code 再建一个 session→撞 AUTH_SESSION_LIMIT。
+                 * 已在途则再宽限一轮，交给 exchange() 自己出成功/失败结果。 */
+                watchdog = new Runnable() {
+                    private int extends_ = 0;
+                    @Override public void run() {
+                        if (done) return;
+                        if (exchanging && extends_ < 1) {
+                            extends_++;
+                            main.postDelayed(this, 12000);
+                            return;
+                        }
+                        finish(false, true, null, "后台交换凭据超时");
+                    }
+                };
                 /* C1（opus4.8 审计）：会话已登录且期望账号明确时，若卡在授权确认页
                  *（没人点击）说明后台无法推进 —— 8s 快速转人工，不空等 30s；
                  * 未登录/无法判定时保留 30s（登录跳转链路更长）。
@@ -355,10 +370,30 @@ public final class SilentAuth {
                         .header("Accept", "application/json")
                         .header("User-Agent", UA);
                 resp = c.newCall(rb.build()).execute();
+                int http = resp.code();
                 String body = resp.body() != null ? resp.body().string() : "";
                 /* opus4.8 审计·B-02：New API 系登录凭据是 Set-Cookie session（gin），
                  * access_token 是可选系统令牌（未生成为 JSON null）。必须抓 Set-Cookie。 */
                 final String setCookie = extractCookies(resp.headers("Set-Cookie"));
+                /* v0.6.6 诊断：SilentAuth 后台交换此前不记 HTTP 状态，导致 justwoker
+                 * 的失败真因（如 409 AUTH_SESSION_LIMIT）在后台链路完全不可见。
+                 * 记状态+body长度+setCookie布尔；非 2xx 记站点 code/message（不记 code/state/token/cookie 值）。 */
+                boolean ok2xx = http >= 200 && http < 300;
+                try {
+                    String diag = "HTTP " + http + "；body=" + body.length() + "B；setCookie=" + !setCookie.isEmpty();
+                    if (!ok2xx) {
+                        String ec = "", em = "";
+                        try {
+                            JSONObject ej = new JSONObject(body);
+                            ec = ej.optString("code", "");
+                            em = ej.optString("message", "");
+                        } catch (Exception ignored) {}
+                        diag += "；code=" + (ec.isEmpty() ? "(无)" : ec)
+                                + "；message=" + (em.isEmpty() ? "(无)" : em);
+                    }
+                    store.opLog(siteKey, accountKey, "后台凭据交换", ok2xx ? "info" : "err",
+                            "后台交换响应", diag, "auto");
+                } catch (Exception ignored) {}
                 if (!body.trim().isEmpty()) {
                     JSONObject r = new JSONObject(body);
                     JSONObject d = r.optJSONObject("data");

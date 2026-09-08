@@ -335,6 +335,30 @@ public class AuthActivity extends Activity {
         return false;
     }
 
+    /** v0.6.6：把站点交换失败的 code/message 映射为可操作的中文提示（不暴露技术术语）。 */
+    private String mapExchangeError(String code, String msg) {
+        String c = code == null ? "" : code.trim().toUpperCase(java.util.Locale.US);
+        switch (c) {
+            case "AUTH_SESSION_LIMIT":
+                return "该账号在站点的登录会话数已达上限。请到站点网页端退出多余的登录设备，或稍后再试；也可在本应用里等待旧会话自动过期后重新授权。";
+            case "ACCESS_DENIED":
+                return "站点拒绝了本次授权。请点重试；若仍失败，请确认所选账号与站点绑定的 GitHub 账号一致。";
+            case "STATE_MISMATCH":
+            case "INVALID_STATE":
+                return "授权校验未通过（可能多个授权同时进行）。请稍等几秒后点重试。";
+            case "RATE_LIMIT":
+            case "TOO_MANY_REQUESTS":
+                return "站点请求过于频繁，请稍等几分钟后点重试。";
+            default:
+                break;
+        }
+        String m = msg == null ? "" : msg.trim();
+        if (m.isEmpty() || "conflict".equalsIgnoreCase(m)) {
+            return "站点未能完成本次授权" + (c.isEmpty() ? "" : "（" + c + "）") + "。请稍后点重试。";
+        }
+        return "授权失败：" + m;
+    }
+
     private void authLog(String level, String summary, String detail) {
         try {
             new Store(this).opLog(siteKey, accountKey, "授权链路", level,
@@ -361,8 +385,17 @@ public class AuthActivity extends Activity {
             String body = resp.body() != null ? resp.body().string() : "";
             /* opus4.8 审计·B-02：New API 系真凭据是 Set-Cookie session，必须抓取 */
             final String sc = extractCookies(resp.headers("Set-Cookie"));
-            authLog(http >= 200 && http < 300 ? "info" : "err", "授权交换响应",
-                    "HTTP " + http + "；body=" + body.length() + "B；setCookie=" + !sc.isEmpty());
+            boolean ok2xx = http >= 200 && http < 300;
+            /* v0.6.6 诊断：交换失败（非 2xx）的响应体是站点业务错误 JSON，不含 code/token/cookie，
+             * 记全文（截断 240B）便于定位 409/500 真因；2xx 成功体可能含 token，只记结构不记全文。 */
+            String diag;
+            if (ok2xx) {
+                diag = "HTTP " + http + "；body=" + body.length() + "B；setCookie=" + !sc.isEmpty();
+            } else {
+                String safeBody = body.length() > 240 ? body.substring(0, 240) : body;
+                diag = "HTTP " + http + "；body=" + body.length() + "B；resp=" + safeBody;
+            }
+            authLog(ok2xx ? "info" : "err", "授权交换响应", diag);
             if (body.trim().isEmpty()) err = "站点返回空响应（HTTP " + http + "）";
             else {
                 final String fb = body;
@@ -423,8 +456,13 @@ public class AuthActivity extends Activity {
                 showLoadError("授权响应缺少会话凭据（data keys: " + kb + "…）");
             }
             String msg = r.optString("message", "交换失败");
+            String code = r.optString("code", "");
+            /* v0.6.6：站点交换失败时 message 常为笼统 "Conflict"，真正原因在 code 字段。
+             * 已实测 justwoker 返回 AUTH_SESSION_LIMIT（该账号活跃会话数超上限）。
+             * 按 code 给出可操作中文提示，而非笼统术语。 */
+            String friendly = mapExchangeError(code, msg);
             exchanging = false;
-            showLoadError("授权失败: " + msg);
+            showLoadError(friendly);
         } catch (Exception e) {
             exchanging = false;
             showLoadError("授权响应解析失败");
