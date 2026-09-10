@@ -497,7 +497,10 @@ public class Engine {
         if (selfHttp == 200) {
             JSONObject cs = null;
             try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
-            if (cs == null) {
+            if ((cs == null || !cs.optBoolean("checked", false)) && "login".equals(siteKind(site))) {
+                /* 登录即得站以今日系统奖励记录为最终判据。部分站点的 checkin 接口会返回
+                 * checked=false，但同一账号今日奖励日志已存在；奖励既然已到账，就不允许 UI
+                 * 再显示“待签”。只在 login 型站补探测，避免普通签到站误把其他奖励当签到。 */
                 JSONObject probe = null;
                 try { probe = todayBonus(key); } catch (Exception ignored) {}
                 if (probe != null) cs = new JSONObject().put("checked", true)
