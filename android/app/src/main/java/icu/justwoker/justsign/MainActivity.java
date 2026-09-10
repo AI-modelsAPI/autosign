@@ -68,11 +68,17 @@ public class MainActivity extends Activity {
     private volatile boolean bulkBusy = false;  // 全局动作互斥
     private volatile boolean singleBusy = false;
 
+    @Override protected void onDestroy() {
+        UpdateChecker.setListener(null);
+        super.onDestroy();
+    }
+
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         Ui.initIcons(this);
         engine = new Engine(this);
         Engine.schedule(this);
+        UpdateChecker.auto(this);
         /* v0.4.5（审计C）：前台补跑兜底——ColorOS 杀后台导致 WorkManager 没跑时，
          * 打开 App 即检查：已过设定时间且今日未跑 → 立即补跑。零权限。 */
         try {
@@ -126,7 +132,7 @@ public class MainActivity extends Activity {
         showPage(0);
     }
 
-    @Override protected void onResume() { super.onResume(); render(); }
+    @Override protected void onResume() { super.onResume(); UpdateChecker.resumeInstall(this); render(); }
 
     @Override public void onBackPressed() {
         if (LogPopup.isShowing()) { LogPopup.dismissIfShowing(); return; }

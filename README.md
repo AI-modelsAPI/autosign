@@ -1,140 +1,81 @@
-# AutoSign — 公益 AI 中转站自动签到
+# AutoSign
 
-安卓端每日自动签到 + 额度看板，多站点 × 多 GitHub 账号。
-凭据本地加密存储，签到走站点官方接口，不伪造任何验证。
+AutoSign 是面向公益 AI 中转站的 Android 自动签到与额度管理工具，支持多站点、多 GitHub 账号、后台定时签到、额度看板和脱敏日志。
 
-- **额度走接口读取**（`Bearer access_token`），不解析 UI。
-- **登录态由内嵌 WebView 完成 GitHub OAuth**，授权一次后全程后台。
-- 定时调度（每天 / 工作日 / 自定义间隔）+ SOCKS5 代理 + 操作日志浮窗。
+> 当前基准版本：**1.0.0**。本仓库现阶段只维护 Android 端；macOS 与浏览器扩展后续将按 Android 1.0.0 的功能、认证生命周期和数据模型重新实现。
 
-> 项目名为 **AutoSign**（仓库名 `justsign`，包名 `icu.justwoker.justsign`）。
+## 功能
+- 多站点、多账号独立管理，站点卡片可拖拽或用上下按钮排序。
+- 每日、工作日或自定义间隔后台签到。
+- 展示可用余额、累计消耗、今日消耗和今日签到奖励。
+- GitHub OAuth 首次授权和必要时的可见授权；普通刷新、签到及短期 Token 续期不重新 OAuth。
+- New API Refresh Cookie 续期、轮换 Cookie 与 Token 原子保存、同账号并发续期合并。
+- 密码与 TOTP 通过 Android Keystore AES-256-GCM 加密，Keystore 不可用时拒绝明文降级。
+- SOCKS5 代理、API Key 管理、邀请额度自动划转和 `auth-v2` 脱敏日志。
+- 统一圆角弹窗、列表化资产总览、品牌图标和站点顺序联动。
 
-## 下载
+## 内置站点
+| 站点 | 类型 | 邀请链接 |
+|---|---|---|
+| AgentRouter | 登录即得 | [注册](https://agentrouter.org/register?aff=nc7C) |
+| JustDoWork | New API | [注册](https://api.justwoker.icu/sign-up?aff=wFQu) |
+| GoRouter | 登录型 | [注册](https://gorouter.app/sign-up?aff=Dr35) |
+| SeekAI | New API | [注册](https://seekai.cc/sign-up?aff=sxto) |
+| KKtoken AI | New API | [注册](https://kktoken.cc/sign-up?aff=BpDr) |
 
-[Releases](../../releases) 里的 `justsign-vX.Y.Z.apk`，或 Actions 构建产物。
-v0.2.1 起使用仓库内固定签名，可直接覆盖安装；**从 v0.2.0 及更早版本升级需要先卸载**
-（可先用 `tools/migrate_prefs.py` 备份并迁移配置）。
+内置邀请链接是站主推广链接，固定随应用分发；自定义站点链接由用户配置。站点接口、奖励和可用性由各站点运营方决定，AutoSign 不作保证。
 
-QQ 交流群：**1060200469**（使用问题、站点适配反馈、版本更新通知）
+## 下载与更新
+从 [GitHub Releases](../../releases/latest) 下载正式 APK。应用每天后台检查一次公开 Release：没有新版本时不显示下载按钮；发现更高版本后，设置页显示“发现新版本”按钮。用户点击后，应用自动下载名称严格匹配的官方 APK，校验 HTTPS 来源、文件大小、包名、版本号与签名，再交给 Android 系统安装器。首次使用需允许 AutoSign“安装未知应用”，最终安装仍由用户在系统界面确认。
 
-## 内置站点（四个实测站）
-| 站点 | 注册奖励 | 每日签到 | 可用模型 |
-| :--- | :--- | :--- | :--- |
-| [AgentRouter](https://agentrouter.org/register?aff=nc7C) | $175 | $25 | GPT5.6SoL / Claude Opus 4.8 / Claude Opus 5 |
-| [JustDoWork](https://api.justwoker.icu/sign-up?aff=wFQu) | $90 | $20 | Claude Opus 4.8 / Claude Opus 5 |
-| [GoRouter](https://gorouter.app/sign-up?aff=Dr35) | $70 | $10 | Claude Opus 4.8 / Claude Opus 5 |
-| [KKtoken AI](https://kktoken.cc/sign-up?aff=BpDr) | $75 | $25 | Claude Opus 4.8 / Claude Opus 5 |
+QQ 交流群：**1060200469**。
 
-卡片左上角站点名点击即跳转注册页（带邀请码，注册双方得额度）。
+## 授权生命周期
+AutoSign 区分 GitHub 登录会话、站点长期会话、短期 Access Token 和 API Key：
 
-## 三种站点形态
-| 形态 | 判据 | App 行为 |
-| :--- | :--- | :--- |
-| `newapi` | 有 `GET/POST /api/user/checkin` | 全自动签到，可拿到确切奖励金额 |
-| `login` | 登录即发额度（无签到接口） | 刷新即取奖励并置已签，不显示签到按钮 |
-| `web` | 非 New API 或接口被拦截 | 点「去网页」打开站点，人工处理 |
+1. 首次授权或用户明确重新授权时才运行 GitHub OAuth。
+2. 点击重新授权时先调用 `/api/user/self` 预检：凭据有效则提示无需授权；明确 401 才进入授权；网络异常不创建新会话。
+3. New API 站点短期 Token 到期后，通过已有 Refresh Cookie 调用 `/api/user/auth/refresh`，不创建新 OAuth 会话。
+4. Cookie 会话型站点直接复用现有会话。
+5. 刷新、签到、定时任务、API Key 管理和邀请额度划转不得隐式进入 OAuth。
 
-站点管理页里三种形态可手动切换，内置站与自定义站完全平权（都能增删改）。
+只有首次登录、GitHub 会话失效、身份不符、需要 2FA/设备验证，或站点长期会话明确失效时，才可能打开可见授权页。
 
-## 版本演进（v0.5.x / v0.4.x·关键能力）
-- **v0.5.2** R8 混淆分发（483KB）；添加站点补写 affUrl（全新安装用户站名跳转曾丢失邀请码）；设置页新增 QQ 交流群入口
-- **v0.5.1** OAuth 回调不再限定 `/oauth/*`：按站点同域 + code + 本轮 state 严格拦截，兼容根路径/API 路径/hash 路由；授权关键阶段写脱敏日志，缺授权码会明确报错
-- **v0.5.0** 2FA 动态码定时重注入、cookie 型站授权状态修复、仅保留四个内置站及数据迁移清理
-- **v0.4.7** 删除账号时同步清除该账号的 WebView 会话分区（不留孤儿数据；重新添加走全新授权，凭据库自动填充）
-- **v0.4.6** 定时签到完成后自动刷新三额度（与手动签到行为对齐）
-- **v0.4.5** 奖励显示根因修复（日志接口倒序返回，取最新签到记录而非最旧）；浏览器预填密码时 Sign in 仍自动点击；定时任务改 KEEP 策略 + 前台补跑兜底
-- **v0.4.3/0.4.4** WAF 假 200 拦截防御（识别拦截页、不清空额度、提示换代理节点）；奖励检测失败显式写日志；httpHint 全部通俗化
-- **v0.3.x** 多 Profile 会话隔离（站点×账号独立分区，单次授权后全自动交换凭据）；站点用户 ID 强锚点防串号
-## 签到判定与凭据
+## 签到与人机验证
+AutoSign 优先使用站点公开业务接口，不解析额度页面、不伪造验证结果。需要 Turnstile 等验证时只使用正常 WebView/浏览器环境：无感验证可正常通过；要求交互时必须由用户完成，不绕过、破解或代答验证码。
 
-**凭据不做续期，直接后台换新。** 站点续期接口 `/api/user/auth/refresh` 依赖 httpOnly 会话
-Cookie，实测在 App 侧无法稳定维持（只带 `X-Auth-Session` + `Bearer` 一律 401）。
-v0.2.3 起彻底删掉这条路，改为：**凡是需要 token 的操作，先确保凭据可用再执行**。
+刷新和签到始终后台执行，失败只提示原因并刷新额度核对，不弹站点页面；授权流程允许打开可见页面。
 
-判定与交换在 `SilentAuth` 里完成，全程离屏 WebView、零弹窗：
+## 隐私与安全
+- 凭据只保存在用户设备中，不上传至维护者服务器。
+- 密码和 TOTP 使用 Android Keystore 加密；卸载后密钥销毁，加密数据无法恢复。
+- 日志不记录 OAuth code、state、Token、Cookie、密码或 TOTP 原值。
+- OAuth 回调必须满足站点同域、携带 code 且 state 与本轮严格一致。
+- 不提供批量注册、验证码绕过、账号共享或未授权访问功能。
 
-1. 解析 JWT `exp`，剩余不足 1 分钟（或本地没有 token）就先换新的，不等 401
-2. 请求真拿到 401（服务端提前作废）再换一次并重试
-3. 换新 = 复用 WebView 里已有的 GitHub 登录态跑一次 OAuth，秒级完成
-4. 只有 GitHub 自身要求登录 / 2FA / 设备验证时，才拉起可见授权页
-
-三重防风暴（一次刷新要打 4 个鉴权接口，不能各换一次）：
-
-| 保护 | 作用 |
-| :--- | :--- |
-| 同账号串行 + 单轮 token 缓存 | 一轮刷新只交换 1 次 |
-| 成功后 8 秒内复用 | 连点刷新不重复交换 |
-| 失败后 90 秒冷却 | GitHub 会话真失效时不反复打站点（手动点授权可立即重试） |
-
-**签到状态**：先查只读接口 `GET /api/user/checkin?month=YYYY-MM`（不需要人机验证），
-`stats.checked_in_today` 或当月 `records` 里有今天的记录 ⇒ 判定已签。
-只有确认未签才 `POST` 签到，只有 POST 真被拦时才挂 Turnstile
-（`appearance:interaction-only`，无需交互时静默通过）。
-
-**签到后自动刷额度**：单账号签完立即刷该账号，批量签完统一串行刷一遍 —— 可用余额、
-累计已用、今日消耗、签到奖励一次到位，不用再手点刷新。
-
-奖励分三态，服务端给什么就显示什么，不猜：
-
-- 有今日记录且 `quota_awarded > 0` → 显示 `+$28.07 今日签到`
-- 有今日记录但 `quota_awarded == 0` → 显示「本站无签到奖励」
-- 查不到记录（只能确认已签）→ 只显示「已签」，不显示金额
-
-## 凭据与自动填充
-
-凭据库存「站点账号 / 密码 / GitHub 用户名 / TOTP 密钥」，密码与 TOTP 经
-Android Keystore（AES-256-GCM）加密后落盘；Keystore 不可用时拒绝保存，绝不退回明文。
-
-授权页出现账号密码框时自动填充并可自动点登录（等价于密码管理器 + 用户点一下）：
-
-- 页面存在未通过的人机验证挂件时**只填不点**，交给真实浏览器环境或用户完成
-- 配了 TOTP 的账号，若 GitHub 2FA 页默认走「GitHub Mobile 推送」，
-  会点页面上原有的「Use authenticator app」切到验证器输入框再填 6 位码
-- 没配 TOTP 的账号完全跳过全部 2FA 逻辑
-
-自动提交可在「设置 → 界面与日志 → 授权时自动点登录」关闭。
-
-## 构建
-
-CI（推 `v*` 标签触发）产出 debug APK，或本地：
+## 本地构建
+要求 JDK 17、Gradle 8.7 和 Android SDK 34：
 
 ```bash
 cd android
-gradle assembleDebug            # 需要 JDK17 + Gradle 8.7 + Android SDK 34
+gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon
 ```
 
-arm64 Linux（如手机上的 proot Ubuntu）需要覆盖 aapt2，
-因为 Gradle 从 Maven 拉的是 x86-64 二进制：
+ARM64 Linux/proot 使用本机 AAPT2：
 
 ```bash
-gradle -Pandroid.aapt2FromMavenOverride=/usr/bin/aapt2 assembleDebug
+gradle -Pandroid.aapt2FromMavenOverride=/usr/bin/aapt2 \
+  testDebugUnitTest assembleDebug assembleRelease --no-daemon
 ```
 
-### 校验脚本（tools/）
+目录：`android/` 为应用源码，`tools/` 为辅助测试脚本，`.github/workflows/android-apk.yml` 为 Android CI。
 
-| 脚本 | 用途 |
-| :--- | :--- |
-| `extract_js.py` | 把 Java 里拼接的 JS 模板抽成 `.js`，配合 `node --check` 查语法 |
-| `test_authfill.mjs` | AuthFillJs 行为自测（最小 DOM 桩，覆盖自动提交 / 人机验证 / 2FA 切换） |
-| `test_silentauth.mjs` | 凭据交换防风暴自测（串行、8s 复用、90s 冷却、JWT exp 判定） |
-| `make_icon.py` | 生成应用图标（纯 Python 光栅化，无需 PIL） |
-| `migrate_prefs.py` | 换签名重装时迁移配置，自动清空已失效的加密字段 |
+## 使用边界与免责声明
+使用者必须遵守所在地法律、GitHub 条款及各站点服务条款，只操作本人所有或已获明确授权的账号。站点可能随时调整接口、风控、奖励或封禁政策；因使用本软件产生的账号限制、额度变化、数据丢失或其他损失由使用者自行承担。
 
-```bash
-python3 tools/extract_js.py android/app/src/main/java/icu/justwoker/justsign/AuthFillJs.java /tmp/f.js
-node --check /tmp/f.js && node tools/test_authfill.mjs /tmp/f.js
-node tools/test_silentauth.mjs
-```
+本项目与 GitHub、Cloudflare 及各内置站点无隶属、代理或担保关系。
 
-## 目录
+## 开源许可证
+本项目采用 **GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）**，完整且具有法律效力的条款见 [LICENSE](LICENSE)。分发、修改及通过网络提供修改版本时，请履行 AGPL-3.0-or-later 要求的版权声明、许可证和对应源代码义务。
 
-- `android/` 安卓端（纯 Java 构建 View，无 XML 布局/无 Compose/无第三方 UI 库）
-- `src/` Node 引擎（跨平台通用，桌面端复用）
-- `electron/` macOS 桌面端
-- `tools/` 构建与校验脚本
-- `data/` 站点清单快照
-
-## 声明
-
-本项目只做「把用户自己的账号按站点提供的接口签到」这件事：不绕过人机验证、
-不伪造凭据、不做批量注册。人机验证由真实浏览器环境完成，验证不通过就报失败。
+`AutoSign` 名称、图标和内置邀请关系不因软件许可证而构成官方背书；衍生版本应清楚标明修改者，避免被误认为本项目官方发行版。许可证也不改变使用者遵守法律及第三方服务条款的责任。

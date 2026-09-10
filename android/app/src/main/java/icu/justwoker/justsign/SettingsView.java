@@ -118,6 +118,7 @@ public class SettingsView extends FrameLayout {
     }
 
     public void refresh() {
+        UpdateChecker.setListener(() -> post(this::refresh));
         if (page == PAGE_ROOT) buildRoot();
         else if (page == PAGE_SITES) buildSites();
         else buildCreds();
@@ -198,21 +199,20 @@ public class SettingsView extends FrameLayout {
             ver = "v" + pi.versionName + " (build " + pi.versionCode + ")";
         } catch (Exception ignored) {}
         g4.addView(item("info", "版本", null, ver, null));
+        if (UpdateChecker.hasUpdate()) {
+            g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
+            g4.addView(item("download", UpdateChecker.updateLabel(),
+                    "点击自动下载，安全校验后打开系统安装器",
+                    null, v -> UpdateChecker.download(act)));
+        }
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
-        g4.addView(item("download", "检查新版本",
-                "打开官方下载页；私有仓库需先登录 GitHub",
-                null, v -> {
-                    try {
-                        act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse("https://github.com/AI-modelsAPI/autosign/releases/latest")));
-                    } catch (Exception e) {
-                        act.toast("无法打开下载页，请检查是否安装了浏览器");
-                    }
-                }));
+        g4.addView(item("refresh", "检查新版本",
+                "无新版本时不会显示下载按钮",
+                null, v -> UpdateChecker.manual(act)));
         g4.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
         /* 开源主页入口暂时隐藏（未开源阶段），开源后恢复：
            item("pkg", ...) → ACTION_VIEW 仓库地址。 */
-        g4.addView(item("chat", "QQ 交流群", "1060200469", null, v -> {
+        g4.addView(item("penguin", "QQ 交流群", "1060200469", null, v -> {
             /* QQ 9.x 实测：mqqopensdkapi://biz/qr/add 已失效（只拉起 Splash 无反应），
              * mqq://card/show_pslcard?card_type=group 可打开群资料页直接加群。 */
             try {

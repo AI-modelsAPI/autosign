@@ -399,6 +399,38 @@ p.lineTo(10.8f * s, 15.6f * s);
                 break;
             }
             /* v0.6.0：礼物盒（邀请额度划转开关）——扁平单色：盒身+盖+两个蝴蝶结圆点 */
+            case "download": {
+                /* 版本更新：向下箭头落入托盘。 */
+                cv.drawLine(12f * s, 3.5f * s, 12f * s, 14.5f * s, st);
+                Path arrow = new Path();
+                arrow.moveTo(7.5f * s, 10.5f * s);
+                arrow.lineTo(12f * s, 15f * s);
+                arrow.lineTo(16.5f * s, 10.5f * s);
+                cv.drawPath(arrow, st);
+                Path tray = new Path();
+                tray.moveTo(4.5f * s, 16f * s);
+                tray.lineTo(4.5f * s, 20f * s);
+                tray.lineTo(19.5f * s, 20f * s);
+                tray.lineTo(19.5f * s, 16f * s);
+                cv.drawPath(tray, st);
+                break;
+            }
+            case "penguin": {
+                /* QQ 企鹅：单色扁平轮廓，避免 emoji 在不同 ROM 上变成多彩图标。 */
+                cv.drawOval(r(s, 6.2f, 3.2f, 17.8f, 20.2f), st);
+                cv.drawOval(r(s, 8.2f, 7.2f, 15.8f, 18.5f), st);
+                cv.drawCircle(9.5f * s, 8.2f * s, 0.8f * s, fl);
+                cv.drawCircle(14.5f * s, 8.2f * s, 0.8f * s, fl);
+                Path beak = new Path();
+                beak.moveTo(10.2f * s, 10.3f * s);
+                beak.lineTo(13.8f * s, 10.3f * s);
+                beak.lineTo(12f * s, 12.2f * s);
+                beak.close();
+                cv.drawPath(beak, fl);
+                cv.drawLine(7.4f * s, 19f * s, 4.8f * s, 21f * s, st);
+                cv.drawLine(16.6f * s, 19f * s, 19.2f * s, 21f * s, st);
+                break;
+            }
             case "gift": {
                 cv.drawRect(r(s, 4f, 9f, 20f, 19f), fl);
                 cv.drawRect(r(s, 3f, 6f, 21f, 9f), fl);
