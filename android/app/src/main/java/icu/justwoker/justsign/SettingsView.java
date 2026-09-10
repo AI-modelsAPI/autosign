@@ -883,14 +883,18 @@ public class SettingsView extends FrameLayout {
     /** 条目：图标+标题+副标题 | 右侧值文本或箭头 */
     private LinearLayout item(String iconName, String title, String sub, String value, OnClickListener onClick) {
         LinearLayout row = Ui.row(act);
+        row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 12));
+        android.widget.ImageView lead = Ui.icon(act, iconName, 18, Ui.TXT2);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 18), Ui.dp(act, 18));
+        ilp.rightMargin = Ui.dp(act, 10);
+        row.addView(lead, ilp);
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.iconText(act, iconName, title, 14, Ui.TXT2, false));
+        left.addView(Ui.tv(act, title, 14, Ui.TXT2, false));
         if (sub != null && !sub.isEmpty()) {
             TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
-            slp.leftMargin = Ui.dp(act, 22);
             left.addView(s, slp);
         }
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));
