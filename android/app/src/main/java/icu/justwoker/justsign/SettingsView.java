@@ -204,7 +204,7 @@ public class SettingsView extends FrameLayout {
                 null, v -> {
                     try {
                         act.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse("https://github.com/AI-modelsAPI/justsign/releases/latest")));
+                                android.net.Uri.parse("https://github.com/AI-modelsAPI/autosign/releases/latest")));
                     } catch (Exception e) {
                         act.toast("无法打开下载页，请检查是否安装了浏览器");
                     }
