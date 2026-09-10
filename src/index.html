@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>公益AI中转站 · 自动签到台</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1220;color:#e6e8f0;display:flex;height:100vh;overflow:hidden}
+#app{display:flex;width:100%}
+/* 侧栏 */
+.side{width:180px;background:#161a2e;padding:18px 10px;display:flex;flex-direction:column;gap:6px;border-right:1px solid #252a45}
+.side .logo{font-size:16px;font-weight:700;color:#8ab4ff;margin:0 8px 14px}
+.tab{padding:9px 12px;border-radius:10px;cursor:pointer;font-size:13px;color:#9aa3bf;display:flex;gap:8px;align-items:center}
+.tab.on{background:#1f2550;color:#fff}
+.tab:hover{color:#fff}
+/* 主区 */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.top{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;border-bottom:1px solid #252a45}
+.top h2{font-size:17px}
+.badge{font-size:12px;background:#1f2550;padding:4px 10px;border-radius:10px;color:#8ab4ff}
+.body{flex:1;padding:20px 24px;overflow-y:auto}
+/* 卡片 */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-bottom:18px}
+.card{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
+.card .lbl{font-size:12px;color:#8a90b8}
+.card .val{font-size:22px;font-weight:700;margin-top:4px}
+.ok{color:#6bdf85}.warn{color:#ffc857}.err{color:#ff7a7a}
+/* 矩阵 */
+.matrix{background:#161a2e;border:1px solid #252a45;border-radius:12px;padding:14px}
+.matrix h3{font-size:14px;color:#8a90b8;margin-bottom:10px;font-weight:600}
+.row{display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid #202445;font-size:13px}
+.row:last-child{border:none}
+.chip{padding:3px 8px;border-radius:6px;font-size:11px}
+.chip.a{background:#1f3a1f;color:#6bdf85}.chip.b{background:#3a2f1f;color:#ffc857}.chip.c{background:#3a1f1f;color:#ff7a7a}
+.btn{padding:6px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;background:#2a3168;color:#fff}
+.btn:hover{background:#3a4388}
+.btn.sm{padding:4px 9px;font-size:11px}
+textarea,input,select{background:#0f1220;border:1px solid #252a45;color:#e6e8f0;padding:7px 10px;border-radius:8px;font-size:13px;width:100%}
+form .f{margin-bottom:10px}
+form label{display:block;font-size:12px;color:#8a90b8;margin-bottom:4px}
+.log{font-family:"SF Mono",Menlo,monospace;font-size:11.5px;background:#0c0e1a;border:1px solid #252a45;border-radius:10px;padding:12px;max-height:400px;overflow-y:auto;line-height:1.6}
+.log .t{color:#8a90b8}.log .e{color:#8ab4ff}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="side">
+    <div class="logo">🎓 justsign</div>
+    <div class="tab on" data-tab="home">📊 首页总览</div>
+    <div class="tab" data-tab="accounts">👤 账号</div>
+    <div class="tab" data-tab="sites">🌐 站点</div>
+    <div class="tab" data-tab="logs">📝 日志 & 设置</div>
+    <div class="tab" data-tab="settings">⚙️ 引擎设置</div>
+  </div>
+  <div class="main">
+    <div class="top"><h2 id="title">首页总览</h2>
+      <div><span class="badge" id="proxyBadge">代理: 检测中</span> <span class="badge" id="schBadge">调度: 关</span></div>
+    </div>
+
+    <!-- HOME -->
+    <div class="body" id="tab-home">
+      <div class="grid">
+        <div class="card"><div class="lbl">账号总数</div><div class="val" id="sumAc">-</div></div>
+        <div class="card"><div class="lbl">站点总数</div><div class="val" id="sumSite">-</div></div>
+        <div class="card"><div class="lbl">已登录</div><div class="val ok" id="sumLogin">-</div></div>
+      </div>
+      <div class="grid" id="quotaGrid"></div>
+      <div class="matrix">
+        <h3>账号 × 站点 登录状态矩阵</h3>
+        <div id="matrix"></div>
+      </div>
+    </div>
+
+    <!-- ACCOUNTS -->
+    <div class="body hidden" id="tab-accounts">
+        <div class="matrix">
+        <h3>添加账号（GitHub 账号 + 站点）</h3>
+        <div id="authPanel" style="display:none;margin-bottom:12px;padding:10px;background:#1f2550;border-radius:10px;font-size:13px">
+          <span id="authEnv"></span> 检测到内置授权桥：
+          <button class="btn" id="btnAuth" style="margin-left:6px">🔑 一键 GitHub 授权</button>
+          <span class="lbl" style="margin-left:8px">弹真实浏览器窗口，登录过 GitHub 会自动完成，token 自动落盘</span>
+        </div>
+        <form id="addForm">
+          <div class="f"><label>账号别名</label><input id="aKey" placeholder="gh1"></div>
+          <div class="f"><label>GitHub 账号名</label><input id="aGh" placeholder="AI模型API"></div>
+          <div class="f"><label>绑定站点</label><select id="aSite"></select></div>
+          <div class="f"><label>access_token（用真实浏览器授权一次后粘贴）</label><input id="aToken" placeholder="Bearer 后的 access_token"></div>
+          <button class="btn" type="submit">保存账号</button>
+        </form>
+      </div>
+      <div class="matrix"><h3>已存账号</h3><div id="acList"></div></div>
+    </div>
+
+    <!-- SITES -->
+    <div class="body hidden" id="tab-sites">
+      <div class="grid" id="siteGrid"></div>
+    </div>
+
+    <!-- LOGS -->
+    <div class="body hidden" id="tab-logs">
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <select id="logAc" style="width:160px"><option value="">— 选择账号 —</option></select>
+        <button class="btn" id="btnLogs">查看使用日志(系统)</button>
+        <button class="btn" id="btnHist">查看本地运行日志</button>
+      </div>
+      <div class="log" id="logBox">暂无日志。先添加账号并粘贴 access_token。</div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="body hidden" id="tab-settings">
+      <div class="matrix">
+        <h3>引擎设置</h3>
+        <form id="setForm">
+          <div class="f"><label>SOCKS5 代理 主机</label><input id="sHost"></div>
+          <div class="f"><label>SOCKS5 代理 端口</label><input id="sPort"></div>
+          <div class="f"><label>定时签到 cron</label><input id="sCron" placeholder="0 3 * * *"></div>
+          <button class="btn" type="submit">保存</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const BASE = '/api';
+const $ = s => document.querySelector(s);
+let CFG = null, TKS = [];
+
+async function api(p, opt) {
+  const r = await fetch(BASE + p, opt);
+  return r.json();
+}
+
+async function refresh() {
+  CFG = await api('/config');
+  TKS = (await api('/accounts')).tokens || [];
+  const cfg = CFG.cfg;
+  $('#proxyBadge').textContent = '代理: ' + (cfg.proxy.enabled ? `${cfg.proxy.type}://${cfg.proxy.host}:${cfg.proxy.port}` : '关');
+  $('#schBadge').textContent = '调度: ' + (cfg.schedule.enabled ? '开 ' + cfg.schedule.cron : '关');
+  $('#sumAc').textContent = TKS.length;
+  $('#sumSite').textContent = cfg.sites.length;
+  $('#sumLogin').textContent = TKS.filter(t => t.token).length;
+
+  // 站点下拉
+  $('#aSite').innerHTML = cfg.sites.map(s => `<option value="${s.key}">${s.name} (${s.checkinType})</option>`).join('');
+  $('#logAc').innerHTML = '<option value="">— 选择账号 —</option>' + TKS.map(t => `<option value="${t.key}">${t.key} @ ${t.siteKey} (${t.githubAccount})</option>`).join('');
+  // 站点卡片
+  $('#siteGrid').innerHTML = cfg.sites.map(s => {
+    const mode = s.checkinType === 'login' ? '登录即签到' : (s.checkinType === 'none' ? '签到关闭' : '需单独签到');
+    return `<div class="card"><div class="lbl">${s.name}</div><div class="val" style="font-size:15px">${mode}</div><div class="lbl">${s.baseUrl}</div></div>`;
+  }).join('');
+  // 矩阵 + 额度
+  const rows = []; const quota = [];
+  for (const t of TKS) {
+    const site = cfg.sites.find(s => s.key === t.siteKey);
+    const login = !!t.token;
+    rows.push(`<div class="row"><span>${t.key}</span><span class="lbl" style="flex:1">${site?.name||t.siteKey} · ${t.githubAccount||'-'}</span>
+      <span class="chip ${login?'a':'c'}">${login?'已登录':'未授权'}</span>
+      <button class="btn sm" data-a="${t.key}">查看额度</button>
+      <button class="btn sm" data-l="${t.key}">查看日志</button></div>`);
+    quota.push(`<div class="card" data-a="${t.key}"><div class="lbl">${t.key} · ${site?.name||''}</div><div class="lbl">可用额度</div><div class="val" id="q_${t.key}_rem">-</div><div class="lbl">已用额度</div><div class="val warn" id="q_${t.key}_used">-</div><div class="lbl">签到奖励</div><div class="val ok" id="q_${t.key}_bonus">-</div></div>`);
+  }
+  $('#matrix').innerHTML = rows.join('') || '<div class="row">还没有账号</div>';
+  $('#quotaGrid').innerHTML = quota.join('');
+  // 事件
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => fetchStatus(b.dataset.a));
+  document.querySelectorAll('[data-l]').forEach(b => b.onclick = () => showLogs(b.dataset.l, '系统'));
+  // 设置表单
+  $('#sHost').value = cfg.proxy.host; $('#sPort').value = cfg.proxy.port; $('#sCron').value = cfg.schedule.cron;
+}
+
+async function fetchStatus(key) {
+  const r = await api('/status/' + key);
+  if (!r.ok) { toast('接口失败: ' + (r.error || '')); return; }
+  const el1 = $('#q_' + key + '_rem'), el2 = $('#q_' + key + '_used'), el3 = $('#q_' + key + '_bonus');
+  if (!r.authorized) {
+    if (el1) el1.textContent = '未授权';
+    if (el2) el2.textContent = '-';
+    if (el3) el3.textContent = '-';
+    toast('账号 ' + key + ' 未授权（http ' + r.http + '）。请先完成 GitHub 授权获取 token。');
+    return;
+  }
+  if (el1) el1.textContent = '$' + r.availableUSD;
+  if (el2) el2.textContent = '$' + r.usedUSD;
+  if (el3) el3.textContent = r.todayUsed != null ? '今日 $' + r.todayUsed : '-';
+  toast('✔ ' + key + (r.user ? ' @ ' + r.user : '') + '：可用 $' + r.availableUSD + ' / 已用 $' + r.usedUSD);
+}
+
+async function showLogs(key, cat) {
+  const r = await api('/logs/' + key + '?category=' + cat + '&limit=50');
+  const box = $('#logBox');
+  if (!r.ok) { box.innerHTML = '失败: ' + (r.error || ''); return; }
+  if (r.http === 401) { box.innerHTML = '未授权：请先完成 GitHub 授权获取 access_token'; return; }
+  const rows = r.rows || [];
+  let html = rows.map(x => `<div><span class="t">[${x.time || ''}]</span> <span class="e">[${x.category}]</span> ${esc(x.text || '')}${x.quota ? ' <b>+$' + (x.quota / 500000).toFixed(4) + '</b>' : ''}</div>`).join('');
+  if (r.lastBonus) html = `<div style="color:#6bdf85">🎁 最近签到奖励：[${r.lastBonus.time}] ${esc(r.lastBonus.text || '')}</div><hr style="border:none;border-top:1px solid #252a45;margin:8px 0">` + html;
+  box.innerHTML = html || '无记录';
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function toast(m){const d=document.createElement('div');d.textContent=m;d.style.cssText='position:fixed;top:18px;right:18px;background:#1f2550;border:1px solid #252a45;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px;z-index:999';document.body.appendChild(d);setTimeout(()=>d.remove(),4000)}
+
+$('#addForm').onsubmit = async e => {
+  e.preventDefault();
+  const t = { key: $('#aKey').value.trim(), siteKey: $('#aSite').value, githubAccount: $('#aGh').value.trim(), token: $('#aToken').value.trim() };
+  await api('/accounts/save', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(t) });
+  toast('已保存'); refresh();
+};
+$('#setForm').onsubmit = async e => {
+  e.preventDefault();
+  const cfg = { ...CFG.cfg, proxy:{...CFG.cfg.proxy, host:$('#sHost').value, port:$('#sPort').value}, schedule:{...CFG.cfg.schedule, cron:$('#sCron').value} };
+  await api('/config', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(cfg) });
+  toast('已保存，引擎需重启生效'); refresh();
+};
+$('#btnLogs').onclick = () => { const k=$('#logAc').value; if(!k) toast('先选账号'); else showLogs(k, '系统'); };
+$('#btnHist').onclick = async () => { const r=await api('/history'); $('#logBox').innerHTML = (r.data||[]).map(x=>`<div><span class="t">[${x.time}]</span> <span class="e">[${x.site||'-'}]${x.account||''} ${x.event||''}</span> ${(x.detail?JSON.stringify(x.detail):'')}`).join(''); };
+// 授权桥检测（App 内: justsignAndroid / Electron 内: electronAPI；纯浏览器隐藏）
+if (window.justsignAndroid) {
+  $('#authPanel').style.display = 'block';
+  $('#authEnv').textContent = '🤖 安卓 App';
+  $('#btnAuth').onclick = () => {
+    const k = $('#aKey').value.trim(), s = $('#aSite').value;
+    if (!k) { toast('先填账号别名（如 gh1）'); return; }
+    toast('已拉起授权窗口…');
+    window.justsignAndroid.authStart(s, k);
+  };
+  setInterval(() => { // 轮询授权结果，成功即刷新
+    try {
+      const r = JSON.parse(window.justsignAndroid.authResult());
+      if (r.ts && r.ts > (window.__lastAuthTs || 0)) {
+        window.__lastAuthTs = r.ts;
+        if (r.ok) { toast('✅ 授权成功：' + (r.user || k)); refresh(); }
+        else if (r.error) toast('授权未完成: ' + r.error);
+      }
+    } catch (_) {}
+  }, 1500);
+} else if (window.electronAPI) {
+  $('#authPanel').style.display = 'block';
+  $('#authEnv').textContent = '🖥️ 桌面端';
+  $('#btnAuth').onclick = async () => {
+    const k = $('#aKey').value.trim(), s = $('#aSite').value;
+    if (!k) { toast('先填账号别名（如 gh1）'); return; }
+    toast('已拉起授权窗口…');
+    const r = await window.electronAPI.authStart(s, k);
+    if (r?.ok) { toast('✅ 授权成功：' + (r.user || k)); refresh(); }
+    else toast('授权未完成: ' + (r?.error || ''));
+  };
+}
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
+  t.classList.add('on');
+  document.querySelectorAll('[id^="tab-"]').forEach(b=>b.classList.add('hidden'));
+  const n = 'tab-'+t.dataset.tab; $('#'+n).classList.remove('hidden');
+  const map = {home:'首页总览',accounts:'账号',sites:'站点',logs:'日志 & 设置',settings:'引擎设置'};
+  $('#title').textContent = map[t.dataset.tab];
+});
+refresh().catch(e=>{ $('#logBox').innerHTML = '加载失败: '+e.message });
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标（API 26+）：纯品牌蓝底 + 白色对勾前景，扁平无渐变。
+     前景/背景 PNG 由 tools/make_icon.py 程序化生成（108dp 网格，勾落在中央安全区内）。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/ic_launcher_bg" />
+    <foreground android:drawable="@mipmap/ic_launcher_fg" />
+</adaptive-icon>

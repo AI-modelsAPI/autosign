@@ -1,0 +1,36 @@
+{
+  "name": "autosign-desktop",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "description": "公益AI中转站自动签到 — 桌面端（真实窗口授权 + 纯接口后台调度）",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac --x64",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "node-cron": "^3.0.3",
+    "socks-proxy-agent": "^8.0.4"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "icu.justwoker.autosign",
+    "productName": "AutoSign",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "preload.js", "desktop.html", "src/**/*", "package.json"],
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64"] }, { "target": "dmg", "arch": ["arm64"] }],
+      "category": "public.app-category.utilities",
+      "identity": null
+    },
+    "win": { "target": "nsis" },
+    "linux": { "target": "AppImage" }
+  }
+}

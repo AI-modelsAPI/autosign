@@ -1,0 +1,52 @@
+plugins { id 'com.android.application' }
+
+/* 固定签名：debug 构建也用仓库内的 justsign-debug.jks。
+ * 原因：默认 debug 签名每台机器/每次 CI 都不同，APK 无法覆盖安装，
+ * 每次更新都要卸载重装并丢数据。文件不存在时（如未拉取密钥的环境）自动退回默认 debug 签名。 */
+def ksFile = file('justsign-debug.jks')
+def hasKs = ksFile.exists()
+
+android {
+    namespace 'icu.justwoker.justsign'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "icu.justwoker.justsign"
+        minSdk 24
+        targetSdk 34
+        versionCode 100
+        versionName "1.0.0"
+    }
+
+    if (hasKs) {
+        signingConfigs {
+            shared {
+                storeFile ksFile
+                storePassword 'justsign'
+                keyAlias 'justsign'
+                keyPassword 'justsign'
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (hasKs) signingConfig signingConfigs.shared
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasKs) signingConfig signingConfigs.shared
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies {
+    implementation 'androidx.work:work-runtime:2.9.1'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
