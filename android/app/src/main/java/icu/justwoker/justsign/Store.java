@@ -41,9 +41,9 @@ public class Store {
         synchronized (LOCK) { saveConfigLocked(c); }
     }
 
-    private void saveConfigLocked(JSONObject c) {
-        if (c == null) return;
-        sp.edit().putString("config", c.toString()).commit();
+    private boolean saveConfigLocked(JSONObject c) {
+        if (c == null) return false;
+        return sp.edit().putString("config", c.toString()).commit();
     }
 
     /** 旧版 tokens 数组 → sites[].accounts 迁移（一次性）；调用方必须已持有 LOCK */
@@ -178,6 +178,7 @@ public class Store {
                 if (arr == null) arr = new JSONArray();
                 JSONArray out = new JSONArray();
                 String key = site.optString("key");
+                DeleteCoordinator.allowRecreateSite(key);
                 boolean found = false;
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject s = arr.optJSONObject(i);
@@ -250,23 +251,27 @@ public class Store {
         }
     }
 
-    public void removeSite(String siteKey) {
-        if (siteKey == null) return;
+    public boolean removeSiteSecure(String siteKey) {
+        if (siteKey == null) return false;
         synchronized (LOCK) {
             try {
                 JSONObject cfg = config();
                 JSONArray arr = cfg.optJSONArray("sites");
-                if (arr == null) return;
+                if (arr == null) return false;
                 JSONArray out = new JSONArray();
+                boolean found = false;
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject s = arr.optJSONObject(i);
-                    if (s != null && !siteKey.equals(s.optString("key"))) out.put(s);
+                    if (s != null && siteKey.equals(s.optString("key"))) found = true;
+                    else if (s != null) out.put(s);
                 }
+                if (!found) return false;
                 cfg.put("sites", out);
-                saveConfigLocked(cfg);
-            } catch (Exception ignored) {}
+                return saveConfigLocked(cfg);
+            } catch (Exception ignored) { return false; }
         }
     }
+    public void removeSite(String siteKey) { removeSiteSecure(siteKey); }
 
     /** 由 baseUrl 自动生成站点 key（小写、去协议/特殊字符） */
     public static String siteKeyOf(String baseUrl) {
@@ -359,6 +364,8 @@ public class Store {
 
     public void upsertAccount(String siteKey, JSONObject acc) {
         if (siteKey == null || siteKey.isEmpty() || acc == null) return;
+        String accountKey = acc.optString("key", "");
+        if (DeleteCoordinator.blocked(siteKey, accountKey)) return;
         synchronized (LOCK) {
             try {
                 JSONObject cfg = config();
@@ -395,7 +402,7 @@ public class Store {
      * （典型场景：刷新线程写 lastStatus 的同时，签到线程写 token）。
      */
     public void patchAccount(String accountKey, JSONObject patch) {
-        if (accountKey == null || patch == null) return;
+        if (accountKey == null || patch == null || DeleteCoordinator.blockedAccount(accountKey)) return;
         synchronized (LOCK) {
             try {
                 JSONObject cfg = config();
@@ -419,13 +426,14 @@ public class Store {
         }
     }
 
-    public void removeAccount(String key) {
-        if (key == null) return;
+    public boolean removeAccountSecure(String key) {
+        if (key == null) return false;
         synchronized (LOCK) {
             try {
                 JSONObject cfg = config();
                 JSONArray sites = cfg.optJSONArray("sites");
-                if (sites == null) return;
+                if (sites == null) return false;
+                boolean found = false;
                 for (int i = 0; i < sites.length(); i++) {
                     JSONObject s = sites.optJSONObject(i);
                     if (s == null) continue;
@@ -434,14 +442,16 @@ public class Store {
                     JSONArray out = new JSONArray();
                     for (int j = 0; j < accs.length(); j++) {
                         JSONObject a = accs.optJSONObject(j);
-                        if (a != null && !key.equals(a.optString("key"))) out.put(a);
+                        if (a != null && key.equals(a.optString("key"))) found = true;
+                        else if (a != null) out.put(a);
                     }
                     s.put("accounts", out);
                 }
-                saveConfigLocked(cfg);
-            } catch (Exception ignored) {}
+                return found && saveConfigLocked(cfg);
+            } catch (Exception ignored) { return false; }
         }
     }
+    public void removeAccount(String key) { removeAccountSecure(key); }
 
     /* ---------- 默认配置 ---------- */
     public static JSONObject defaultConfig() {
@@ -745,6 +755,21 @@ public class Store {
         }
     }
 
+    public void purgeLogs(String siteKey, String accountKey) {
+        synchronized (LOCK) {
+            try {
+                JSONArray src = opLogs(), out = new JSONArray();
+                for (int i = 0; i < src.length(); i++) {
+                    JSONObject e = src.optJSONObject(i);
+                    if (e == null) continue;
+                    boolean siteMatch = siteKey != null && siteKey.equals(e.optString("siteKey", ""));
+                    boolean accountMatch = accountKey == null || accountKey.equals(e.optString("accountKey", ""));
+                    if (!(siteMatch && accountMatch)) out.put(e);
+                }
+                sp.edit().putString("opLogs", out.toString()).commit();
+            } catch (Exception ignored) {}
+        }
+    }
     public void clearOpLogs() {
         synchronized (LOCK) {
             try { sp.edit().putString("opLogs", "[]").commit(); } catch (Exception ignored) {}

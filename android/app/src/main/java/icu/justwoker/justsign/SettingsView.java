@@ -542,11 +542,11 @@ public class SettingsView extends FrameLayout {
                     .setTitle("删除站点")
                     .setMessage("删除「" + s.optString("name") + "」及其下 " + an + " 个账号？不可恢复。")
                     .setPositiveButton("删除", (d, w) -> {
-                        Store st2 = new Store(act);
-                        st2.removeSite(s.optString("key"));
-                        st2.opLog(s.optString("key"), "", "删除站点", "ok",
-                                "已删除 " + s.optString("name"), "", "user");
-                        buildSites();
+                        DeleteCoordinator.deleteSite(act, s.optString("key"), result -> {
+                            act.toast(result.message());
+                            buildSites();
+                            act.render();
+                        });
                     }).setNegativeButton("取消", null).show());
             row.addView(edit);
             row.addView(del);

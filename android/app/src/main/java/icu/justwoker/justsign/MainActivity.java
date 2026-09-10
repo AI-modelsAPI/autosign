@@ -1068,11 +1068,10 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                 .setTitle("删除站点")
                 .setMessage("删除「" + site.optString("name") + "」及其下所有账号？此操作不可恢复。")
                 .setPositiveButton("删除", (d, w) -> {
-                    Store store = new Store(this);
-                    store.removeSite(site.optString("key"));
-                    store.opLog(site.optString("key"), "", "删除站点", "ok",
-                            "已删除 " + site.optString("name"), "", "user");
-                    render();
+                    DeleteCoordinator.deleteSite(this, site.optString("key"), result -> {
+                        toast(result.message());
+                        render();
+                    });
                 })
                 .setNegativeButton("取消", (d, w) -> render()).show();
     }
@@ -1088,11 +1087,10 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                         JSONObject st = new Store(this).siteOfAccount(accKey);
                         if (st != null) siteKey = st.optString("key", "");
                     }
-                    new Store(this).removeAccount(accKey);
-                    /* v0.4.7：同步删除该账号的 Profile（GitHub 会话 + 站点 Cookie 分区），
-                     * 不留孤儿数据；删除后重新添加走全新授权（凭据库还在，自动填充）。 */
-                    WebViewProfileUtil.deleteProfileFor(siteKey, accKey);
-                    render();
+                    DeleteCoordinator.deleteAccount(this, accKey, result -> {
+                        toast(result.message());
+                        render();
+                    });
                 })
                 .setNegativeButton("取消", null).show();
     }
@@ -1148,6 +1146,7 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                     .put("siteKey", siteKey)
                     .put("credentialId", credId);
             if (!gh.isEmpty()) acc.put("githubAccount", gh);
+            DeleteCoordinator.allowRecreate(acc.optString("key"));
             store.upsertAccount(siteKey, acc);
             store.opLog(siteKey, acc.optString("key"), "添加账号", "ok", "已绑定凭据 " + alias, "", "user");
             render();
