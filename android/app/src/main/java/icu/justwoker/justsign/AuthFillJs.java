@@ -54,16 +54,27 @@ public final class AuthFillJs {
                  * host/path 不符（登录页、2FA、设备验证等）一律不执行。
                  * 删除 button.btn-primary/type=submit 泛化兜底——DOM 变化时宁可错过，不可误点。 */
                 "function pageOk(){try{return location.host==='github.com'&&location.pathname==='/login/oauth/authorize';}catch(e){return false;}}" +
+                /* v1.0.3+ 关键修复：授权确认页本来就同时存在 Authorize 与 Cancel/Deny 两个按钮，
+                 * 旧判据「页面存在 cancel 按钮就 return null」把每一次正常授权页都误杀，
+                 * 导致永远点不到 Authorize → authorizeMissing → GitHub 判用户未授权 → access_denied（全站失败根因）。
+                 * 正确做法：直接精确锁定 Authorize 按钮（name=authorize / #js-oauth-authorize-btn），
+                 * 与 name=cancel 天然区分；再显式排除 Deny（value=0/false）防误点，不再看 cancel 是否存在。 */
+                "function isAuthorizeBtn(b){try{if(!b||b.disabled)return false;" +
+                "  var nm=(b.getAttribute&&b.getAttribute('name')||'').toLowerCase();" +
+                "  if(nm==='cancel')return false;" +                                  /* Deny/Cancel 表单，绝不点 */
+                "  var val=((b.getAttribute&&b.getAttribute('value'))||'').toLowerCase();" +
+                "  if(val==='0'||val==='false'||val==='no')return false;" +          /* GitHub Deny 历史用 value=0 */
+                "  return true;}catch(e){return false;}}" +
                 "function find(){" +
-                "  if(!pageOk()||document.querySelector('button[name=cancel],#js-oauth-cancel-btn'))return null;" +
-                "  if(document.querySelector('#login_field,input[type=password]'))return null;" +
+                "  if(!pageOk())return null;" +
+                "  if(document.querySelector('#login_field,input[type=password]'))return null;" +   /* 登录页/2FA页不点 */
                 "  var f=document.querySelector('form[action*=\"oauth\"],form[action*=\"authorize\"]');" +
                 "  if(f){var b=f.querySelector('button[name=authorize],#js-oauth-authorize-btn');" +
-                "    if(b&&!b.disabled)return b;}" +
-                "  var b2=document.querySelector('button[name=authorize]');" +
-                "  if(b2&&!b2.disabled)return b2;" +
-                "  var b3=document.getElementById('js-oauth-authorize-btn');" +
-                "  if(b3&&!b3.disabled)return b3;" +
+                "    if(isAuthorizeBtn(b))return b;}" +
+                "  var b2=document.getElementById('js-oauth-authorize-btn');" +
+                "  if(isAuthorizeBtn(b2))return b2;" +
+                "  var list=document.querySelectorAll('button[name=authorize]');" +
+                "  for(var i=0;i<list.length;i++){if(isAuthorizeBtn(list[i]))return list[i];}" +
                 "  return null;}" +
                 "report('authorizeScan',null,{title:(document.title||'').slice(0,60),authorizeCount:document.querySelectorAll('button[name=authorize],#js-oauth-authorize-btn').length,cancelCount:document.querySelectorAll('button[name=cancel],#js-oauth-cancel-btn').length,loginForm:!!document.querySelector('#login_field,input[type=password]')});" +
                 "var iv=setInterval(function(){tries++;" +

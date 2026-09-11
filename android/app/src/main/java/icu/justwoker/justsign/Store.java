@@ -780,7 +780,7 @@ public class Store {
 
     /** 返回 {sites, accounts, checked, pending, totalUSD} */
     public JSONObject summary() {
-        int nSite = 0, nAcc = 0, nChecked = 0;
+        int nSite = 0, nAcc = 0, nChecked = 0, nPending = 0;
         double total = 0;
         try {
             JSONArray sites = config().optJSONArray("sites");
@@ -795,7 +795,13 @@ public class Store {
                         JSONObject a = accs.optJSONObject(j);
                         if (a == null) continue;
                         nAcc++;
-                        if (Engine.isCheckedToday(a)) nChecked++;
+                        /* v1.0.4：统一判据——顶栏摘要与一键签到队列同源。
+                         * 待签仅计 ST_PENDING（已授权、今日未签、非网页站），
+                         * 旧口径 nAcc-nChecked 会把未授权/网页站也算进待签，
+                         * 导致「顶栏显示待签、点一键签到却说无待签账号」。 */
+                        int state = Engine.acctState(s, a);
+                        if (state == Engine.ST_CHECKED) nChecked++;
+                        else if (state == Engine.ST_PENDING) nPending++;
                         JSONObject st = a.optJSONObject("lastStatus");
                         if (st != null && st.optBoolean("ok")) total += st.optDouble("availableUSD", 0);
                     }
@@ -804,7 +810,7 @@ public class Store {
         } catch (Exception ignored) {}
         try {
             return new JSONObject().put("sites", nSite).put("accounts", nAcc)
-                    .put("checked", nChecked).put("pending", Math.max(0, nAcc - nChecked))
+                    .put("checked", nChecked).put("pending", nPending)
                     .put("totalUSD", Math.round(total * 100.0) / 100.0);
         } catch (Exception e) { return new JSONObject(); }
     }

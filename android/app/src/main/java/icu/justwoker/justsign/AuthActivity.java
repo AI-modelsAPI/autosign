@@ -70,6 +70,11 @@ public class AuthActivity extends Activity {
     private final java.util.concurrent.atomic.AtomicInteger authNavSeq = new java.util.concurrent.atomic.AtomicInteger();
 
     private String credAccount = "", credPassword = "", credOtp = "";
+    /** v1.0.3+：仅当凭据库明确存有 GitHub 用户名时才非空，专供授权 URL 的 &login= 使用。
+     * credAccount 会在 githubUser 为空时回退 siteAccount（站内账号），若把站内账号当作
+     * GitHub 用户名传进 &login=，GitHub 可能因账号不匹配走异常流程甚至诱发 access_denied，
+     * 故 login 参数只认真正的 githubUser，回退值一律不带。 */
+    private String githubLogin = "";
     /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
     private boolean stateUseGet = false;
     private boolean credHasOtp = false;
@@ -175,6 +180,7 @@ public class AuthActivity extends Activity {
                 /* 这里填的是 GitHub 登录页，必须优先用 githubUser；
                  * siteAccount 只是站内昵称，两者不同名时用它会登录失败。 */
                 credAccount = c.optString("githubUser", "");
+                githubLogin = credAccount;   // login 参数专用：仅认真正的 GitHub 用户名，不回退 siteAccount
                 if (credAccount.isEmpty()) credAccount = c.optString("siteAccount", "");
                 credPassword = store.credPassword(credentialId);
                 credHasOtp = store.credHasTwofa(credentialId);
@@ -685,7 +691,7 @@ public class AuthActivity extends Activity {
                 wv.startAnimation(a);
                 authUrl = "https://github.com/login/oauth/authorize?client_id=" + enc(cid)
                         + "&state=" + enc(st2) + "&scope=user:email"
-                        + (credAccount.isEmpty() ? "" : ("&login=" + enc(credAccount)));
+                        + (githubLogin.isEmpty() ? "" : ("&login=" + enc(githubLogin)));
                 reauthTries = 0;
                 /* 会话切换策略（opus4.8 审计·需求3 修订版）：
                  * Profile 隔离后，本账号的 Cookie 分区只属于自己 ——
@@ -1090,6 +1096,8 @@ public class AuthActivity extends Activity {
         /* v0.6.7：页面销毁兜底释放在途标记——用户取消/返回/异常退出后，
          * 该账号不会被永久锁死，下次授权可正常抢占交换权。 */
         SilentAuth.releaseExchange(accountKey);
+        /* v1.0.4：同步释放授权事务锁，防止下次授权被误判"流程进行中"。 */
+        ReauthManager.release(siteKey, accountKey);
         h.removeCallbacksAndMessages(null);
         if (wv != null) {
             try {

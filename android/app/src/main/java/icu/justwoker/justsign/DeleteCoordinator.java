@@ -106,24 +106,47 @@ public final class DeleteCoordinator {
         }, "delete-site").start();
     }
 
-    private static boolean logout(JSONObject site, JSONObject account) {
+    /** 尽力注销站点会话。实测 AgentRouter：GET /api/user/logout → {"success":true}；
+     * POST 同路径 404；/logout 是前端 HTML 路由（返回 HTML，非 API）。因此 GET 优先，
+     * 再回退 POST 变体。返回 true = 已确认登出或幂等（401/未登录）；false = 无法确认。
+     * 注意：成功必须校验 JSON body 的 success 字段，避免命中返回 HTML 的前端路由被误判。 */
+    public static boolean logout(JSONObject site, JSONObject account) {
+        if (site == null || account == null) return false;
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
         if (base.isEmpty()) return false;
         String token = clean(account.optString("token", ""));
         String cookie = clean(account.optString("siteCookie", ""));
-        if (token.isEmpty() && cookie.isEmpty()) return true;
-        String[] paths = { "/api/user/logout", "/api/auth/logout", "/logout" };
-        for (String path : paths) {
+        if (token.isEmpty() && cookie.isEmpty()) return true;   // 无凭据 = 已登出（幂等）
+        String uid = clean(account.optString("siteUserId", ""));
+        String[][] attempts = {
+                { "GET",  "/api/user/logout" },
+                { "POST", "/api/user/logout" },
+                { "POST", "/api/auth/logout" },
+        };
+        for (String[] a : attempts) {
             try {
-                Request.Builder b = new Request.Builder().url(base + path)
-                        .post(RequestBody.create("{}", JSON));
+                Request.Builder b = new Request.Builder().url(base + a[1]);
+                if ("POST".equals(a[0])) b.post(RequestBody.create("{}", JSON));
+                else b.get();
+                b.header("Accept", "application/json");
                 if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
                 if (!cookie.isEmpty()) b.header("Cookie", cookie);
-                String uid = clean(account.optString("siteUserId", ""));
                 if (!uid.isEmpty()) b.header("New-Api-User", uid);
                 try (Response r = HTTP.newCall(b.build()).execute()) {
-                    if (r.isSuccessful() || r.code() == 401) return true;
-                    if (r.code() != 404 && r.code() != 405) return false;
+                    int code = r.code();
+                    String body = r.body() != null ? r.body().string() : "";
+                    if (code == 401) return true;                    // 会话已失效 = 幂等成功
+                    if (code == 404 || code == 405) continue;        // 端点不存在，试下一个
+                    if (code >= 200 && code < 300) {
+                        String t = body.trim();
+                        if (t.startsWith("{")) {                     // 必须是 API JSON 响应
+                            try {
+                                if (new JSONObject(t).optBoolean("success", false)) return true;
+                            } catch (Exception ignored) {}
+                        }
+                        return false;                                // HTML/非 JSON = 前端路由，不算登出
+                    }
+                    return false;
                 }
             } catch (Exception ignored) { return false; }
         }

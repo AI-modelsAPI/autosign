@@ -413,6 +413,36 @@ public class Engine {
 
     public static boolean isAutoCheckin(JSONObject site) { return "newapi".equals(siteKind(site)); }
     public static boolean isWebOnly(JSONObject site) { return "web".equals(siteKind(site)); }
+    /* ================= 统一账号状态判据（v1.0.3） =================
+     * 全 App（顶栏摘要 / 一键签到队列 / 卡片胶囊）必须共用同一套判据，
+     * 否则会出现「顶栏显示 3 待签，点一键签到却说无待签账号」的自相矛盾。 */
+    public static final int ST_NEED_AUTH = 0;   // 未授权：无 token 也无 siteCookie
+    public static final int ST_CHECKED   = 1;   // 今日已签
+    public static final int ST_PENDING   = 2;   // 已授权且今日未签（可签目标）
+    public static final int ST_WEB       = 3;   // 网页手动站（后台无法自动签）
+    /** 账号状态四态判据。authed 判定同时看 token 与 siteCookie（cookie 型站 token 为空）。 */
+    public static int acctState(JSONObject site, JSONObject acc) {
+        if (acc == null) return ST_NEED_AUTH;
+        String tok = acc.optString("token", "");
+        String ck = acc.optString("siteCookie", "");
+        if ("null".equals(tok)) tok = "";
+        if ("null".equals(ck)) ck = "";
+        boolean authed = !(tok == null || tok.isEmpty()) || !(ck == null || ck.isEmpty());
+        if (!authed) return ST_NEED_AUTH;
+        if (isCheckedToday(acc)) return ST_CHECKED;
+        if (isWebOnly(site)) return ST_WEB;
+        return ST_PENDING;
+    }
+    /**
+     * 需要「登出旧会话 → 重新登录」才发放当日奖励的站点（实测确认：AgentRouter、JustDoWork）。
+     * 这类站的当日奖励只在发生一次新登录时由服务端发放，已有会话刷新不触发
+     * （刷新日志显示「非今日奖励」）。因此它们的「签到」动作 ≡ 登出 + 重登。
+     * 其他站（含 GoRouter）会话有效时点签到/刷新即可，不走此流程。
+     */
+    public static boolean needsReloginCheckin(JSONObject site) {
+        String k = site == null ? "" : site.optString("key", "").toLowerCase(java.util.Locale.US);
+        return k.contains("agentrouter") || k.contains("justwoker");
+    }
 
     public static String kindLabel(JSONObject site) {
         switch (siteKind(site)) {
@@ -787,9 +817,19 @@ public class Engine {
             if (ci) markChecked(key, 0, false);
             return out;
         }
-        out.put("ok", true).put("already", true).put("reward", 0).put("rewardKnown", false)
-           .put("message", "登录即签到 · 已保活（该站无签到记录）");
-        markChecked(key, 0, false);
+        /* v1.0.3 修复：绝不能在无任何签到信号时标「已签」！
+         * 此处旧代码返回「已保活」并 markChecked——导致 AgentRouter 等站
+         * 今日实际没签到（服务端无今日记录）却被本地标记已签，之后定时/一键
+         * 签到全部「今日已签，跳过」，当日奖励永远领不到。 */
+        out.put("ok", false).put("already", false).put("reward", 0).put("rewardKnown", false)
+           .put("needsRelogin", Engine.needsReloginCheckin(site))
+           .put("message", Engine.needsReloginCheckin(site)
+                   ? "站点无今日签到记录，需重新登录触发奖励发放"
+                   : "登录保活完成（未检测到今日签到记录，未标记已签）");
+        if (!Engine.needsReloginCheckin(site)) {
+            /* 仅非重登型站保活：只刷新会话，不写 lastCheckin */
+            try { callWithAuth(site, key, "GET", "/api/user/self"); } catch (Exception ignored) {}
+        }
         return out;
     }
 
@@ -1054,15 +1094,60 @@ public class Engine {
                             } catch (Exception ignored) {}
                         }
                     } else {
-                        /* v0.4.6：登录保活改走 status()，额度同时写入 lastStatus */
+                        /* v1.0.3：重登型站（AgentRouter/JustDoWork）定时签到 =
+                         * 先 status() 检测今日奖励；无今日奖励则登出→SilentAuth 重登→再探测。
+                         * 非重登型 login 站保持原保活逻辑。 */
                         JSONObject r = status(key);
                         int hc = r == null ? 0 : r.optInt("http");
-                        store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc);
-                        store.opLog(sKey, key, "定时刷新",
-                                hc == 200 ? "ok" : "err",
-                                hc == 200 ? "登录保活成功" : httpHint(hc), "", "cron");
-                        if (hc == 200) {
-                            try { store.patchAccount(key, new JSONObject().put("lastStatus", r)); } catch (Exception ignored) {}
+                        boolean reloginSite = needsReloginCheckin(site);
+                        if (reloginSite && hc == 200 && !r.optBoolean("todayChecked", false)) {
+                            store.appendLog(sKey, key, "cron-relogin", "今日无奖励，执行登出重登签到");
+                            store.opLog(sKey, key, "定时签到", "info",
+                                    "今日无签到奖励，登出旧会话并重新登录触发发放", "", "cron");
+                            boolean loggedOut;
+                            try { loggedOut = DeleteCoordinator.logout(site, tk); }
+                            catch (Exception le) { loggedOut = false; }
+                            store.appendLog(sKey, key, "cron-relogin-logout", loggedOut ? "ok" : "unconfirmed");
+                            final CountDownLatch rl = new CountDownLatch(1);
+                            final String[] rlEv = { "cron-relogin-fail" };
+                            final String[] rlDt = { "未返回" };
+                            SilentAuth.run(ctx, sKey, key, (ok, needUi, user, msg) -> {
+                                if (ok) rlEv[0] = "cron-relogin-ok";
+                                else if (needUi) { rlEv[0] = "cron-relogin-ui"; rlDt[0] = msg == null ? "需人工授权" : msg; }
+                                else { rlEv[0] = "cron-relogin-fail"; rlDt[0] = msg == null ? "" : msg; }
+                                rl.countDown();
+                            });
+                            if (!rl.await(110, TimeUnit.SECONDS)) { rlEv[0] = "cron-relogin-fail"; rlDt[0] = "等待超时"; }
+                            store.appendLog(sKey, key, rlEv[0], rlDt[0]);
+                            store.opLog(sKey, key, "定时签到",
+                                    rlEv[0].endsWith("ok") ? "ok" : "err", rlDt[0], "", "cron");
+                            /* 重登后重新探测一次，成功则落库今日已签+额度 */
+                            if ("cron-relogin-ok".equals(rlEv[0])) {
+                                JSONObject r2 = status(key);
+                                int hc2 = r2 == null ? 0 : r2.optInt("http");
+                                if (hc2 == 200) {
+                                    JSONObject patch = new JSONObject().put("lastStatus", r2);
+                                    if (r2.optBoolean("todayChecked", false)) {
+                                        JSONObject lc2 = new JSONObject()
+                                                .put("date", todayStr())
+                                                .put("time", System.currentTimeMillis());
+                                        if (r2.optBoolean("todayRewardKnown", false))
+                                            lc2.put("reward", r2.optDouble("todayRewardUSD", 0));
+                                        patch.put("lastCheckin", lc2);
+                                    }
+                                    store.patchAccount(key, patch);
+                                }
+                                store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc2);
+                            }
+                        } else {
+                            /* v0.4.6：登录保活改走 status()，额度同时写入 lastStatus */
+                            store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc);
+                            store.opLog(sKey, key, "定时刷新",
+                                    hc == 200 ? "ok" : "err",
+                                    hc == 200 ? "登录保活成功" : httpHint(hc), "", "cron");
+                            if (hc == 200) {
+                                try { store.patchAccount(key, new JSONObject().put("lastStatus", r)); } catch (Exception ignored) {}
+                            }
                         }
                     }
                 } catch (Exception e) {
