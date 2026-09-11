@@ -50,17 +50,25 @@ public final class AuthFillJs {
                 "function safeText(b){try{return((b.innerText||b.value||b.getAttribute('aria-label')||'')+'').trim().slice(0,40);}catch(e){return '';}}" +
                 "function meta(b){try{return{id:(b&&b.id||'').slice(0,40),name:(b&&b.name||'').slice(0,40),type:(b&&b.type||'').slice(0,20),text:safeText(b),host:location.host,path:location.pathname};}catch(e){return{};}}" +
                 "function report(action,b,extra){try{var o=meta(b);o.ok=true;o.action=action;if(extra)for(var k in extra)o[k]=extra[k];window.JustSign.onFill(JSON.stringify(o));}catch(e){}}" +
-                "function find(){var b=document.querySelector('button[name=authorize]');" +
-                "  if(!b)b=document.getElementById('js-oauth-authorize-btn');" +
-                "  if(!b){var c=document.querySelectorAll('button.btn-primary,button[type=submit],input[type=submit]');" +
-                "    for(var i=0;i<c.length;i++){var t=safeText(c[i]).toLowerCase();" +
-                /* 授权确认页只匹配明确的 Allow/Authorize 语义，绝不匹配 Continue 等模糊按钮，防误点 Deny */
-                "      if(t.indexOf('authorize')>=0||t.indexOf('授权')>=0||t.indexOf('allow')>=0)return c[i];}}" +
-                "  return b;}" +
+                /* 严格判据：必须是 GitHub OAuth 授权表单内的明确 authorize 按钮。
+                 * host/path 不符（登录页、2FA、设备验证等）一律不执行。
+                 * 删除 button.btn-primary/type=submit 泛化兜底——DOM 变化时宁可错过，不可误点。 */
+                "function pageOk(){try{return location.host==='github.com'&&location.pathname==='/login/oauth/authorize';}catch(e){return false;}}" +
+                "function find(){" +
+                "  if(!pageOk()||document.querySelector('button[name=cancel],#js-oauth-cancel-btn'))return null;" +
+                "  if(document.querySelector('#login_field,input[type=password]'))return null;" +
+                "  var f=document.querySelector('form[action*=\"oauth\"],form[action*=\"authorize\"]');" +
+                "  if(f){var b=f.querySelector('button[name=authorize],#js-oauth-authorize-btn');" +
+                "    if(b&&!b.disabled)return b;}" +
+                "  var b2=document.querySelector('button[name=authorize]');" +
+                "  if(b2&&!b2.disabled)return b2;" +
+                "  var b3=document.getElementById('js-oauth-authorize-btn');" +
+                "  if(b3&&!b3.disabled)return b3;" +
+                "  return null;}" +
                 "report('authorizeScan',null,{title:(document.title||'').slice(0,60),authorizeCount:document.querySelectorAll('button[name=authorize],#js-oauth-authorize-btn').length,cancelCount:document.querySelectorAll('button[name=cancel],#js-oauth-cancel-btn').length,loginForm:!!document.querySelector('#login_field,input[type=password]')});" +
                 "var iv=setInterval(function(){tries++;" +
                 "  var b=find();" +
-                "  if(b&&!b.disabled){clearInterval(iv);" +
+                "  if(b){clearInterval(iv);" +
                 "    report('authorizeFound',b,{tries:tries});" +
                 "    try{b.scrollIntoView({block:'center'});}catch(e){}" +
                 "    b.click();" +

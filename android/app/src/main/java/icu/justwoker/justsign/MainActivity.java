@@ -734,6 +734,18 @@ public class MainActivity extends Activity {
                     r.put("rewardKnown", rewardKnown);
                     r.put("message", msg == null ? "" : msg);
                 } catch (Exception ignored) {}
+                /* v1.0.2：签到成功/已签立即落库当日徽章——batchMode 下 applyCheckinResult
+                 * 不刷额度（收尾统一刷），但徽章不能等收尾刷新，否则批次中途失败/刷新失败
+                 * 时“已签”状态丢失，看板误显示待签。与 refreshOne 的 buildStatusPatch 同构。 */
+                if (ok && accountHasCred(ak)) {
+                    try {
+                        JSONObject lc = new JSONObject()
+                                .put("date", Engine.todayStr())
+                                .put("time", System.currentTimeMillis());
+                        if (rewardKnown) lc.put("reward", reward);
+                        store.patchAccount(ak, new JSONObject().put("lastCheckin", lc));
+                    } catch (Exception ignored) {}
+                }
                 applyCheckinResult(ak, r, true);
                 if (ok) stat[0]++; else stat[1]++;
                 runBulkCheckin(list, idx + 1, stat);
@@ -758,6 +770,16 @@ public class MainActivity extends Activity {
                 });
             }).start();
         }
+    }
+    /** v1.0.2：账号是否持有站点凭据（token 或 siteCookie）。
+     * 批量签到落库当日徽章前的防误判：无凭据账号不会真签成功，避免脏徽章。 */
+    private boolean accountHasCred(String accountKey) {
+        if (accountKey == null || accountKey.isEmpty()) return false;
+        JSONObject acc = new Store(this).findAccount(accountKey);
+        if (acc == null) return false;
+        boolean hasToken = acc.optString("token", "").isEmpty();
+        boolean hasCookie = acc.optString("siteCookie", "").isEmpty();
+        return !hasToken || !hasCookie;
     }
 
     private void bulkRefresh() {

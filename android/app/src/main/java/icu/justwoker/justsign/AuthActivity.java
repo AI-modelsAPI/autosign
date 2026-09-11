@@ -56,6 +56,13 @@ public class AuthActivity extends Activity {
     private volatile String authUrl = "";
     /** 本轮 /api/oauth/state 返回值；回调必须严格匹配，防串流/CSRF。 */
     private volatile String expectedOauthState = "";
+    /** 本轮授权扫描诊断：true = authorizeJs 已上报扫描（授权页脚本已执行）。
+     * access_denied 时据此区分「脚本未跑即被拒」（时序问题→可自动重试）
+     * 和「已点击授权仍被拒」（GitHub 侧拒绝→停手转人工）。 */
+    private volatile boolean authorizeScanStarted = false;
+    private volatile boolean authorizeClicked = false;
+    /** 本轮 access_denied 自动恢复次数（防循环建 state）：每次用户操作最多 1 次 */
+    private volatile int deniedRetries = 0;
     private volatile int reauthTries = 0;
     /** 同一安全 URL 只记录一次，避免 onPageStarted/onPageFinished 双重刷日志。 */
     private volatile String lastNavLog = "";
@@ -98,9 +105,9 @@ public class AuthActivity extends Activity {
                         String summary;
                         String level = "info";
                         switch (act) {
-                            case "authorizeScan": summary = "扫描 GitHub 授权确认页"; break;
+                            case "authorizeScan": summary = "扫描 GitHub 授权确认页"; authorizeScanStarted = true; break;
                             case "authorizeFound": summary = "找到 GitHub 授权按钮"; break;
-                            case "autoAuthorize": summary = "已点击 GitHub 授权按钮"; break;
+                            case "autoAuthorize": summary = "已点击 GitHub 授权按钮"; authorizeClicked = true; break;
                             case "authorizeMissing": summary = "未找到 GitHub 授权按钮"; level = "warn"; break;
                             default: summary = "GitHub 授权脚本异常"; level = "err"; break;
                         }
@@ -198,6 +205,14 @@ public class AuthActivity extends Activity {
                 return inspectNavigation(req.getUrl().toString(), "导航请求#" + authNavSeq.incrementAndGet());
             }
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
+                /* v1.0.2：授权扫描注入前移到 onPageStarted——日志实证 access_denied
+                 * 可能在 onPageFinished 注入前就回调（脚本从未执行）。onPageStarted
+                 * 时注入 evaluateJavascript 会排队到页面可执行时立即运行，
+                 * 配合脚本内 200ms 轮询，即使 GitHub DOM 延迟出现也能命中。 */
+                if (url != null && url.toLowerCase(java.util.Locale.US)
+                        .contains("github.com/login/oauth/authorize")) {
+                    v.evaluateJavascript(AuthFillJs.authorizeJs(), null);
+                }
                 inspectNavigation(url, "开始加载#" + authNavSeq.incrementAndGet());
             }
             @Override public void onPageFinished(WebView v, String url) {
@@ -325,17 +340,36 @@ public class AuthActivity extends Activity {
             return true;
         }
         if (r.missingCode()) {
-            /* 回调已经在 shouldOverride/onPageStarted 阶段提前拦截。error=access_denied
-             * 只能说明授权链路返回拒绝，不能据此断言 GitHub 记住了拒绝；原因交由新增
-             * authorizeScan/Found/Clicked 日志判定（是否找到并点击了正确按钮）。 */
+            /* 回调已经在 shouldOverride/onPageStarted 阶段提前拦截。按诊断状态分类处理：
+             * A. authorizeScan 未上报 = 授权页脚本还没执行 GitHub 就返回拒绝（导航时序问题）
+             *    → 自动重试一次全新 state（旧 state 已被 GitHub 消费/作废，不复用）。
+             * B. 已点击授权仍被拒 = GitHub/应用授权策略明确拒绝 → 停手转人工，绝不循环建 state。 */
             String why = r.error.isEmpty() ? "回调未携带授权码" : r.error;
             String safeDesc = r.errorDescription;
             if (safeDesc.length() > 160) safeDesc = safeDesc.substring(0, 160);
             authLog("err", "未获取到授权码", r.safe + "；error=" + why
                     + (safeDesc.isEmpty() ? "" : "；description=" + safeDesc)
-                    + "；回调已提前拦截，需结合授权按钮扫描/点击日志定位拒绝来源");
+                    + "；scanStarted=" + authorizeScanStarted
+                    + "；clicked=" + authorizeClicked);
+            if ("access_denied".equals(r.error) && !authorizeScanStarted
+                    && !exchanging && deniedRetries < 1) {
+                deniedRetries++;
+                authorizeScanStarted = false;
+                authorizeClicked = false;
+                authLog("info", "授权被拒·自动重试",
+                        "授权页脚本未执行即被拒（导航时序问题），正重新获取全新授权会话重试");
+                showTip("授权时序异常，自动重试一次…");
+                h.postDelayed(() -> { if (!done && !isFinishing()) startAuthFlow(); }, 600);
+                return true;
+            }
+            if ("access_denied".equals(r.error) && authorizeClicked) {
+                authLog("err", "GitHub 明确拒绝授权",
+                        "已点击授权按钮仍被拒，GitHub/应用策略拒绝，不再自动重试");
+            }
             showLoadError(r.error.equals("access_denied")
-                    ? "授权服务返回拒绝，请点重试；若仍失败，请查看操作日志中的授权链路诊断"
+                    ? (authorizeClicked
+                        ? "GitHub 拒绝了本次授权，请在 GitHub 检查该应用的授权设置后重试"
+                        : "授权服务返回拒绝，请点重试重新发起授权")
                     : "未获取到授权码，请点重试重新授权");
             return true;
         }
