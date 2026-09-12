@@ -82,39 +82,41 @@ public final class ReauthManager {
             .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build();
 
     /**
-     * 用旧凭据尽力注销站点会话并分级确认。与 DeleteCoordinator.logout 的
-     * 差异：结果按 CONFIRMED/ABSENT/UNCONFIRMED/DENIED 分类，且 401 视为
-     * 「旧会话已不存在」而非失败（会话受限站重授权的安全前置）。
+     * 用旧凭据调用已实测的 New API 登出端点：GET /api/user/logout。
+     * 200 且 JSON success=true 才算确认注销；401 表示旧会话已不存在（幂等成功）。
+     * 其他状态均不猜测端点、不继续建新会话。
      */
     public static int logoutVerified(JSONObject site, JSONObject account) {
+        if (site == null || account == null) return UNCONFIRMED;
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
         if (base.isEmpty()) return UNCONFIRMED;
         String token = clean(account.optString("token", ""));
         String cookie = clean(account.optString("siteCookie", ""));
-        if (token.isEmpty() && cookie.isEmpty()) return ABSENT; // 无会话可注销
+        if (token.isEmpty() && cookie.isEmpty()) return ABSENT;
         String uid = clean(account.optString("siteUserId", ""));
-        String[] paths = { "/api/user/logout", "/api/auth/logout", "/logout" };
-        boolean sawUnknown = false;
-        for (String path : paths) {
-            try {
-                Request.Builder b = new Request.Builder().url(base + path)
-                        .post(RequestBody.create("{}", JSON));
-                if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
-                if (!cookie.isEmpty()) b.header("Cookie", cookie);
-                if (!uid.isEmpty()) b.header("New-Api-User", uid);
-                try (Response r = HTTP.newCall(b.build()).execute()) {
-                    int code = r.code();
-                    if (code >= 200 && code < 300) return CONFIRMED;   // logout 端点接受即确认
-                    if (code == 401 || code == 404 || code == 405) return ABSENT;
-                    if (code == 429 || code >= 500) return UNCONFIRMED;
-                    if (code == 403) return DENIED;
-                    sawUnknown = true;
+        try {
+            Request.Builder b = new Request.Builder().url(base + "/api/user/logout")
+                    .get().header("Accept", "application/json");
+            if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
+            if (!cookie.isEmpty()) b.header("Cookie", cookie);
+            if (!uid.isEmpty()) b.header("New-Api-User", uid);
+            try (Response r = HTTP.newCall(b.build()).execute()) {
+                int code = r.code();
+                String body = r.body() != null ? r.body().string() : "";
+                if (code == 401) return ABSENT;
+                if (code == 403) return DENIED;
+                if (code == 429 || code >= 500) return UNCONFIRMED;
+                if (code < 200 || code >= 300) return UNCONFIRMED;
+                try {
+                    JSONObject json = new JSONObject(body);
+                    return json.optBoolean("success", false) ? CONFIRMED : DENIED;
+                } catch (Exception ignored) {
+                    return UNCONFIRMED; // HTML/非 JSON 绝不能当作注销成功
                 }
-            } catch (Exception e) {
-                return UNCONFIRMED; // 超时/代理不可达：无法确认，禁止建新会话
             }
+        } catch (Exception e) {
+            return UNCONFIRMED;
         }
-        return sawUnknown ? UNCONFIRMED : ABSENT;
     }
 
     /** 清除账号旧站点会话凭据（token/siteCookie 置空，保留身份锚点字段）。 */

@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private int page = 0;                       // 0=看板 1=设置
     private volatile boolean bulkBusy = false;  // 全局动作互斥
     private volatile boolean singleBusy = false;
+    private interface ResultDone { void run(boolean ok); }
 
     @Override protected void onDestroy() {
         UpdateChecker.setListener(null);
@@ -76,6 +77,7 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         Ui.initIcons(this);
+        new Store(this).rolloverDailyState();
         engine = new Engine(this);
         Engine.schedule(this);
         UpdateChecker.auto(this);
@@ -388,6 +390,7 @@ public class MainActivity extends Activity {
     void render() {
         if (boardList == null) return;
         Store store = new Store(this);
+        store.rolloverDailyState();
         /* 顶栏摘要 */
         JSONObject sm = store.summary();
         topSummary.setText(sm.optInt("sites") + "站 " + sm.optInt("accounts") + "号 · "
@@ -565,7 +568,7 @@ public class MainActivity extends Activity {
                     if (bulkBusy || singleBusy) { toast("任务进行中…"); return; }
                     singleBusy = true;
                     main.setText("重登中…");
-                    reloginCheckin(siteKey, key, () -> { singleBusy = false; main.setText("签到"); });
+                    reloginCheckin(siteKey, key, ok -> { singleBusy = false; main.setText("签到"); });
                 });
             } else {
                 main = Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
@@ -687,7 +690,9 @@ public class MainActivity extends Activity {
                  * 只有 ST_PENDING（已授权+今日未签+非网页站）进队列；
                  * 旧口径 token.isEmpty() 会把 cookie 型站（AgentRouter，token 空
                  * 但 siteCookie 是真凭据）误跳过，造成「顶栏有待签、队列却空」。 */
-                if (Engine.acctState(s, a) != Engine.ST_PENDING) continue;
+                /* 重登型站必须进入服务端复核，不能被本地 lastCheckin 直接跳过。 */
+                if (!Engine.needsReloginCheckin(s) && Engine.acctState(s, a) != Engine.ST_PENDING) continue;
+                if (Engine.needsReloginCheckin(s) && Engine.acctState(s, a) == Engine.ST_NEED_AUTH) continue;
                 targets.add(new String[]{ s.optString("key"), a.optString("key"),
                         Engine.siteKind(s) });
             }
@@ -768,8 +773,8 @@ public class MainActivity extends Activity {
              * AgentRouter/JustDoWork 当日奖励只在发生一次新登录时发放——
              * 走「登出→SilentAuth 重登→刷新取奖励」；其他 login 型站保持刷新取奖励。 */
             if (Engine.needsReloginCheckin(store.findSite(sk))) {
-                reloginCheckin(sk, ak, () -> {
-                    stat[0]++;   // 重登成功即视为完成；失败情况已在 reloginCheckin 内落日志
+                reloginCheckin(sk, ak, ok -> {
+                    if (ok) stat[0]++; else stat[1]++;
                     runBulkCheckin(list, idx + 1, stat);
                 });
                 return;
@@ -813,57 +818,77 @@ public class MainActivity extends Activity {
      *   → 成功后刷新 status()，此时 todayBonus 能取到当日奖励并落库已签。
      * SilentAuth 需要 UI 时转 beginAuth 走可见授权。
      */
-    private void reloginCheckin(String siteKey, String accountKey, Runnable done) {
+    private void reloginCheckin(String siteKey, String accountKey, ResultDone done) {
         Store store = new Store(this);
         JSONObject site = store.findSite(siteKey);
-        if (site == null) { toast("站点信息缺失"); if (done != null) done.run(); return; }
-        store.opLog(siteKey, accountKey, "重登签到", "info",
-                "登出旧会话以触发当日奖励发放", "GET /api/user/logout", "auto");
-        final JSONObject siteSnap, accSnap;
-        try {
-            siteSnap = new JSONObject(site.toString());
-            JSONObject a0 = store.findAccount(accountKey);
-            accSnap = a0 == null ? new JSONObject() : new JSONObject(a0.toString());
-        } catch (Exception e) {
-            store.opLog(siteKey, accountKey, "重登签到", "err", "快照构造失败", String.valueOf(e.getMessage()), "auto");
-            toast("重登签到准备失败");
-            if (done != null) done.run();
+        if (site == null) { toast("站点信息缺失"); if (done != null) done.run(false); return; }
+        /* 授权/签到事务锁：与 startAuth 共用，保证同账号任意时刻只有一条会话链路，
+         * 杜绝"签到重登"与"重新授权"并行各建一个会话。 */
+        if (!ReauthManager.acquire(siteKey, accountKey)) {
+            toast("该账号已有会话流程进行中，请稍候");
+            if (done != null) done.run(false);
             return;
         }
+        store.opLog(siteKey, accountKey, "重登签到", "info",
+                "登出旧会话以触发当日奖励发放", "GET /api/user/logout", "auto");
         new Thread(() -> {
-            /* 1. 登出旧会话（失败不阻断：服务端可能已过期，重登一样触发发奖） */
-            boolean loggedOut = DeleteCoordinator.logout(siteSnap, accSnap);
-            store.opLog(siteKey, accountKey, "重登签到", loggedOut ? "info" : "warn",
-                    loggedOut ? "旧会话已登出" : "旧会话登出未确认（可能已失效），继续重登", "", "auto");
-            /* 2. 静默重登 */
+            /* 1. 登出旧会话——必须确认结果。engine.logoutSession 会先用 refresh cookie
+             * 续期拿有效 token 再登出并复核（token 过期直接 logout 会误判已登出、
+             * 实际会话残留 = just 站会话卡死根因）。无法确认时绝不重登建新会话。 */
+            int lo = engine.logoutSession(accountKey);
+            if (!ReauthManager.mayProceed(lo)) {
+                ReauthManager.release(siteKey, accountKey);
+                store.opLog(siteKey, accountKey, "重登签到", "err",
+                        "旧会话注销未确认，已中止重登", ReauthManager.describe(lo) + "；不建立新会话以防会话数超限", "auto");
+                h.post(() -> {
+                    pushLog(store);
+                    toast("无法确认旧会话已退出（" + ReauthManager.describe(lo) + "），本次未签到");
+                    if (done != null) done.run(false);
+                });
+                return;
+            }
+            store.opLog(siteKey, accountKey, "重登签到", "info", ReauthManager.describe(lo), "旧会话已清理，开始重登", "auto");
+            /* 2. 静默重登（复用账号 Profile 的 GitHub 会话，用户无感） */
             SilentAuth.run(this, siteKey, accountKey, (ok, needUi, user, msg) -> {
                 if (ok) {
+                    ReauthManager.release(siteKey, accountKey);
                     store.opLog(siteKey, accountKey, "重登签到", "ok",
                             "重新登录成功，正在刷新领取奖励" + (user == null || user.isEmpty() ? "" : " · " + user), "", "auto");
                     /* 3. 刷新取奖励：status() 的 todayBonus 探测此时应命中今日记录并落库已签 */
                     new Thread(() -> {
+                        boolean verified = false;
                         try {
                             JSONObject st = engine.status(accountKey);
+                            verified = st.optInt("http", 0) == 200 && st.optBoolean("todayChecked", false);
                             store.patchAccount(accountKey, buildStatusPatch(st));
-                        } catch (Exception ignored) {}
+                        } catch (Exception e) {
+                            store.opLog(siteKey, accountKey, "重登签到", "err", "奖励核验异常", String.valueOf(e.getMessage()), "auto");
+                        }
+                        final boolean success = verified;
+                        store.opLog(siteKey, accountKey, "重登签到", success ? "ok" : "err",
+                                success ? "北京时间当日签到奖励已核验" : "重新登录成功，但未发现北京时间当日奖励记录",
+                                "刷新成功不等于奖励到账", "auto");
                         h.post(() -> {
                             pushLog(store);
-                            toast("重登签到完成，额度与奖励已刷新");
+                            toast(success ? "签到成功，今日奖励已核验" : "重登完成但未核验到今日奖励，本次不计成功");
                             render();
-                            if (done != null) done.run();
+                            if (done != null) done.run(success);
                         });
                     }, "relogin-refresh").start();
                 } else if (needUi) {
+                    /* 转可见授权：锁交给 startAuth/AuthActivity 生命周期接管，这里不释放。 */
                     store.opLog(siteKey, accountKey, "重登签到", "info",
                             "静默重登需人工授权，转授权页", msg == null ? "" : msg, "auto");
                     toast("该账号需要重新授权一次" + (msg == null || msg.isEmpty() ? "" : "：" + msg));
+                    ReauthManager.release(siteKey, accountKey);
                     beginAuth(store.findSite(siteKey), store.findAccount(accountKey));
-                    if (done != null) done.run();
+                    if (done != null) done.run(false);
                 } else {
+                    ReauthManager.release(siteKey, accountKey);
                     store.opLog(siteKey, accountKey, "重登签到", "err",
                             "重登失败", msg == null ? "" : msg, "auto");
                     toast("重登签到失败" + (msg == null || msg.isEmpty() ? "" : "：" + msg));
-                    if (done != null) done.run();
+                    if (done != null) done.run(false);
                 }
             });
         }, "relogin-checkin").start();
@@ -1349,7 +1374,9 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
     private void reauthorizeWithLogout(JSONObject site, JSONObject acc, String sk, String ak) {
         busyBegin("正在注销旧会话…");
         new Thread(() -> {
-            int logout = ReauthManager.logoutVerified(site, acc);
+            /* 与签到重登统一走 engine.logoutSession：token 过期时先续期再登出并复核，
+             * 避免带过期 token 直接 logout 被判 401 而误以为已登出、实际会话残留。 */
+            int logout = engine.logoutSession(ak);
             final boolean proceed = ReauthManager.mayProceed(logout);
             Store store = new Store(this);
             store.opLog(sk, ak, "重新授权", proceed ? "info" : "err",

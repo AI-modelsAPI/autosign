@@ -312,12 +312,12 @@ public final class SilentAuth {
             Response resp = null;
             try {
                 /* v0.6.7 会话指纹（旧）：交换前落库的 siteCookie 指纹，用于与交换后的新指纹对比。
-                 * 判据：一轮授权中新旧指纹不同 = 新建会话；相同 = 复用会话。 */
+                 * 判据：指纹仅用于确认新凭据是否变化，不证明旧会话已销毁。 */
                 try {
                     JSONObject accF = store.findAccount(accountKey);
                     String oldCk = accF == null ? "" : accF.optString("siteCookie", "");
                     store.opLog(siteKey, accountKey, "后台凭据交换", "info",
-                            "会话指纹(旧)", "cookieFP=" + sessionFingerprint(oldCk), "auto");
+                            "交换前凭据指纹", "cookieFP=" + sessionFingerprint(oldCk), "auto");
                 } catch (Exception ignored) {}
                 OkHttpClient c = client();
                 Request.Builder rb = new Request.Builder()
@@ -486,11 +486,11 @@ public final class SilentAuth {
                         /* 落库：token（可空）+ siteCookie（cookie 型站真凭据） */
                         try {
                             /* v0.6.7 会话指纹：落库 cookie 的 SHA-256 前 8 位（脱敏，不含值）。
-                             * 测试判据：一轮授权中指纹变化 = 站点新建了会话；不变 = 复用。 */
+                             * 测试判据：指纹变化仅表示获得不同凭据，不证明旧会话已销毁。 */
                             if (!setCookie.isEmpty()) {
                                 String fp = sessionFingerprint(setCookie);
                                 store.opLog(siteKey, accountKey, "后台凭据交换", "info",
-                                        "会话指纹(新)", "cookieFP=" + fp, "auto");
+                                        "新会话凭据指纹", "cookieFP=" + fp, "auto");
                             }
                             JSONObject patch = new JSONObject()
                                     .put("siteKey", siteKey)

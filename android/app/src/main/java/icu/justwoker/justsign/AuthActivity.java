@@ -822,7 +822,7 @@ public class AuthActivity extends Activity {
             /* v0.6.7 会话指纹（新·可见授权链路）：与 SilentAuth 同判据。 */
             try {
                 new Store(this).opLog(siteKey, accountKey, "授权链路", "info",
-                        "会话指纹(新)", "cookieFP=" + SilentAuth.sessionFingerprint(setCookie), "auto");
+                        "新会话凭据指纹", "cookieFP=" + SilentAuth.sessionFingerprint(setCookie), "auto");
             } catch (Exception ignored) {}
         }
         /* v0.3.8：落账号锚点与站内用户ID，供身份校验和 New-Api-User 头使用。 */

@@ -164,8 +164,9 @@ public class Engine {
     /**
      * 在现有长期会话内轮换短期访问令牌。锁内重新读取凭据，避免多个任务并发消费
      * 同一个一次性 Refresh Cookie。token 与轮换后的 Cookie 通过一次 patch 原子落库。
+     * v1.0.5：开放为 public，供登出前"用 refresh cookie 换新 token 再销毁会话"复用。
      */
-    private String refreshAccessToken(JSONObject site, String accountKey, String failedToken) {
+    public String refreshAccessToken(JSONObject site, String accountKey, String failedToken) {
         synchronized (refreshLock(accountKey)) {
             JSONObject acc = store.findAccount(accountKey);
             if (acc == null) return "";
@@ -227,6 +228,80 @@ public class Engine {
                 if (response != null) response.close();
             }
         }
+    }
+
+    /**
+     * 会话销毁前的登出：先用 refresh cookie 续期拿有效 token（token 15min 过期后
+     * 直接 logout 会被判 401 而误以为已登出，实际会话还活着——just 站会话卡死根因），
+     * 再带有效 token+cookie 调 GET /api/user/logout，最后用 /api/user/self 复核。
+     * 返回 ReauthManager 的分级码：CONFIRMED / ABSENT / UNCONFIRMED / DENIED。
+     */
+    public int logoutSession(String accountKey) {
+        JSONObject site = store.siteOfAccount(accountKey);
+        JSONObject acc = store.findAccount(accountKey);
+        if (site == null || acc == null) return ReauthManager.UNCONFIRMED;
+        String base = site.optString("baseUrl", "").replaceAll("/+$", "");
+        if (base.isEmpty()) return ReauthManager.UNCONFIRMED;
+        String sKey = site.optString("key", "");
+        String token = clean(acc.optString("token", ""));
+        String cookie = clean(acc.optString("siteCookie", ""));
+        if (token.isEmpty() && cookie.isEmpty()) return ReauthManager.ABSENT; // 无凭据 = 无会话
+        /* 1. token 过期且有 refresh cookie → 先续期，拿到服务端认得的有效 token。 */
+        if (hasRefreshCookie(cookie) && SilentAuth.needsExchange(token)) {
+            String fresh = refreshAccessToken(site, accountKey, null);
+            if (!fresh.isEmpty()) {
+                token = fresh;
+                JSONObject acc2 = store.findAccount(accountKey);
+                if (acc2 != null) cookie = clean(acc2.optString("siteCookie", cookie));
+                store.opLog(sKey, accountKey, "登出", "info", "登出前已续期短期令牌", "确保服务端认得该会话", "auto");
+            }
+        }
+        String uid = clean(acc.optString("siteUserId", ""));
+        try {
+            Request.Builder b = new Request.Builder().url(base + "/api/user/logout")
+                    .get().header("Accept", "application/json").header("User-Agent", UA);
+            if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
+            if (!cookie.isEmpty()) b.header("Cookie", cookie);
+            if (!uid.isEmpty()) b.header("New-Api-User", uid);
+            Response r = buildClientFromConfig().newCall(b.build()).execute();
+            int code;
+            String body;
+            try { code = r.code(); body = r.body() != null ? r.body().string() : ""; }
+            finally { r.close(); }
+            if (code == 403) return ReauthManager.DENIED;
+            if (code == 429 || code >= 500) return ReauthManager.UNCONFIRMED;
+            boolean logoutAccepted = false;
+            if (code == 401) {
+                logoutAccepted = true; // 续期后仍 401 = 会话确已失效
+            } else if (code >= 200 && code < 300) {
+                try { logoutAccepted = new JSONObject(body).optBoolean("success", false); }
+                catch (Exception e) { return ReauthManager.UNCONFIRMED; } // HTML 前端路由不算
+            }
+            if (!logoutAccepted) return ReauthManager.UNCONFIRMED;
+            /* 2. 复核：用同一 cookie 再查 self，401/未授权 = 会话确已销毁。 */
+            int verify = probeSessionAlive(base, token, cookie, uid);
+            if (verify == 401) return ReauthManager.CONFIRMED;
+            if (verify == 200) return ReauthManager.UNCONFIRMED; // 会话仍活，登出没生效
+            return ReauthManager.CONFIRMED; // 复核不可达但 logout 已被接受，按已登出处理
+        } catch (Exception e) {
+            store.opLog(sKey, accountKey, "登出", "warn", "登出请求异常", e.getClass().getSimpleName(), "auto");
+            return ReauthManager.UNCONFIRMED;
+        }
+    }
+
+    /** 用给定凭据探测会话是否仍有效。返回 HTTP 码；异常返回 0。 */
+    private int probeSessionAlive(String base, String token, String cookie, String uid) {
+        try {
+            Request.Builder b = new Request.Builder().url(base + "/api/user/self")
+                    .get().header("Accept", "application/json").header("User-Agent", UA);
+            if (token != null && !token.isEmpty()) b.header("Authorization", "Bearer " + token);
+            if (cookie != null && !cookie.isEmpty()) b.header("Cookie", cookie);
+            if (uid != null && !uid.isEmpty()) b.header("New-Api-User", uid);
+            Response r = buildClientFromConfig().newCall(b.build()).execute();
+            int code = r.code();
+            r.close();
+            return code;
+        } catch (Exception e) { return 0; }
     }
 
     private OkHttpClient buildClientFromConfig() {
@@ -500,7 +575,8 @@ public class Engine {
                 .put("authorized", selfHttp == 200)
                 .put("availableUSD", Math.round(quota / unit * 100.0) / 100.0)
                 .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
-                .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user);
+                .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user)
+                .put("statusDate", todayStr());
         if (selfHttp != 200) {
             /* v0.4.3：WAF 归一化响应自带通俗 message，优先透传 */
             String wm = self.optString("message", "");
@@ -525,21 +601,25 @@ public class Engine {
 
         /* 签到状态与奖励检测 */
         if (selfHttp == 200) {
+            boolean loginKind = "login".equals(siteKind(site));
             JSONObject cs = null;
             try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
-            if ((cs == null || !cs.optBoolean("checked", false)) && "login".equals(siteKind(site))) {
-                /* 登录即得站以今日系统奖励记录为最终判据。部分站点的 checkin 接口会返回
-                 * checked=false，但同一账号今日奖励日志已存在；奖励既然已到账，就不允许 UI
-                 * 再显示“待签”。只在 login 型站补探测，避免普通签到站误把其他奖励当签到。 */
+            if ((cs == null || !cs.optBoolean("checked", false)) && loginKind) {
+                /* 登录即得站以「今日系统奖励记录」为最终判据。checkinStatus 已按北京时间
+                 * 严格比对 checkin_date；这里再用今日奖励日志兜底（日志接口偶发被 WAF 拦）。
+                 * todayBonus 内部已用 isToday(北京时间) 过滤，只会命中当日记录。 */
                 JSONObject probe = null;
                 try { probe = todayBonus(key); } catch (Exception ignored) {}
                 if (probe != null) cs = new JSONObject().put("checked", true)
                         .put("rewardUSD", probe.optDouble("rewardUSD", 0))
                         .put("rewardKnown", probe.optBoolean("rewardKnown", false));
             }
-            /* v0.4.4（审计方案A）：/api/user/self 的 checked_in 是站点已签的直接信号
-             * （checkin() 已采信同一信号），日志接口被 WAF 拦时也能正确显示已签。 */
-            if (cs == null && selfU.has("checked_in")) {
+            /* v1.0.5：checked_in 布尔仅作「非 login 型站」的兜底信号。
+             * login 型站（AgentRouter/JustDoWork）当日奖励靠登出重登发放，
+             * self.checked_in 可能因站点缓存/时区滞后为 true，单凭它会把
+             * 「今日实际未签」误判成已签（账号1误判根因）——因此 login 型站
+             * 绝不采信 checked_in，只认 checkinStatus/todayBonus 的当日记录。 */
+            if (cs == null && !loginKind && selfU.has("checked_in")) {
                 cs = new JSONObject().put("checked", selfU.optBoolean("checked_in", false))
                         .put("rewardUSD", 0).put("rewardKnown", false);
             }
@@ -806,10 +886,12 @@ public class Engine {
                .put("message", httpHint(code));
             return out;
         }
-        /* AgentRouter 一类站在 /api/user/self 里直接给 checked_in 布尔，
-         * 这是「登录即签到」最可靠的确证信号，优先采信。 */
+        /* AgentRouter 一类站在 /api/user/self 里直接给 checked_in 布尔。
+         * 但重登型站（AG/Just）的 checked_in 可能因站点缓存/时区滞后为 true，
+         * 而当日奖励实际要靠登出重登才发放——因此重登型站绝不采信 checked_in，
+         * 一律走下方 needsRelogin 分支，由重登流程核对当日真实奖励后再标已签。 */
         JSONObject su = dd(self);
-        if (su != null && su.has("checked_in")) {
+        if (su != null && su.has("checked_in") && !Engine.needsReloginCheckin(site)) {
             boolean ci = su.optBoolean("checked_in", false);
             out.put("ok", ci).put("already", ci).put("reward", 0).put("rewardKnown", false)
                .put("message", ci ? "登录即签到 · 站点已标记今日已签"
@@ -929,15 +1011,18 @@ public class Engine {
     }
 
     public static boolean isToday(long ms) {
-        java.util.Calendar a = java.util.Calendar.getInstance();
+        java.util.TimeZone cst = java.util.TimeZone.getTimeZone("Asia/Shanghai");
+        java.util.Calendar a = java.util.Calendar.getInstance(cst);
         a.setTimeInMillis(ms);
-        java.util.Calendar b = java.util.Calendar.getInstance();
+        java.util.Calendar b = java.util.Calendar.getInstance(cst);
         return a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
                 && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR);
     }
 
     public static String todayStr() {
-        return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date());
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"));
+        return f.format(new java.util.Date());
     }
 
     public static boolean isCheckedToday(JSONObject acc) {
@@ -1104,10 +1189,15 @@ public class Engine {
                             store.appendLog(sKey, key, "cron-relogin", "今日无奖励，执行登出重登签到");
                             store.opLog(sKey, key, "定时签到", "info",
                                     "今日无签到奖励，登出旧会话并重新登录触发发放", "", "cron");
-                            boolean loggedOut;
-                            try { loggedOut = DeleteCoordinator.logout(site, tk); }
-                            catch (Exception le) { loggedOut = false; }
-                            store.appendLog(sKey, key, "cron-relogin-logout", loggedOut ? "ok" : "unconfirmed");
+                            /* 登出必须确认结果——logoutSession 先续期再登出并复核，无法确认则中止，
+                             * 绝不建新会话（防会话数超限）。 */
+                            int lo = logoutSession(key);
+                            store.appendLog(sKey, key, "cron-relogin-logout", ReauthManager.describe(lo));
+                            if (!ReauthManager.mayProceed(lo)) {
+                                store.opLog(sKey, key, "定时签到", "err",
+                                        "旧会话注销未确认，已跳过重登", ReauthManager.describe(lo) + "；不建立新会话", "cron");
+                                continue;
+                            }
                             final CountDownLatch rl = new CountDownLatch(1);
                             final String[] rlEv = { "cron-relogin-fail" };
                             final String[] rlDt = { "未返回" };
@@ -1137,7 +1227,11 @@ public class Engine {
                                     }
                                     store.patchAccount(key, patch);
                                 }
-                                store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc2);
+                                boolean verified = hc2 == 200 && r2.optBoolean("todayChecked", false);
+                                store.opLog(sKey, key, "定时签到", verified ? "ok" : "err",
+                                        verified ? "北京时间当日奖励已核验" : "重登成功但未发现北京时间当日奖励记录",
+                                        "刷新成功不等于奖励到账", "cron");
+                                store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc2 + ";verified=" + verified);
                             }
                         } else {
                             /* v0.4.6：登录保活改走 status()，额度同时写入 lastStatus */

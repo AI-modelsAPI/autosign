@@ -25,6 +25,34 @@ public class Store {
 
     public Store(Context c) { sp = c.getApplicationContext().getSharedPreferences(SP, Context.MODE_PRIVATE); }
 
+    /** 北京时间跨日幂等清理：旧 lastCheckin 与 lastStatus.today* 不得污染新一天。 */
+    public void rolloverDailyState() {
+        synchronized (LOCK) {
+            try {
+                JSONObject cfg = config();
+                JSONArray sites = cfg.optJSONArray("sites");
+                String today = Engine.todayStr();
+                boolean changed = false;
+                for (int i = 0; sites != null && i < sites.length(); i++) {
+                    JSONObject site = sites.optJSONObject(i);
+                    JSONArray accs = site == null ? null : site.optJSONArray("accounts");
+                    for (int j = 0; accs != null && j < accs.length(); j++) {
+                        JSONObject acc = accs.optJSONObject(j);
+                        if (acc == null) continue;
+                        JSONObject lc = acc.optJSONObject("lastCheckin");
+                        if (lc != null && !today.equals(lc.optString("date", ""))) { acc.remove("lastCheckin"); changed = true; }
+                        JSONObject ls = acc.optJSONObject("lastStatus");
+                        if (ls != null && !today.equals(ls.optString("statusDate", ""))) {
+                            ls.remove("todayChecked"); ls.remove("todayRewardUSD"); ls.remove("todayRewardKnown"); ls.remove("todayUsed");
+                            ls.put("statusDate", today); changed = true;
+                        }
+                    }
+                }
+                if (changed) saveConfigLocked(cfg);
+            } catch (Exception ignored) {}
+        }
+    }
+
     /* ---------- config + sites + accounts ---------- */
     public JSONObject config() {
         synchronized (LOCK) {

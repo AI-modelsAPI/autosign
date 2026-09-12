@@ -68,13 +68,38 @@ public final class OffscreenCheckin {
                 if (site != null) new Engine(app).ensureBusinessToken(site, accountKey);
             } catch (Exception ignored) {}
             new Handler(Looper.getMainLooper()).post(() ->
-                    new Runner(app, siteKey, accountKey, to, (ok, already, reward, known, message) -> {
-                        new Store(app).opLog(siteKey, accountKey, "后台签到V2", ok ? "ok" : "warn", "签到链路结束",
-                                "schema=" + LOG_SCHEMA + "；trace=" + trace + "；ok=" + ok
-                                        + "；already=" + already + "；oauth=false", "auto");
-                        cb.onResult(ok, already, reward, known, message);
-                    }).start());
+                    runAttempt(app, siteKey, accountKey, to, trace, 0, cb));
         }, "offcheckin-refresh").start();
+    }
+
+    /** Turnstile 仅对明确 wait-timeout 做一次安全重试；全程同一 trace，避免重复任务失控。 */
+    private static void runAttempt(Context app, String siteKey, String accountKey, int timeoutSec,
+                                   String trace, int attempt, Callback cb) {
+        new Runner(app, siteKey, accountKey, timeoutSec, (ok, already, reward, known, message) -> {
+            String safe = message == null ? "" : message;
+            boolean turnstileTimeout = !ok && safe.contains("wait-timeout");
+            Store store = new Store(app);
+            store.opLog(siteKey, accountKey, "后台签到V2", ok ? "ok" : "warn", "签到尝试结束",
+                    "schema=" + LOG_SCHEMA + "；trace=" + trace + "；attempt=" + (attempt + 1)
+                            + "；ok=" + ok + "；already=" + already + "；turnstileTimeout=" + turnstileTimeout
+                            + "；network=" + networkClass(safe) + "；oauth=false", "auto");
+            if (turnstileTimeout && attempt == 0) {
+                store.opLog(siteKey, accountKey, "后台签到V2", "info", "Turnstile 超时，安全重试一次",
+                        "schema=" + LOG_SCHEMA + "；trace=" + trace + "；siteKeyPresent=true；attempt=2", "auto");
+                new Handler(Looper.getMainLooper()).postDelayed(
+                        () -> runAttempt(app, siteKey, accountKey, timeoutSec, trace, 1, cb), 1200L);
+                return;
+            }
+            cb.onResult(ok, already, reward, known, safe);
+        }).start();
+    }
+
+    private static String networkClass(String message) {
+        String m = message == null ? "" : message.toLowerCase(java.util.Locale.US);
+        if (m.contains("timeout")) return "timeout";
+        if (m.contains("net::") || m.contains("加载失败")) return "network";
+        if (m.contains("http 403") || m.contains("cf-")) return "challenge";
+        return "none";
     }
 
     private static final class Runner {
