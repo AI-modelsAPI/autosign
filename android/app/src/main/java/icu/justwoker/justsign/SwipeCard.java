@@ -48,6 +48,8 @@ public class SwipeCard extends FrameLayout {
     private boolean dragging = false;
     private boolean docked = false;     // 是否停靠在露出删除按钮的位置
     private boolean armedRefresh = false;
+    /** v1.0.6：右滑刷新进行中。避免重复触发，并在完成回调到来时复位视觉状态。 */
+    private boolean refreshing = false;
 
     public SwipeCard(Context c) {
         super(c);
@@ -158,14 +160,10 @@ public class SwipeCard extends FrameLayout {
                 card.setTranslationX(target);
                 setBoardsVisible(target > 0, target < 0);
                 armedRefresh = target >= thresholdPx;
-                /* 到达刷新阈值时提示文案变化 */
-                if (leftBoard instanceof LinearLayout) {
-                    View t = ((LinearLayout) leftBoard).getChildAt(0);
-                    if (t instanceof TextView) {
-                        TextView tv = (TextView) t;
-                        tv.setText(armedRefresh ? "松开立即刷新" : "刷新数据");
-                        Ui.setLead(tv, armedRefresh ? "check" : "refresh", 13, Ui.GREEN);
-                    }
+                /* 到达刷新阈值时提示文案变化；刷新进行中不覆盖「正在刷新…」。 */
+                if (!refreshing) {
+                    setLeftText(armedRefresh ? "松开立即刷新" : "刷新数据",
+                            armedRefresh ? "check" : "refresh");
                 }
                 return true;
             }
@@ -185,6 +183,16 @@ public class SwipeCard extends FrameLayout {
                 if (tx >= thresholdPx) {                    // 右滑达标 → 刷新
                     animateTo(0);
                     docked = false;
+                    /* v1.0.6：右滑刷新必须有明确的开始/结束状态。
+                     * 旧实现发出 onRefresh 就不管了：提示板停留在「松开立即刷新」，
+                     * 而 refreshOne 单账号链路实测耗时 9~58s（self + 今日消耗 +
+                     * 签到状态 + 奖励日志，WAF 重试还会叠加），用户看到的就是一直转圈。
+                     * 现在进入 refreshing 态显示「正在刷新…」，由调用方在完成时
+                     * 调 finishRefresh() 复位；重复右滑在刷新期间直接忽略。 */
+                    if (refreshing) return true;
+                    refreshing = true;
+                    setLeftText("正在刷新…", "refresh");
+                    setBoardsVisible(true, false);
                     if (listener != null) listener.onRefresh();
                 } else if (tx <= -thresholdPx) {            // 左滑达标 → 停靠露删除
                     animateTo(-actionWidthPx);
@@ -214,7 +222,29 @@ public class SwipeCard extends FrameLayout {
     /** 外部强制归位（例如刷新完成后重绘列表） */
     public void reset() {
         docked = false;
+        refreshing = false;
+        if (card != null) card.setTranslationX(0);
+        setLeftText("刷新数据", "refresh");
+        setBoardsVisible(false, false);
+    }
+    /**
+     * v1.0.6：刷新完成回调——调用方（MainActivity.refreshOne）必须在成功或失败时
+     * 都调用一次，否则提示板会永久停留在「正在刷新…」。幂等，可重复调用。
+     */
+    public void finishRefresh() {
+        refreshing = false;
+        setLeftText("刷新数据", "refresh");
         if (card != null) card.setTranslationX(0);
         setBoardsVisible(false, false);
+    }
+    public boolean isRefreshing() { return refreshing; }
+    /** 统一维护左侧提示板的文案与图标，避免多处重复取 childAt(0)。 */
+    private void setLeftText(String text, String icon) {
+        if (!(leftBoard instanceof LinearLayout)) return;
+        View t = ((LinearLayout) leftBoard).getChildAt(0);
+        if (!(t instanceof TextView)) return;
+        TextView tv = (TextView) t;
+        tv.setText(text);
+        Ui.setLead(tv, icon, 13, Ui.GREEN);
     }
 }

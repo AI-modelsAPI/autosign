@@ -495,10 +495,21 @@ public class MainActivity extends Activity {
                 sc.setCard(accountItem(site, a));
                 final JSONObject fa = a;
                 final String fak = a.optString("key");
+                /* v1.0.6：用弱引用回传完成信号。refreshOne 结束时会 render() 重建整个列表，
+                 * 此实例可能已被丢弃；弱引用避免无谓持有，同时保证「未被重建」的情况下
+                 * 能正确复位「正在刷新…」提示（旧实现完全没有完成回调 → 永久转圈）。 */
+                final java.lang.ref.WeakReference<SwipeCard> ref = new java.lang.ref.WeakReference<>(sc);
                 sc.setListener(new SwipeCard.Listener() {
                     @Override public void onRefresh() {
-                        if (fak.isEmpty()) return;
-                        refreshOne(fak);
+                        if (fak.isEmpty()) {
+                            SwipeCard s = ref.get();
+                            if (s != null) s.finishRefresh();
+                            return;
+                        }
+                        refreshOne(fak, () -> {
+                            SwipeCard s = ref.get();
+                            if (s != null) s.finishRefresh();
+                        });
                     }
                     @Override public void onDelete() { confirmRemoveAccount(fa); }
                 });
@@ -1144,49 +1155,67 @@ singleBusy = true;
     }
 
     private void refreshOne(String key) {
+        refreshOne(key, null);
+    }
+    /**
+     * @param onDone 刷新链路结束回调（成功/失败都会调用，主线程）。
+     *               v1.0.6：右滑刷新用它复位 SwipeCard 的「正在刷新…」提示，
+     *               否则卡片会一直转圈——即使额度早已更新落库。
+     */
+    private void refreshOne(String key, Runnable onDone) {
         busyBegin("正在刷新额度…");
         new Thread(() -> {
             Store store = new Store(this);
             try {
                 JSONObject st = engine.status(key);
                 store.patchAccount(key, buildStatusPatch(st));
-                /* v0.6.0：邀请额度自动划转（开关开启时）——刷新顺带把邀请收益转进余额 */
-                String affMsg = "";
-                if (st != null && st.optBoolean("ok", false)
-                        && store.uiPref("autoAffTransfer", false)) {
-                    try {
-                        JSONObject aff = engine.affTransfer(key);
-                        if (aff.optBoolean("ok", false)) {
-                            affMsg = aff.optString("message", "");
-                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "ok",
-                                    "邀请额度已自动划转", affMsg, "auto");
-                            /* 划转成功后重读额度，看板立即反映新余额 */
-                            JSONObject st2 = engine.status(key);
-                            store.patchAccount(key, buildStatusPatch(st2));
-                        } else if (!aff.optBoolean("skipped", false)) {
-                            affMsg = "邀请划转失败：" + aff.optString("message", "");
-                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
-                                    "邀请额度划转失败", aff.optString("message", ""), "auto");
-                        }
-                    } catch (Exception ae) {
-                        store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
-                                "邀请额度划转异常", String.valueOf(ae.getMessage()), "auto");
-                    }
-                }
-                /* v0.4.3（glm-5.3 审计方案2）：刷新失败必须用通俗文案告知用户，
-                 * WAF 拦截时明确引导「更换代理节点」，技术细节只进日志。 */
                 final String failMsg = st == null ? "" : st.optString("message", "");
                 final boolean okRefresh = st != null && st.optBoolean("ok", false);
-                final String fAff = affMsg;
+                /* v1.0.6：UI 立刻响应——额度更新后立刻解除忙碌并重绘看板，
+                 * 绝不等耗时的邀请划转（此前 affTransfer 网络重试/超时可达 40s，
+                 * 导致日志中额度早已更新、界面却一直转圈）。
+                 * 邀请划转放到独立后台线程静默执行，成功后再重绘。 */
                 h.post(() -> {
-                    busyEnd(); pushLog(store); render();
+                    busyEnd();
+                    pushLog(store);
+                    render();
+                    if (onDone != null) onDone.run();
                     if (!okRefresh && !failMsg.isEmpty()) toast(failMsg);
-                    else if (!fAff.isEmpty()) toast(fAff);
                 });
+                /* 邀请额度自动划转（后台静默进行，不阻塞刷新反馈） */
+                if (okRefresh && store.uiPref("autoAffTransfer", false)) {
+                    new Thread(() -> {
+                        try {
+                            JSONObject aff = engine.affTransfer(key);
+                            if (aff.optBoolean("ok", false)) {
+                                String affMsg = aff.optString("message", "");
+                                store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "ok",
+                                        "邀请额度已自动划转", affMsg, "auto");
+                                JSONObject st2 = engine.status(key);
+                                store.patchAccount(key, buildStatusPatch(st2));
+                                h.post(() -> {
+                                    pushLog(store);
+                                    render();
+                                    if (!affMsg.isEmpty()) toast(affMsg);
+                                });
+                            } else if (!aff.optBoolean("skipped", false)) {
+                                store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
+                                        "邀请额度划转失败", aff.optString("message", ""), "auto");
+                            }
+                        } catch (Exception ae) {
+                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
+                                    "邀请额度划转异常", String.valueOf(ae.getMessage()), "auto");
+                        }
+                    }, "bg-aff-transfer").start();
+                }
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
                         "刷新失败", String.valueOf(e.getMessage()), "user");
-                h.post(() -> { busyEnd(); pushLog(store); toast("刷新失败，请检查网络后重试"); });
+                h.post(() -> {
+                    busyEnd(); pushLog(store);
+                    if (onDone != null) onDone.run();
+                    toast("刷新失败，请检查网络后重试");
+                });
             }
         }).start();
     }
