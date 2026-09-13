@@ -179,7 +179,12 @@ public class MainActivity extends Activity {
     /** 结束一个任务；降到 0 时收起整条 */
     private void busyEnd() {
         if (busyDepth > 0) busyDepth--;
-        if (busyDepth == 0 && busyBar != null) busyBar.setVisibility(View.GONE);
+        /* v1.0.6：busyDepth 只能由 busyBegin/busyEnd 成对驱动，但异常路径可能多调一次。
+         * 归零即隐藏，且钳制在 0，避免负数导致后续 busyBegin 计数错乱、指示条再也不消失。 */
+        if (busyDepth <= 0) {
+            busyDepth = 0;
+            if (busyBar != null) busyBar.setVisibility(View.GONE);
+        }
     }
 
     private View buildTopBar() {
@@ -829,21 +834,34 @@ public class MainActivity extends Activity {
             if (done != null) done.run(false);
             return;
         }
+        /* v1.0.6：本方法自己成对管理忙碌指示。此前 runBulkCheckin 先 busyBegin，
+         * 走到重登分支后直接 return，busyEnd 永不执行 → 顶栏"刷新中"永久残留，
+         * 且残留状态会盖住随后的 render()，导致看板额度看似不更新。
+         * 统一用 finishRelogin 收尾：任何退出分支都保证 busyEnd + render + 回调。 */
+        busyBegin("重登签到 " + site.optString("name", siteKey) + "…");
+        final boolean[] settled = { false };
+        final ResultDone finish = ok -> {
+            if (settled[0]) return; // 幂等：SilentAuth 回调可能重入
+            settled[0] = true;
+            busyEnd();
+            pushLog(new Store(this));
+            render();
+            if (done != null) done.run(ok);
+        };
         store.opLog(siteKey, accountKey, "重登签到", "info",
                 "登出旧会话以触发当日奖励发放", "GET /api/user/logout", "auto");
         new Thread(() -> {
-            /* 1. 登出旧会话——必须确认结果。engine.logoutSession 会先用 refresh cookie
-             * 续期拿有效 token 再登出并复核（token 过期直接 logout 会误判已登出、
-             * 实际会话残留 = just 站会话卡死根因）。无法确认时绝不重登建新会话。 */
+            /* 1. 登出旧会话——必须确认结果。engine.logoutSession 先按站点续期模型取有效凭据，
+             * 再走「浏览器化 OkHttp 主通道 → 离屏 WebView 备用通道」登出并按响应体判定。
+             * 两条通道都无法确认时绝不重登建新会话。 */
             int lo = engine.logoutSession(accountKey);
             if (!ReauthManager.mayProceed(lo)) {
                 ReauthManager.release(siteKey, accountKey);
                 store.opLog(siteKey, accountKey, "重登签到", "err",
                         "旧会话注销未确认，已中止重登", ReauthManager.describe(lo) + "；不建立新会话以防会话数超限", "auto");
                 h.post(() -> {
-                    pushLog(store);
                     toast("无法确认旧会话已退出（" + ReauthManager.describe(lo) + "），本次未签到");
-                    if (done != null) done.run(false);
+                    finish.run(false);
                 });
                 return;
             }
@@ -869,10 +887,8 @@ public class MainActivity extends Activity {
                                 success ? "北京时间当日签到奖励已核验" : "重新登录成功，但未发现北京时间当日奖励记录",
                                 "刷新成功不等于奖励到账", "auto");
                         h.post(() -> {
-                            pushLog(store);
                             toast(success ? "签到成功，今日奖励已核验" : "重登完成但未核验到今日奖励，本次不计成功");
-                            render();
-                            if (done != null) done.run(success);
+                            finish.run(success);
                         });
                     }, "relogin-refresh").start();
                 } else if (needUi) {
@@ -882,13 +898,13 @@ public class MainActivity extends Activity {
                     toast("该账号需要重新授权一次" + (msg == null || msg.isEmpty() ? "" : "：" + msg));
                     ReauthManager.release(siteKey, accountKey);
                     beginAuth(store.findSite(siteKey), store.findAccount(accountKey));
-                    if (done != null) done.run(false);
+                    finish.run(false);
                 } else {
                     ReauthManager.release(siteKey, accountKey);
                     store.opLog(siteKey, accountKey, "重登签到", "err",
                             "重登失败", msg == null ? "" : msg, "auto");
                     toast("重登签到失败" + (msg == null || msg.isEmpty() ? "" : "：" + msg));
-                    if (done != null) done.run(false);
+                    finish.run(false);
                 }
             });
         }, "relogin-checkin").start();

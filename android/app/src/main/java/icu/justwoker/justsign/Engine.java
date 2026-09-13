@@ -37,7 +37,10 @@ import okhttp3.Response;
  */
 public class Engine {
     public static final long QUOTA_PER_UNIT_DEFAULT = 500000L;
-    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110 Build/UKQ1; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36";
+    /* v1.0.6：去掉 UA 中的 "; wv" 与 Version/4.0 标记。
+     * 实测阿里云 WAF 对 WebView 特征 UA 更易触发 JS 质询；改为标准 Chrome Mobile UA，
+     * 与 OffscreenLogout/OffscreenCheckin 的 UA 保持同族，避免同账号 UA 前后跳变。 */
+    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 
     private final Store store;
     private final Context ctx;
@@ -195,8 +198,13 @@ public class Engine {
             Response response = null;
             try {
                 Request request = new Request.Builder().url(base + "/api/user/auth/refresh")
-                        .header("User-Agent", UA).header("Accept", "application/json")
+                        .header("User-Agent", UA).header("Accept", "application/json, text/plain, */*")
+                        .header("Accept-Language", "zh-CN,zh;q=0.9")
                         .header("Origin", base).header("Referer", base + "/")
+                        .header("Sec-Fetch-Dest", "empty")
+                        .header("Sec-Fetch-Mode", "cors")
+                        .header("Sec-Fetch-Site", "same-origin")
+                        .header("X-Requested-With", "XMLHttpRequest")
                         .header("Cookie", cookie)
                         .post(RequestBody.create("{}", MediaType.parse("application/json"))).build();
                 response = buildClientFromConfig().newCall(request).execute();
@@ -497,9 +505,20 @@ public class Engine {
         Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
-                    .header("User-Agent", UA).header("Accept", "application/json")
-                    /* v0.4.3（复审②）：带 Referer 降低 WAF 误拦（模拟浏览器内 API 调用） */
-                    .header("Referer", url.substring(0, url.indexOf('/', 8)) + "/");
+                    .header("User-Agent", UA).header("Accept", "application/json, text/plain, */*")
+                    /* v1.0.6：全业务请求统一浏览器化请求头。
+                     * 实测依据：日志中 agentrouter 刷新被阿里云 WAF 拦截 11 次、定时刷新 2 次，
+                     * 远多于登出（4 次）——WAF 按请求头特征识别非浏览器客户端，
+                     * 只给登出补头治标不治本。这些头对不设 WAF 的站点无副作用。 */
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Origin", url.substring(0, url.indexOf('/', 8)))
+                    .header("Referer", url.substring(0, url.indexOf('/', 8)) + "/")
+                    .header("Sec-Fetch-Dest", "empty")
+                    .header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Sec-CH-UA-Mobile", "?1")
+                    .header("Sec-CH-UA-Platform", "\"Android\"")
+                    .header("X-Requested-With", "XMLHttpRequest");
             if (token != null && !token.isEmpty() && !"null".equals(token)) rb.header("Authorization", "Bearer " + token);
             /* opus4.8 审计·B-03：cookie 型站点会话头（New API gin session）。
              * 服务端 UserAuth 先查 session 再回退 Authorization，两者同带无害。 */
