@@ -246,62 +246,168 @@ public class Engine {
         String token = clean(acc.optString("token", ""));
         String cookie = clean(acc.optString("siteCookie", ""));
         if (token.isEmpty() && cookie.isEmpty()) return ReauthManager.ABSENT; // 无凭据 = 无会话
-        /* 1. token 过期且有 refresh cookie → 先续期，拿到服务端认得的有效 token。 */
+        String uid = clean(acc.optString("siteUserId", ""));
+        /* 1. 登出前续期，拿到服务端当下认得的有效凭据。两种续期模型：
+         *    a) Refresh Cookie 站（New API 标准）：POST /api/user/auth/refresh；
+         *    b) session Cookie 站（AgentRouter 等变体，实测无 auth/refresh，404）：
+         *       GET /api/user/self 的响应体自带 data.access_token，即其真实续期产物。
+         *    旧版只实现了 a)，b) 类站点因 hasRefreshCookie==false 从未续期过。 */
         if (hasRefreshCookie(cookie) && SilentAuth.needsExchange(token)) {
             String fresh = refreshAccessToken(site, accountKey, null);
             if (!fresh.isEmpty()) {
                 token = fresh;
                 JSONObject acc2 = store.findAccount(accountKey);
                 if (acc2 != null) cookie = clean(acc2.optString("siteCookie", cookie));
-                store.opLog(sKey, accountKey, "登出", "info", "登出前已续期短期令牌", "确保服务端认得该会话", "auto");
+                store.opLog(sKey, accountKey, "登出", "info", "登出前已续期短期令牌",
+                        "model=refresh-cookie；确保服务端认得该会话", "auto");
+            }
+        } else if (!cookie.isEmpty()) {
+            String fresh = renewSessionToken(site, accountKey, base, cookie, uid);
+            if (!fresh.isEmpty()) {
+                token = fresh;
+                store.opLog(sKey, accountKey, "登出", "info", "登出前已续期短期令牌",
+                        "model=session-self；确保服务端认得该会话", "auto");
             }
         }
-        String uid = clean(acc.optString("siteUserId", ""));
-        try {
-            Request.Builder b = new Request.Builder().url(base + "/api/user/logout")
-                    .get().header("Accept", "application/json").header("User-Agent", UA);
-            if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
-            if (!cookie.isEmpty()) b.header("Cookie", cookie);
-            if (!uid.isEmpty()) b.header("New-Api-User", uid);
-            Response r = buildClientFromConfig().newCall(b.build()).execute();
-            int code;
-            String body;
-            try { code = r.code(); body = r.body() != null ? r.body().string() : ""; }
-            finally { r.close(); }
-            if (code == 403) return ReauthManager.DENIED;
-            if (code == 429 || code >= 500) return ReauthManager.UNCONFIRMED;
-            boolean logoutAccepted = false;
-            if (code == 401) {
-                logoutAccepted = true; // 续期后仍 401 = 会话确已失效
-            } else if (code >= 200 && code < 300) {
-                try { logoutAccepted = new JSONObject(body).optBoolean("success", false); }
-                catch (Exception e) { return ReauthManager.UNCONFIRMED; } // HTML 前端路由不算
+        /* 2. 主通道：补全浏览器请求头的 OkHttp（实测可过阿里云 WAF 的请求头特征检测）。 */
+        JSONObject res = httpLogout(base, token, cookie, uid);
+        int code = res.optInt("http", 0);
+        String body = res.optString("body", "");
+        boolean waf = Engine.wafBlocked(body);
+        store.opLog(sKey, accountKey, "登出", "info", "主登出通道响应",
+                "channel=okhttp；HTTP=" + code + "；json=" + isJson(body) + "；waf=" + waf, "auto");
+        Integer decided = decideLogout(code, body);
+        /* 3. WAF 质询或非 JSON → 降级备用通道（离屏 WebView，真实执行 JS 质询，全后台无界面）。 */
+        if (decided == null) {
+            int alt = OffscreenLogout.logout(ctx, store, sKey, accountKey, base, cookie, uid, 45);
+            switch (alt) {
+                case OffscreenLogout.LOGOUT_OK:      decided = ReauthManager.CONFIRMED; break;
+                case OffscreenLogout.LOGOUT_ABSENT:  decided = ReauthManager.ABSENT; break;
+                case OffscreenLogout.LOGOUT_REFUSED: decided = ReauthManager.DENIED; break;
+                default:                             decided = ReauthManager.UNCONFIRMED;
             }
-            if (!logoutAccepted) return ReauthManager.UNCONFIRMED;
-            /* 2. 复核：用同一 cookie 再查 self，401/未授权 = 会话确已销毁。 */
-            int verify = probeSessionAlive(base, token, cookie, uid);
-            if (verify == 401) return ReauthManager.CONFIRMED;
-            if (verify == 200) return ReauthManager.UNCONFIRMED; // 会话仍活，登出没生效
-            return ReauthManager.CONFIRMED; // 复核不可达但 logout 已被接受，按已登出处理
+        }
+        return decided;
+    }
+    /**
+     * session Cookie 站（AgentRouter 等）的真实续期：GET /api/user/self 返回体内的
+     * data.access_token 即可独立作 Bearer 使用（实测不带 Cookie 单独请求 self 仍返回本人数据）。
+     * 取到后落库，供登出与后续业务请求复用；取不到返回空串，不影响原有流程。
+     */
+    private String renewSessionToken(JSONObject site, String accountKey, String base,
+                                     String cookie, String uid) {
+        String sKey = site == null ? "" : site.optString("key", "");
+        try {
+            JSONObject r = httpGetJson(base + "/api/user/self", "", cookie, uid);
+            String body = r.optString("body", "");
+            if (!isJson(body)) {
+                store.opLog(sKey, accountKey, "会话续期V2", "warn", "session 续期未取到令牌",
+                        "schema=" + AUTH_LOG_SCHEMA + "；model=session-self；HTTP=" + r.optInt("http", 0)
+                                + "；waf=" + Engine.wafBlocked(body) + "；oauth=false", "auto");
+                return "";
+            }
+            JSONObject json = new JSONObject(body);
+            JSONObject data = json.optJSONObject("data");
+            JSONObject user = data == null ? null : data.optJSONObject("user");
+            String fresh = "";
+            if (user != null) fresh = clean(user.optString("access_token", ""));
+            if (fresh.isEmpty() && data != null) fresh = clean(data.optString("access_token", ""));
+            if (fresh.isEmpty() || "null".equals(fresh)) return "";
+            store.patchAccount(accountKey, new JSONObject().put("token", fresh));
+            cacheToken(accountKey, fresh);
+            store.opLog(sKey, accountKey, "会话续期V2", "ok", "session 会话续期成功",
+                    "schema=" + AUTH_LOG_SCHEMA + "；model=session-self；token=true；oauth=false", "auto");
+            return fresh;
         } catch (Exception e) {
-            store.opLog(sKey, accountKey, "登出", "warn", "登出请求异常", e.getClass().getSimpleName(), "auto");
-            return ReauthManager.UNCONFIRMED;
+            store.opLog(sKey, accountKey, "会话续期V2", "warn", "session 续期异常",
+                    "schema=" + AUTH_LOG_SCHEMA + "；model=session-self；exception="
+                            + e.getClass().getSimpleName() + "；oauth=false", "auto");
+            return "";
         }
     }
-
-    /** 用给定凭据探测会话是否仍有效。返回 HTTP 码；异常返回 0。 */
-    private int probeSessionAlive(String base, String token, String cookie, String uid) {
+    /**
+     * 登出结果判定——只认响应体语义，不靠状态码一票定生死。
+     * 返回 null 表示「无法从本次响应下结论」，由调用方降级到备用通道。
+     */
+    private static Integer decideLogout(int code, String body) {
+        if (code == 401) return ReauthManager.ABSENT;   // 凭据已不被承认 = 会话不存在
+        if (code == 403) return ReauthManager.DENIED;
+        if (code == 0 || code == 429 || code >= 500) return null; // 网络/限流/服务端故障 → 降级
+        if (Engine.wafBlocked(body) || !isJson(body)) return null; // WAF 质询页 → 降级
         try {
-            Request.Builder b = new Request.Builder().url(base + "/api/user/self")
-                    .get().header("Accept", "application/json").header("User-Agent", UA);
+            JSONObject json = new JSONObject(body);
+            if (!json.has("success")) return null;
+            /* AgentRouter 实测：logout 返回 success:true 但既不作废 token 也不作废 session。
+             * 站点不提供可验证的销毁语义时，"success:true" 就是站点能给出的最强注销信号，
+             * 再对 self 复核只会永远判"会话仍活"→ 永久阻断重登（v1.0.5 AG 签不了的根因）。
+             * 真正的会话超限防线放在 OAuth 交换阶段的 409 AUTH_SESSION_LIMIT，那时不会建新会话。 */
+            return json.optBoolean("success", false) ? ReauthManager.CONFIRMED : ReauthManager.DENIED;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    /** 带完整浏览器请求头的 logout（WAF 只看请求头特征时可直接放行）。 */
+    private JSONObject httpLogout(String base, String token, String cookie, String uid) {
+        return httpGetJson(base + "/api/user/logout", token, cookie, uid);
+    }
+    /**
+     * 统一的浏览器化 GET：补齐 Origin、Referer、Sec-Fetch 系列、Sec-CH-UA 系列与
+     * X-Requested-With，实测可通过阿里云 WAF 的请求头特征检测（缺这些头时返回 JS 质询 HTML）。
+     * 返回 {http, body}；网络异常时 http=0。
+     */
+    private JSONObject httpGetJson(String url, String token, String cookie, String uid) {
+        JSONObject out = new JSONObject();
+        Response r = null;
+        try {
+            String origin = url.substring(0, url.indexOf('/', 8));
+            Request.Builder b = new Request.Builder().url(url).get()
+                    .header("User-Agent", UA)
+                    .header("Accept", "application/json, text/plain, */*")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Origin", origin)
+                    .header("Referer", origin + "/")
+                    .header("Sec-Fetch-Dest", "empty")
+                    .header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Sec-CH-UA-Mobile", "?1")
+                    .header("Sec-CH-UA-Platform", "\"Android\"")
+                    .header("X-Requested-With", "XMLHttpRequest");
             if (token != null && !token.isEmpty()) b.header("Authorization", "Bearer " + token);
             if (cookie != null && !cookie.isEmpty()) b.header("Cookie", cookie);
             if (uid != null && !uid.isEmpty()) b.header("New-Api-User", uid);
-            Response r = buildClientFromConfig().newCall(b.build()).execute();
-            int code = r.code();
-            r.close();
-            return code;
-        } catch (Exception e) { return 0; }
+            r = buildClientFromConfig().newCall(b.build()).execute();
+            out.put("http", r.code());
+            out.put("body", r.body() != null ? r.body().string() : "");
+        } catch (Exception e) {
+            try { out.put("http", 0).put("body", ""); } catch (Exception ignored) {}
+        } finally {
+            if (r != null) r.close();
+        }
+        return out;
+    }
+    /** 响应体是否为 JSON 对象/数组（WAF 质询页与前端 HTML 路由都会在此被排除）。 */
+    private static boolean isJson(String body) {
+        if (body == null) return false;
+        String s = body.trim();
+        return s.startsWith("{") || s.startsWith("[");
+    }
+    /**
+     * 从 /api/user/self 响应中捕获 access_token 并落库（session Cookie 站的续期产物）。
+     * 值未变化时不写库，避免每次刷新都触发一次磁盘写入。
+     */
+    private void captureSessionToken(String accountKey, JSONObject selfUser) {
+        if (selfUser == null || accountKey == null || accountKey.isEmpty()) return;
+        try {
+            String fresh = clean(selfUser.optString("access_token", ""));
+            if (fresh.isEmpty() || "null".equals(fresh)) return;
+            JSONObject acc = store.findAccount(accountKey);
+            if (acc != null && fresh.equals(clean(acc.optString("token", "")))) {
+                cacheToken(accountKey, fresh);
+                return;
+            }
+            store.patchAccount(accountKey, new JSONObject().put("token", fresh));
+            cacheToken(accountKey, fresh);
+        } catch (Exception ignored) {}
     }
 
     private OkHttpClient buildClientFromConfig() {
@@ -563,6 +669,10 @@ public class Engine {
 
         /* userOf：data.user.quota -> data.quota 回退（agentrouter 等变体站字段在 user 内层） */
         JSONObject selfU = userOf(self);
+        /* session Cookie 站（AgentRouter 等）的真实续期产物就在 self 响应体里：
+         * data(.user).access_token 可独立作 Bearer 使用。旧版只读额度字段、丢弃该令牌，
+         * 导致登出/业务请求始终无 token 可用。此处顺手落库，零额外请求。 */
+        captureSessionToken(key, selfU);
         double quota = selfU.optDouble("quota", 0);
         double used = selfU.optDouble("used_quota", 0);
         String user = selfU.optString("display_name", null);

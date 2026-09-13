@@ -78,13 +78,19 @@ public final class ReauthManager {
     }
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+    /** 浏览器化 UA：WAF 对纯 OkHttp 默认 UA 会直接返回 JS 质询页。 */
+    private static final String BROWSER_UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) "
+            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
     private static final OkHttpClient HTTP = new OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build();
 
     /**
      * 用旧凭据调用已实测的 New API 登出端点：GET /api/user/logout。
-     * 200 且 JSON success=true 才算确认注销；401 表示旧会话已不存在（幂等成功）。
-     * 其他状态均不猜测端点、不继续建新会话。
+     * 判据只看响应体语义：JSON success=true 视为站点已接受注销；401 表示旧会话已不存在（幂等成功）。
+     * 非 JSON（WAF 质询页/前端 HTML 路由）绝不当作成功。
+     *
+     * 注意：本方法仅用于「删除账号/站点」的尽力注销，不承担重登前置校验。
+     * 重登链路请用 Engine.logoutSession（含续期、浏览器化请求头与离屏 WebView 兜底）。
      */
     public static int logoutVerified(JSONObject site, JSONObject account) {
         if (site == null || account == null) return UNCONFIRMED;
@@ -96,7 +102,16 @@ public final class ReauthManager {
         String uid = clean(account.optString("siteUserId", ""));
         try {
             Request.Builder b = new Request.Builder().url(base + "/api/user/logout")
-                    .get().header("Accept", "application/json");
+                    .get()
+                    .header("Accept", "application/json, text/plain, */*")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Origin", base)
+                    .header("Referer", base + "/")
+                    .header("Sec-Fetch-Dest", "empty")
+                    .header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("User-Agent", BROWSER_UA);
             if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
             if (!cookie.isEmpty()) b.header("Cookie", cookie);
             if (!uid.isEmpty()) b.header("New-Api-User", uid);
@@ -107,6 +122,7 @@ public final class ReauthManager {
                 if (code == 403) return DENIED;
                 if (code == 429 || code >= 500) return UNCONFIRMED;
                 if (code < 200 || code >= 300) return UNCONFIRMED;
+                if (Engine.wafBlocked(body)) return UNCONFIRMED; // WAF 质询页，请求未达后端
                 try {
                     JSONObject json = new JSONObject(body);
                     return json.optBoolean("success", false) ? CONFIRMED : DENIED;

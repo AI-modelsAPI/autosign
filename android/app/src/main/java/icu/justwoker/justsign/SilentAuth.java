@@ -352,6 +352,21 @@ public final class SilentAuth {
                 } catch (Exception ignored) {}
                 if (!body.trim().isEmpty()) {
                     JSONObject r = new JSONObject(body);
+                    /* 会话数超限硬刹车：409 + AUTH_SESSION_LIMIT 表示服务端明确拒绝建新会话
+                     * （此时并未创建任何会话，净会话数不增）。必须立刻中止，
+                     * 且 needUi=false —— 引导手动授权只会再撞一次，徒增失败记录。 */
+                    String limitCode = r.optString("code", "");
+                    if (http == 409 || "AUTH_SESSION_LIMIT".equalsIgnoreCase(limitCode)) {
+                        try {
+                            store.opLog(siteKey, accountKey, "后台凭据交换", "err",
+                                    "站点会话数已达上限，已立即停止",
+                                    "HTTP=" + http + "；code=" + (limitCode.isEmpty() ? "(无)" : limitCode)
+                                            + "；未建立新会话；不重试", "auto");
+                        } catch (Exception ignored) {}
+                        main.post(() -> finish(false, false, null,
+                                "该账号在站点的登录会话数已达上限，请在站点网页端退出多余设备后重试"));
+                        return;
+                    }
                     JSONObject d = r.optJSONObject("data");
                     if (r.optBoolean("success") && d != null) {
                         /* token 尽力而为：仅当为非空字符串才用（JSON null/缺失一律视为无）。
