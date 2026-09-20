@@ -46,7 +46,7 @@ public class MainActivity extends Activity {
     private Engine engine;
 
     /* 顶栏 */
-    private TextView topSummary, topTotal;
+    private TextView topSummary, topTotal, topBoardTotal;
     /* 常驻忙碌条：纯后台操作时给出可见的文字 + 转圈反馈。
      * 之前只有 toast 与可关闭的日志弹窗，关掉后界面毫无动静，体验上像卡死。 */
     private LinearLayout busyBar;
@@ -92,23 +92,23 @@ public class MainActivity extends Activity {
                 due.set(java.util.Calendar.MINUTE, sch.optInt("minute", 30));
                 due.set(java.util.Calendar.SECOND, 0);
                 boolean pastDue = now.after(due);
+                /* v1.1.23：补跑判定改用「定时任务今日是否已运行」(cronRunDate)，而非旧的
+                 * 「所有账号今日都已签」。旧逻辑只要有一个死会话/未授权账号永远签不上，
+                 * ranToday 恒 false → 每次打开 App 都重复触发定时签到。改后一天只补跑一次。 */
                 boolean ranToday = false;
                 try {
-                    JSONObject cfg = new Store(this).config();
-                    JSONArray sites = cfg.optJSONArray("sites");
-                    if (sites != null) for (int i = 0; i < sites.length(); i++) {
-                        JSONArray accs = sites.optJSONObject(i).optJSONArray("accounts");
-                        if (accs == null) continue;
-                        for (int j = 0; j < accs.length(); j++) {
-                            JSONObject tk = accs.optJSONObject(j);
-                            if (tk != null && !Engine.isCheckedToday(tk)) { ranToday = false; i = sites.length(); break; }
-                            ranToday = true;
-                        }
-                    }
+                    ranToday = Engine.todayStr().equals(new Store(this).cronRunDate());
                 } catch (Exception ignored) {}
                 if (pastDue && !ranToday) {
                     new Store(this).opLog("", "", "定时签到", "info", "检测到今日定时任务未执行，正在补跑", "", "auto");
-                    new Thread(() -> engine.runAllOnce()).start();
+                    /* v1.1.21：补跑跑在后台线程，跑完必须回主线程 render()——否则库里已写入
+                     * 新额度(lastStatus)，UI 却停在补跑前的旧画面，出现「日志刷新成功、看板不显示额度」
+                     * (真机 08:54 实证：$244.97 已落库 http=200，界面却空)。render() 内有 boardList==null 
+                     * 兜底，补跑期间(数十秒网络)UI 早已构建完，回来时能正常重绘。 */
+                    new Thread(() -> {
+                        try { engine.runAllOnce(); } catch (Exception ignored) {}
+                        runOnUiThread(() -> { if (!isFinishing()) render(); });
+                    }).start();
                 }
             }
         } catch (Exception ignored) {}
@@ -209,18 +209,38 @@ public class MainActivity extends Activity {
         bar.addView(brand);
         bar.addView(Ui.spring(this));
 
+        LinearLayout pillGroup = Ui.row(this);
+        pillGroup.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout boardPill = Ui.row(this);
+        boardPill.setBackground(Ui.roundStroke(Ui.CARD_SUB, Ui.dp(this, 7),
+                Math.max(1, Ui.dp(this, 1)), Ui.LINE));
+        boardPill.setPadding(Ui.dp(this, 8), Ui.dp(this, 3), Ui.dp(this, 8), Ui.dp(this, 3));
+        boardPill.addView(Ui.tv(this, "看板", 10, Ui.SUB));
+        topBoardTotal = Ui.tv(this, "$0.00", 12, Ui.BLUE, true);
+        LinearLayout.LayoutParams blp0 = new LinearLayout.LayoutParams(-2, -2);
+        blp0.leftMargin = Ui.dp(this, 4);
+        boardPill.addView(topBoardTotal, blp0);
+        boardPill.setClickable(true);
+        boardPill.setOnClickListener(v -> showAssetBreakdown());
+        pillGroup.addView(boardPill);
+
+        pillGroup.addView(Ui.gapW(this, 6));
+
         LinearLayout pill = Ui.row(this);
-        pill.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(this, 8),
+        pill.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(this, 7),
                 Math.max(1, Ui.dp(this, 1)), 0xFFDCFCE7));
-        pill.setPadding(Ui.dp(this, 10), Ui.dp(this, 4), Ui.dp(this, 10), Ui.dp(this, 4));
+        pill.setPadding(Ui.dp(this, 8), Ui.dp(this, 3), Ui.dp(this, 8), Ui.dp(this, 3));
         pill.addView(Ui.tv(this, "总资产", 10, 0xFF15803D));
-        topTotal = Ui.tv(this, "$0.00", 13, 0xFF15803D, true);
+        topTotal = Ui.tv(this, "$0.00", 12, 0xFF15803D, true);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.leftMargin = Ui.dp(this, 4);
         pill.addView(topTotal, tlp);
         pill.setClickable(true);
         pill.setOnClickListener(v -> showAssetBreakdown());
-        bar.addView(pill);
+        pillGroup.addView(pill);
+
+        bar.addView(pillGroup);
         return bar;
     }
 
@@ -246,7 +266,13 @@ public class MainActivity extends Activity {
             row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(this, 10), Math.max(1, Ui.dp(this, 1)), Ui.LINE));
             row.setPadding(Ui.dp(this, 12), Ui.dp(this, 11), Ui.dp(this, 12), Ui.dp(this, 11));
             LinearLayout text = Ui.col(this);
-            text.addView(Ui.tv(this, s.optString("name"), 14, Ui.TXT, true));
+            LinearLayout nameRow = Ui.row(this);
+            nameRow.addView(Ui.tv(this, s.optString("name"), 14, Ui.TXT, true));
+            if (s.optBoolean("hideOnBoard", false)) {
+                nameRow.addView(Ui.gapW(this, 6));
+                nameRow.addView(Ui.pill(this, "看板隐藏", 10, Ui.SUB, Ui.LINE_SOFT));
+            }
+            text.addView(nameRow);
             text.addView(Ui.tv(this, ok + "/" + accs.length() + " 个账号已更新", 11, Ui.SUB));
             row.addView(text, new LinearLayout.LayoutParams(0, -2, 1f));
             row.addView(Ui.tv(this, "$" + Ui.usd(sum), 16, Ui.GREEN, true));
@@ -396,28 +422,31 @@ public class MainActivity extends Activity {
         if (boardList == null) return;
         Store store = new Store(this);
         store.rolloverDailyState();
-        /* 顶栏摘要 */
+        /* 顶栏摘要与双额度 */
         JSONObject sm = store.summary();
         topSummary.setText(sm.optInt("sites") + "站 " + sm.optInt("accounts") + "号 · "
                 + sm.optInt("checked") + "已签 " + sm.optInt("pending") + "待签");
-        topTotal.setText("$" + Ui.usd(sm.optDouble("totalUSD", 0)));
+        if (topBoardTotal != null) topBoardTotal.setText("$" + Ui.usd(sm.optDouble("boardUSD", 0)));
+        if (topTotal != null) topTotal.setText("$" + Ui.usd(sm.optDouble("totalUSD", 0)));
 
         boardList.removeAllViews();
         JSONArray sites = store.sites();
-        boolean empty = sites.length() == 0;
-        if (emptyView != null) emptyView.setVisibility((empty && page == 0) ? View.VISIBLE : View.GONE);
-        boardScroll.setVisibility((!empty && page == 0) ? View.VISIBLE : View.GONE);
-        if (empty) return;
-
+        int visibleCount = 0;
         for (int i = 0; i < sites.length(); i++) {
             JSONObject site = sites.optJSONObject(i);
             if (site == null) continue;
+            if (site.optBoolean("hideOnBoard", false)) continue;
+            visibleCount++;
             /* 站点卡片本身不再包 SwipeCard —— 左右滑改为以「账号卡片」为单位，
              * 否则一次滑动会作用到该站点下的所有账号。站点的刷新/删除走 ⋯ 菜单。 */
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.bottomMargin = Ui.dp(this, 12);
             boardList.addView(siteCard(site), lp);
         }
+        boolean empty = visibleCount == 0;
+        if (emptyView != null) emptyView.setVisibility((empty && page == 0) ? View.VISIBLE : View.GONE);
+        boardScroll.setVisibility((!empty && page == 0) ? View.VISIBLE : View.GONE);
+        if (empty) return;
     }
 
     /* ---------- 站点卡片 ---------- */
@@ -542,9 +571,16 @@ public class MainActivity extends Activity {
         LinearLayout r1 = Ui.row(this);
         LinearLayout ident = Ui.row(this);
         ident.addView(Ui.tv(this, acc.optString("alias", key), 13, Ui.TXT2, true));
+        String prov = acc.optString("authProvider", "");
+        if (prov.isEmpty()) prov = Catalog.providerOf(site);
+        String tag = "linuxdo".equals(prov) ? "Linux DO" : "GitHub";
+        int tagColor = "linuxdo".equals(prov) ? 0xFFB45309 : Ui.BLUE;
+        int tagBg = "linuxdo".equals(prov) ? 0xFFFEF3C7 : Ui.BLUE_BG;
+        ident.addView(Ui.gapW(this, 6));
+        ident.addView(Ui.pill(this, tag, 9, tagColor, tagBg));
+
         String gh = acc.optString("githubAccount", "");
         if (!gh.isEmpty()) {
-            ident.addView(Ui.gapW(this, 6));
             ident.addView(Ui.tv(this, "@" + gh, 11, Ui.SUB));
         }
         /* 状态 chip：只有异常/未授权才显示（正常是常态，不打扰） */
@@ -771,12 +807,13 @@ public class MainActivity extends Activity {
                 /* v1.0.2：签到成功/已签立即落库当日徽章——batchMode 下 applyCheckinResult
                  * 不刷额度（收尾统一刷），但徽章不能等收尾刷新，否则批次中途失败/刷新失败
                  * 时“已签”状态丢失，看板误显示待签。与 refreshOne 的 buildStatusPatch 同构。 */
-                if (ok && accountHasCred(ak)) {
+                if (ok && accountHasCred(ak) && !SiteProtocol.isAnyRouter(store.findSite(sk))) {
                     try {
                         JSONObject lc = new JSONObject()
                                 .put("date", Engine.todayStr())
                                 .put("time", System.currentTimeMillis());
                         if (rewardKnown) lc.put("reward", reward);
+                        if (SiteProtocol.isAnyRouter(store.findSite(sk))) lc.put("source", "api_sign_in");
                         store.patchAccount(ak, new JSONObject().put("lastCheckin", lc));
                     } catch (Exception ignored) {}
                 }
@@ -859,9 +896,46 @@ public class MainActivity extends Activity {
             render();
             if (done != null) done.run(ok);
         };
-        store.opLog(siteKey, accountKey, "重登签到", "info",
-                "登出旧会话以触发当日奖励发放", "GET /api/user/logout", "auto");
         new Thread(() -> {
+            /* v1.1.22：手动重登签到改用与「定时任务」完全一致的 status() 闸门。
+             * 用户质疑一针见血：定时任务不用人操作就能「登录保活成功」、今日已签的账号根本不登出，
+             * 手动为何要先登出销毁会话？真机 08:54 实证：定时刷新对同一 agent 会话保活成功、不登出。
+             * 根因：定时任务(Engine.runScheduled 重登站分支)先跑 status()——它走 callWithAuth 天然
+             * 会话续期保活 + 1.1.16 静默重授权自愈，读出 todayChecked，只有「状态成功且今日未签」才登出；
+             * 而手动老逻辑上来就 logout。1.1.20 我用 reloginPreCheck 读 /api/log 判断，但日志接口易被
+             * WAF 单独挡→误判「读不到」而中止，不如 status() 稳。现三态严格对齐定时任务：
+             *   status 成功 + 今日已签 → 保活确认，绝不登出；
+             *   status 成功 + 今日未签 → 会话确证活着且确实没签，才登出重登触发发奖；
+             *   status 失败(会话无法确证) → 绝不登出，提示手动重新授权。 */
+            JSONObject st0 = null;
+            try { st0 = engine.status(accountKey); } catch (Exception e) { st0 = null; }
+            boolean alive = SiteProtocol.canStoreStatus(st0);
+            boolean checkedToday = alive && st0.optBoolean("todayChecked", false);
+            if (alive && checkedToday) {
+                ReauthManager.release(siteKey, accountKey);
+                boolean known = st0.optBoolean("todayRewardKnown", false);
+                double rw = st0.optDouble("todayRewardUSD", 0);
+                store.opLog(siteKey, accountKey, "重登签到", "ok",
+                        "今日已签到（保活确认），无需重登", (known && rw > 0 ? "今日奖励 $" + Ui.usd(rw) : "今日已签（无奖励）"), "auto");
+                try { store.patchAccount(accountKey, buildStatusPatch(st0)); } catch (Exception ignored) {}
+                h.post(() -> { toast("今日已签到，无需重登"); finish.run(true); });
+                return;
+            }
+            if (!alive) {
+                /* status 失败：会话无法确证（503/WAF/网络），绝不登出销毁会话。让用户手动重新授权。 */
+                ReauthManager.release(siteKey, accountKey);
+                int hc0 = st0 == null ? 0 : st0.optInt("http", 0);
+                store.opLog(siteKey, accountKey, "重登签到", "err",
+                        "会话状态无法确认，已中止重登（不销毁会话）",
+                        "status http=" + hc0 + "；请手动重新授权后再签到", "auto");
+                h.post(() -> { toast("无法确认会话状态（可能已失效），请重新授权后再试"); finish.run(false); });
+                return;
+            }
+            /* status 成功且今日未签 → 会话确证活着、确实没签，才登出重登触发发奖。
+             * 先把保活拿到的额度落库刷新，登出重登过程中 UI 也有最新额度可显示。 */
+            try { store.patchAccount(accountKey, buildStatusPatch(st0)); } catch (Exception ignored) {}
+            store.opLog(siteKey, accountKey, "重登签到", "info",
+                    "保活确认今日无签到记录，登出旧会话以触发当日奖励发放", "GET /api/user/logout", "auto");
             /* 1. 登出旧会话——必须确认结果。engine.logoutSession 先按站点续期模型取有效凭据，
              * 再走「浏览器化 OkHttp 主通道 → 离屏 WebView 备用通道」登出并按响应体判定。
              * 两条通道都无法确认时绝不重登建新会话。 */
@@ -942,43 +1016,49 @@ public class MainActivity extends Activity {
         LogPopup.autoShow(this);
         bulkBusy = true;
         busyBegin("一键刷新：0/" + targets.size());
+        final int total = targets.size();
         new Thread(() -> {
             Store store = new Store(this);
             int ok = 0, err = 0;
-            for (int i = 0; i < targets.size(); i++) {
-                final int n = i + 1;
-                String[] t = targets.get(i);
-                final String who;
-                JSONObject st0 = store.findSite(t[0]);
-                JSONObject ac0 = store.findAccount(t[1]);
-                who = (st0 == null ? t[0] : st0.optString("name", t[0]))
-                        + (ac0 == null ? "" : " · " + ac0.optString("alias", ""));
-                h.post(() -> {
-                    setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
-                            n + "/" + targets.size(), Ui.BLUE);
-                    busyUpdate("一键刷新 " + n + "/" + targets.size() + "：" + who);
-                });
-                try {
-                    JSONObject stt = engine.status(t[1]);
-                    store.patchAccount(t[1], buildStatusPatch(stt));
-                    if (stt.optBoolean("ok")) ok++; else err++;
-                } catch (Exception e) {
-                    err++;
-                    store.opLog(t[0], t[1], "一键刷新", "err", "刷新失败", String.valueOf(e.getMessage()), "user");
+            try {
+                for (int i = 0; i < targets.size(); i++) {
+                    final int n = i + 1;
+                    String[] t = targets.get(i);
+                    final String who;
+                    JSONObject st0 = store.findSite(t[0]);
+                    JSONObject ac0 = store.findAccount(t[1]);
+                    who = (st0 == null ? t[0] : st0.optString("name", t[0]))
+                            + (ac0 == null ? "" : " · " + ac0.optString("alias", ""));
+                    h.post(() -> {
+                        setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
+                                n + "/" + total, Ui.BLUE);
+                        busyUpdate("一键刷新 " + n + "/" + total + "：" + who);
+                    });
+                    try {
+                        JSONObject stt = engine.status(t[1]);
+                        store.patchAccount(t[1], buildStatusPatch(stt));
+                        if (stt.optBoolean("ok")) ok++; else err++;
+                    } catch (Exception e) {
+                        err++;
+                        store.opLog(t[0], t[1], "一键刷新", "err", "刷新失败", String.valueOf(e.getMessage()), "user");
+                    }
+                    h.post(() -> pushLog(store));
                 }
-                h.post(() -> pushLog(store));
+            } finally {
+                /* v1.1.1：try/finally 兜底——任何异常路径都保证 busyEnd 执行，
+                 * 顶栏绝不残留"刷新中"转圈（此前异常路径 busyDepth 泄漏）。 */
+                final int fok = ok, ferr = err;
+                h.post(() -> {
+                    bulkBusy = false;
+                    busyEnd();
+                    setTabAction(tabRefreshIcon, tabRefreshText, "check", "完成", Ui.GREEN);
+                    h.postDelayed(() -> setTabAction(tabRefreshIcon, tabRefreshText,
+                            "refresh", "刷新", Ui.BLUE), 1200);
+                    render();
+                    toast("刷新完成：成功 " + fok + " · 失败 " + ferr);
+                });
             }
-            final int fok = ok, ferr = err;
-            h.post(() -> {
-                bulkBusy = false;
-                busyEnd();
-                setTabAction(tabRefreshIcon, tabRefreshText, "check", "完成", Ui.GREEN);
-                h.postDelayed(() -> setTabAction(tabRefreshIcon, tabRefreshText,
-                        "refresh", "刷新", Ui.BLUE), 1200);
-                render();
-                toast("刷新完成：成功 " + fok + " · 失败 " + ferr);
-            });
-        }).start();
+        }, "bulk-refresh").start();
     }
 
     /** 动作型 Tab 的进度态：换图标 + 换文案（配色保持该按钮固有风格，只在完成时闪一下绿色文字） */
@@ -1060,7 +1140,7 @@ singleBusy = true;
              * 表现为「突然跳出一个页面、等待、最后仍失败」。失败统一：toast 说明
              * 原因 + 刷新额度核对（登录动作可能已让额度变化）。 */
             boolean cap = m.contains("人机验证") || m.contains("手动确认");
-            toast(cap ? "人机验证未通过；该站登录即发奖励，正在刷新额度核对"
+            toast(cap ? "人机验证未通过，本次签到未确认；正在刷新额度核对"
                       : (m.isEmpty() ? "签到失败" : m));
             applyCheckinResult(key, new JSONObject());   // 无条件刷新三额度
             render();
@@ -1092,10 +1172,8 @@ singleBusy = true;
             if (!batchMode) toast(r.optString("message", "签到失败"));
         }
 
-        /* 签到后一律刷新三个额度（可用/累计已用/今日消耗）。
-         * 四个站都是「登录即签到」：即使本次判定失败（例如人机验证没过），
-         * 登录动作本身可能已让额度发生变化，刷新才能反映真实状态。
-         * 奖励为 0 的站同样要刷 —— 用户要看的是三个额度，不只是奖励。 */
+        /* 签到后刷新三个额度；签到请求成功与奖励到账分开判断。
+         * 失败时刷新也只用于读取实际余额，不能由差额反推固定签到奖励。 */
         if (!batchMode && accountKey != null && !accountKey.isEmpty()) refreshOne(accountKey);
     }
 
@@ -1135,10 +1213,13 @@ singleBusy = true;
         JSONObject patch = new JSONObject();
         /* 429/非 200：额度没取到，保留旧 lastStatus（避免显示成 0 / 假数据）。
          * 只有真正拿到 200 才覆盖额度。 */
-        if (st != null && st.optInt("http", 0) == 200) {
+        if (SiteProtocol.canStoreStatus(st)) {
             patch.put("lastStatus", st);
         }
-        if (st != null && st.optBoolean("todayChecked", false)) {
+        // AnyRouter回执只由提交请求的代码落库；刷新不得改写其时间或奖励周期。
+        if (st != null && ("api_sign_in".equals(st.optString("checkinSource", ""))
+                || !st.optBoolean("checkinStateKnown", true))) return patch;
+        if (SiteProtocol.canStoreStatus(st) && st.optBoolean("todayChecked", false)) {
             JSONObject lc = new JSONObject()
                     .put("date", Engine.todayStr())
                     .put("time", System.currentTimeMillis());
@@ -1146,7 +1227,8 @@ singleBusy = true;
                 lc.put("reward", st.optDouble("todayRewardUSD", 0));
             }
             patch.put("lastCheckin", lc);
-        } else if (st != null && st.optInt("http", 0) == 200) {
+            if ("api_sign_in".equals(st.optString("checkinSource", ""))) lc.put("source", "api_sign_in");
+        } else if (SiteProtocol.canStoreStatus(st) && st.optBoolean("checkinStateKnown", true)) {
             /* v1.0.3 数据自愈：服务端明确今日未签时清除本地脏徽章——
              * 修复旧版「已保活」误标已签造成的永久假已签（不清理会挂到明天）。 */
             patch.put("lastCheckin", JSONObject.NULL);
@@ -1167,14 +1249,36 @@ singleBusy = true;
         new Thread(() -> {
             Store store = new Store(this);
             try {
-                JSONObject st = engine.status(key);
-                store.patchAccount(key, buildStatusPatch(st));
+                /* v1.1.2 划转显示一致性：开了自动划转时，首次 status 不写额度文案、
+                 * 不刷 UI（避免用户先看到划转前的中间额度，划转后再变一次）。
+                 * 同线程串行：status → 划转 → 最终 status（唯一一次「额度已更新」+
+                 * 唯一一次 render），看到的即最终额度。跳过/失败路径同样只显示一次。 */
+                boolean transferPlanned = store.uiPref("autoAffTransfer", false);
+                JSONObject st = engine.status(key, !transferPlanned);
+                boolean okRefresh = st != null && st.optBoolean("ok", false);
+                if (okRefresh && transferPlanned) {
+                    final String affSite = store.siteKeyOfAccount(key);
+                    try {
+                        JSONObject aff = engine.affTransfer(key);
+                        if (aff.optBoolean("ok", false)) {
+                            String affMsg = aff.optString("message", "");
+                            store.opLog(affSite, key, "邀请划转", "ok",
+                                    "邀请额度已自动划转", affMsg, "auto");
+                        } else if (!aff.optBoolean("skipped", false)) {
+                            store.opLog(affSite, key, "邀请划转", "err",
+                                    "邀请额度划转失败", aff.optString("message", ""), "auto");
+                        }
+                    } catch (Exception ae) {
+                        store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
+                                "邀请额度划转异常", String.valueOf(ae.getMessage()), "auto");
+                    }
+                    /* 无论划转成败，取最终状态（此调用写唯一一条「额度已更新」） */
+                    st = engine.status(key, true);
+                }
                 final String failMsg = st == null ? "" : st.optString("message", "");
-                final boolean okRefresh = st != null && st.optBoolean("ok", false);
-                /* v1.0.6：UI 立刻响应——额度更新后立刻解除忙碌并重绘看板，
-                 * 绝不等耗时的邀请划转（此前 affTransfer 网络重试/超时可达 40s，
-                 * 导致日志中额度早已更新、界面却一直转圈）。
-                 * 邀请划转放到独立后台线程静默执行，成功后再重绘。 */
+                final boolean okFinal = st != null && st.optBoolean("ok", false);
+                store.patchAccount(key, buildStatusPatch(st));
+                /* v1.1.2：只在这里收忙碌 + render 一次 —— 中间态绝不 shown */
                 h.post(() -> {
                     busyEnd();
                     pushLog(store);
@@ -1182,32 +1286,6 @@ singleBusy = true;
                     if (onDone != null) onDone.run();
                     if (!okRefresh && !failMsg.isEmpty()) toast(failMsg);
                 });
-                /* 邀请额度自动划转（后台静默进行，不阻塞刷新反馈） */
-                if (okRefresh && store.uiPref("autoAffTransfer", false)) {
-                    new Thread(() -> {
-                        try {
-                            JSONObject aff = engine.affTransfer(key);
-                            if (aff.optBoolean("ok", false)) {
-                                String affMsg = aff.optString("message", "");
-                                store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "ok",
-                                        "邀请额度已自动划转", affMsg, "auto");
-                                JSONObject st2 = engine.status(key);
-                                store.patchAccount(key, buildStatusPatch(st2));
-                                h.post(() -> {
-                                    pushLog(store);
-                                    render();
-                                    if (!affMsg.isEmpty()) toast(affMsg);
-                                });
-                            } else if (!aff.optBoolean("skipped", false)) {
-                                store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
-                                        "邀请额度划转失败", aff.optString("message", ""), "auto");
-                            }
-                        } catch (Exception ae) {
-                            store.opLog(store.siteKeyOfAccount(key), key, "邀请划转", "err",
-                                    "邀请额度划转异常", String.valueOf(ae.getMessage()), "auto");
-                        }
-                    }, "bg-aff-transfer").start();
-                }
             } catch (Exception e) {
                 store.opLog(store.siteKeyOfAccount(key), key, "刷新", "err",
                         "刷新失败", String.valueOf(e.getMessage()), "user");
@@ -1237,12 +1315,23 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
     }
 
     private void siteMenu(JSONObject site) {
-        String[] items = { "刷新本站全部账号", "站点管理（编辑/删除）" };
+        String[] items = { "刷新本站全部账号", "在看板中隐藏本站", "站点管理（编辑/删除）" };
         new AlertDialog.Builder(this)
                 .setTitle(site.optString("name", site.optString("key")))
                 .setItems(items, (d, w) -> {
                     if (w == 0) refreshSite(site);
-                    else { showPage(1); settings.openSites(); }
+                    else if (w == 1) {
+                        try {
+                            site.put("hideOnBoard", true);
+                            new Store(this).upsertSite(site);
+                            render();
+                            new AlertDialog.Builder(this)
+                                    .setTitle("站点已在看板中隐藏")
+                                    .setMessage("「" + site.optString("name") + "」已从看板隐藏。\n\n• 总额度统计依然包含此站点\n• 一键签到/刷新与定时任务不受影响\n• 如需恢复显示，请前往「设置 → 站点管理」开启。")
+                                    .setPositiveButton("知道了", null)
+                                    .show();
+                        } catch (Exception ignored) {}
+                    } else { showPage(1); settings.openSites(); }
                 }).show();
     }
 
@@ -1280,44 +1369,53 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
 
     /* ================= 账号 / 凭据 ================= */
 
+    /**
+     * v1.1.16：统一账号选择 UI。不再先弹「选登录方式」再弹「选账号」——
+     * 直接把站点可用的每个 provider × 每条支持凭据展开成一个扁平列表，一次列出所有登录身份，
+     * 每项自带 [Linux DO]/[GitHub] 徽标；用户选谁就按该项的 provider 走对应授权流程。
+     */
     private void promptAddAccount(JSONObject site) {
+        if (site == null) return;
         Store store = new Store(this);
         JSONArray creds = store.credentials();
+        java.util.List<String[]> options = SiteProtocol.accountOptions(site, creds); // [credId, provider]
         java.util.ArrayList<String> labels = new java.util.ArrayList<>();
-        java.util.ArrayList<String> ids = new java.util.ArrayList<>();
-        for (int i = 0; i < creds.length(); i++) {
-            JSONObject c = creds.optJSONObject(i);
-            if (c == null) continue;
-            String gh = c.optString("githubUser", "");
-            String sa = c.optString("siteAccount", "");
-            String who = !gh.isEmpty() ? gh : sa;
-            labels.add(c.optString("alias", who)
-                    + (who.isEmpty() ? "" : ("  (" + who + ")"))
-                    + (store.credHasTwofa(c.optString("id")) ? "  · 2FA" : ""));
-            ids.add(c.optString("id"));
+        for (String[] opt : options) {
+            JSONObject c = store.findCredential(opt[0]);
+            String provider = opt[1];
+            String provLabel = "linuxdo".equals(provider) ? "Linux DO" : "GitHub";
+            String who = SiteProtocol.credentialUser(c, provider);
+            String alias = c == null ? who : c.optString("alias", who);
+            labels.add("[" + provLabel + "] " + alias
+                    + (who.isEmpty() ? "" : (" (" + who + ")"))
+                    + (c != null && store.credHasTwofa(c.optString("id")) ? " · 2FA" : ""));
         }
-        labels.add("录入新账号…");
+        labels.add("＋ 录入新账号（设置）…");
+        final java.util.List<String[]> opts = options;
         new AlertDialog.Builder(this)
-                .setTitle("为「" + site.optString("name") + "」添加账号")
+                .setTitle("添加账号 · " + site.optString("name"))
                 .setItems(labels.toArray(new String[0]), (d, w) -> {
-                    if (w == labels.size() - 1) { showPage(1); settings.openCredentials(); return; }
-                    createAccountFromCredential(site, ids.get(w));
+                    if (w == opts.size()) { showPage(1); settings.openCredentials(); return; }
+                    String[] chosen = opts.get(w);
+                    createAccountFromCredential(site, chosen[0], chosen[1]);
                 })
                 .setNegativeButton("取消", null).show();
     }
 
-    private void createAccountFromCredential(JSONObject site, String credId) {
+    private void createAccountFromCredential(JSONObject site, String credId, String provider) {
         Store store = new Store(this);
         JSONObject c = store.findCredential(credId);
-        if (c == null) { toast("凭据不存在"); return; }
-        String gh = c.optString("githubUser", "");
-        String alias = c.optString("alias", gh.isEmpty() ? c.optString("siteAccount", "账号") : gh);
+        if (!SiteProtocol.credentialSupports(c, provider)) { toast("凭据不含所选登录方式的账号名"); return; }
+        String gh = "github".equals(provider) ? c.optString("githubUser", "") : "";
+        String who = c.optString("linuxdo".equals(provider) ? "siteAccount" : "githubUser", "账号");
+        String alias = c.optString("alias", who);
         String siteKey = site.optString("key");
         /* 同凭据已在本站存在则直接重新授权 */
         JSONArray accs = site.optJSONArray("accounts");
         if (accs != null) for (int i = 0; i < accs.length(); i++) {
             JSONObject a = accs.optJSONObject(i);
-            if (a != null && credId.equals(a.optString("credentialId", ""))) {
+            if (a != null && credId.equals(a.optString("credentialId", ""))
+                    && provider.equals(SiteProtocol.provider(site, a))) {
                 startAuth(site, a);
                 return;
             }
@@ -1327,6 +1425,7 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                     .put("key", "acc_" + System.currentTimeMillis())
                     .put("alias", alias)
                     .put("siteKey", siteKey)
+                    .put("authProvider", provider)
                     .put("credentialId", credId);
             if (!gh.isEmpty()) acc.put("githubAccount", gh);
             DeleteCoordinator.allowRecreate(acc.optString("key"));
@@ -1340,23 +1439,23 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
 
     private void pickCredential(JSONObject site, JSONObject acc) {
         Store store = new Store(this);
+        String provider = SiteProtocol.provider(site, acc);
         JSONArray creds = store.credentials();
-        if (creds.length() == 0) { toast("凭据库为空，请先在设置里录入"); showPage(1); settings.openCredentials(); return; }
-        String[] labels = new String[creds.length()];
-        String[] ids = new String[creds.length()];
+        java.util.ArrayList<String> labels = new java.util.ArrayList<>();
+        java.util.ArrayList<String> ids = new java.util.ArrayList<>();
         for (int i = 0; i < creds.length(); i++) {
             JSONObject c = creds.optJSONObject(i);
-            String gh = c == null ? "" : c.optString("githubUser", "");
-            labels[i] = (c == null ? "" : c.optString("alias", gh)) + (gh.isEmpty() ? "" : ("  (" + gh + ")"));
-            ids[i] = c == null ? "" : c.optString("id");
+            if (!SiteProtocol.credentialSupports(c, provider)) continue;
+            String name = c.optString("linuxdo".equals(provider) ? "siteAccount" : "githubUser", "");
+            labels.add(c.optString("alias", name) + "  (" + name + ")");
+            ids.add(c.optString("id"));
         }
-        new AlertDialog.Builder(this).setTitle("绑定凭据")
-                .setItems(labels, (d, w) -> {
+        if (ids.isEmpty()) { toast("没有对应登录方式的凭据，请先在设置里录入"); showPage(1); settings.openCredentials(); return; }
+        new AlertDialog.Builder(this).setTitle("绑定 " + ("linuxdo".equals(provider) ? "Linux DO" : "GitHub") + " 凭据")
+                .setItems(labels.toArray(new String[0]), (d, w) -> {
                     try {
-                        store.patchAccount(acc.optString("key"),
-                                new JSONObject().put("credentialId", ids[w]));
-                        toast("已绑定");
-                        render();
+                        store.patchAccount(acc.optString("key"), new JSONObject().put("credentialId", ids.get(w)).put("authProvider", provider));
+                        toast("已绑定"); render();
                     } catch (Exception ignored) {}
                 }).setNegativeButton("取消", null).show();
     }
@@ -1407,9 +1506,21 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                     /* 会话受限站：旧会话明确失效后必须先确认注销，再建新会话。 */
                     reauthorizeWithLogout(site, acc, sk0, ak0);
                 } else {
+                    /* v1.1.6：第三态（WAF 拦截 / 网络不确定）不再静默拒绝。
+                     * 引擎已内置质询求解（WafChallenge），能自愈时上面就走 valid/definitive 了；
+                     * 走到这里说明自愈也没成功，此时把决定权交给用户，而不是硬锁死。
+                     * 保留原安全意图：明确告知「会新建会话」，不静默盲建。 */
                     ReauthManager.release(sk0, ak0);
-                    toast("暂时无法确认登录状态，请检查网络后重试，不会发起授权"
-                            + (fReason.isEmpty() ? "" : "（" + fReason + "）"));
+                    AlertDialog d = new AlertDialog.Builder(this)
+                            .setTitle("无法确认登录状态")
+                            .setMessage("站点返回了防护拦截或网络异常，无法判断当前登录是否有效"
+                                    + (fReason.isEmpty() ? "" : "（" + fReason + "）")
+                                    + "。\n\n继续重新授权会在站点新建一个会话。"
+                                    + "若站点有会话数上限，可能触发限制。\n\n是否继续？")
+                            .setPositiveButton("继续重新授权", (x, y) -> reauthorizeWithLogout(site, acc, sk0, ak0))
+                            .setNegativeButton("取消", null).create();
+                    d.setOnShowListener(x -> Ui.styleDialog(d));
+                    d.show();
                 }
             });
         }, "reauth-preflight").start();
@@ -1469,6 +1580,12 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
                 render();
                 return;
             }
+            if (!SiteProtocol.shouldOpenAuthUi(ok, needUi)) {
+                ReauthManager.release(sk, ak);
+                String reason = msg == null || msg.isEmpty() ? "后台授权失败，已停止自动重试" : msg;
+                new Store(this).opLog(sk, ak, "授权", "err", reason, "终止错误，不自动打开授权页", "auto");
+                toast(reason); render(); return;
+            }
             if (needUi && msg != null && !msg.isEmpty()) {
                 /* 典型场景：WebView 里登录的是另一个 GitHub 账号（身份不符）。
                  * 把原因明确告诉用户，授权页打开后他知道要去切换账号。 */
@@ -1489,7 +1606,7 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
                     boolean authed = false;
                     try {
                         JSONObject st = new Engine(getApplicationContext()).status(ak);
-                        authed = st != null && st.optInt("http") == 200;
+                        authed = SiteProtocol.canStoreStatus(st);
                     } catch (Exception ignored) {}
                     final boolean fAuthed = authed;
                     runOnUiThread(() -> {

@@ -152,6 +152,8 @@ public final class SilentAuth {
 
         private WebView wv;
         private String baseUrl = "", siteHost = "";
+        /** v1.0.8：站点 OAuth 方式（github / linuxdo …），决定是否允许离屏授权。 */
+        private String oauthProvider = "github";
         /** 本轮 state；同域回调必须严格匹配后才允许交换。 */
         private volatile String expectedOauthState = "";
         private volatile boolean done = false;
@@ -171,11 +173,23 @@ public final class SilentAuth {
             baseUrl = site.optString("baseUrl", "").replaceAll("/+$", "");
             if (baseUrl.isEmpty()) { finish(false, false, null, "站点 baseUrl 为空"); return; }
             try { siteHost = new java.net.URL(baseUrl).getHost(); } catch (Exception e) { siteHost = ""; }
+            /* v1.0.8：读取站点 OAuth 方式。linuxdo 站需要人机验证 + Cloudflare 质询，
+             * 无法在离屏 WebView 完成——直接返回 needUi=true，交由 AuthActivity
+             * 的可见授权观察者模式处理（该路径已在 v1.0.7 实测定稿）。 */
+            oauthProvider = SiteProtocol.provider(site, store.findAccount(accountKey));
+            if ("linuxdo".equals(oauthProvider)) {
+                finish(false, true, null, "Linux DO 登录需要手动完成人机验证");
+                return;
+            }
 
             new Thread(() -> {
                 String[] pair = fetchStateAndClient();
                 if (pair == null) {
                     /* v0.4.3（审计方案3）：WAF 拦截必须明确告知用户换节点，禁技术术语 */
+                    if (fetchSessionLimit) {
+                        main.post(() -> finish(false, false, null, "站点登录会话数已达上限，已停止重试；请在站点管理旧会话"));
+                        return;
+                    }
                     String why = wafHit()
                             ? "站点防护拦截，请更换代理节点后重试；多次失败请稍后再试"
                             : "获取授权会话失败";
@@ -230,13 +244,18 @@ public final class SilentAuth {
                  * 的交换被误判超时→转手动→用新 code 再建一个 session→撞 AUTH_SESSION_LIMIT。
                  * 已在途则再宽限一轮，交给 exchange() 自己出成功/失败结果。 */
                 watchdog = new Runnable() {
-                    private int extends_ = 0;
+                    private long graceDeadline = 0;
                     @Override public void run() {
                         if (done) return;
-                        if (exchanging && extends_ < 1) {
-                            extends_++;
-                            main.postDelayed(this, 12000);
-                            return;
+                        if (exchanging) {
+                            /* v1.1.6：交换在途时不再「固定宽限 12s」，改为轮询交换状态——
+                             * exchanging 一变 false 就立刻交回判定，不猜交换要多久。
+                             * 500ms 是探测节拍；30s 只是安全网（不是等待时长）。 */
+                            if (graceDeadline == 0) graceDeadline = System.currentTimeMillis() + 30000L;
+                            if (System.currentTimeMillis() < graceDeadline) {
+                                main.postDelayed(this, 500);
+                                return;
+                            }
                         }
                         finish(false, true, null, "后台交换凭据超时");
                     }
@@ -247,7 +266,13 @@ public final class SilentAuth {
                  * 需求3：会话判定按本账号 Profile（隔离分区），不再看全局。 */
                 boolean fastFail = !expectGithubLogin().isEmpty()
                         && WebViewProfileUtil.githubLoggedIn(mProfile);
-                main.postDelayed(watchdog, fastFail ? 8000 : 30000);
+                /* v1.1.6：超时上限从「内核真正加载完」那一刻起算，而不是从调度那一刻——
+                 * 慢网络不再被误判成卡死。上限本身是失败界（不是等待时长），
+                 * 但起算点必须是可观测事实。等不到加载完也照样起算，避免无限挂住。 */
+                final long wdCap = fastFail ? 8000L : 30000L;
+                final Runnable armWatchdog = () -> main.postDelayed(watchdog, wdCap);
+                Waiters.until(main, () -> wv != null && wv.getProgress() >= 100,
+                        wdCap, armWatchdog, armWatchdog);
 
                 applyProxyThen(() -> {
                     if (done || wv == null) return;
@@ -584,6 +609,16 @@ public final class SilentAuth {
                 "/api/oauth/state", "/v1/oauth/state", "/api/user/oauth/state" };
         private volatile boolean lastBodyWaf = false;
         private volatile boolean fetchWafBlocked = false;
+        private volatile boolean fetchSessionLimit = false;
+        private boolean sessionLimit(int http, String body) {
+            JSONObject j = null;
+            try { j = new JSONObject(body); } catch (Exception ignored) {}
+            if (!SiteProtocol.isSessionLimit(http, j)) return false;
+            fetchSessionLimit = true;
+            store.opLog(siteKey, accountKey, "会话准备", "err", "站点登录会话数已达上限",
+                    "HTTP " + http + "；终止探测，不重复建会话", "auto");
+            return true;
+        }
         boolean wafHit() { return fetchWafBlocked; }
         private String fetchStateProbe(OkHttpClient c) {
             String cached = store.siteMeta(siteKey, "oauthStatePath", "");
@@ -593,7 +628,9 @@ public final class SilentAuth {
             for (String pth : order) {
                 lastBodyWaf = false;
                 String s = postState(c, pth);
+                if (fetchSessionLimit) return null;
                 if (s == null) s = getState(c, pth);
+                if (fetchSessionLimit) return null;
                 if (s != null && !s.isEmpty()) {
                     if (!pth.equals(cached)) store.putSiteMeta(siteKey, "oauthStatePath", pth);
                     return s;
@@ -606,12 +643,12 @@ public final class SilentAuth {
         private String postState(OkHttpClient c, String path) {
             Response r = null;
             try {
-                r = c.newCall(new Request.Builder().url(baseUrl + "/api/oauth/state")
+                r = c.newCall(new Request.Builder().url(baseUrl + path)
                         .header("Accept", "application/json").header("User-Agent", UA)
-                        .post(RequestBody.create("{\"provider\":\"github\",\"intent\":\"login\"}",
+                        .post(RequestBody.create("{\"provider\":\"" + oauthProvider + "\",\"intent\":\"login\"}",
                                 MediaType.parse("application/json"))).build()).execute();
-                if (r.code() != 200) return null;
                 String body = r.body() != null ? r.body().string() : "";
+                if (sessionLimit(r.code(), body) || r.code() != 200) return null;
                 if (Engine.wafBlocked(body)) { lastBodyWaf = true; return null; }
                 return pickState(body);
             } catch (Exception e) { return null; }
@@ -623,8 +660,8 @@ public final class SilentAuth {
             try {
                 r = c.newCall(new Request.Builder().url(baseUrl + path + "?mode=login")
                         .header("Accept", "application/json").header("User-Agent", UA).build()).execute();
-                if (r.code() != 200) return null;
                 String body = r.body() != null ? r.body().string() : "";
+                if (sessionLimit(r.code(), body) || r.code() != 200) return null;
                 if (Engine.wafBlocked(body)) { lastBodyWaf = true; return null; }
                 return pickState(body);
             } catch (Exception e) { return null; }
@@ -672,16 +709,18 @@ public final class SilentAuth {
             saveTokenChecked(token, login);
         }
 
-        /** 该账号期望的 GitHub 登录名：账号绑定凭据的 githubUser，回退别名；空=无法确定 */
+        /** 该账号期望的登录名：按站点 OAuth 方式取对应凭据字段（v1.1.1 与可见授权一致）。
+         * github → 凭据 githubUser 回退别名；linuxdo → 凭据 siteAccount 回退别名；空=无法确定 */
         private String expectGithubLogin() {
             try {
                 JSONObject acc = store.findAccount(accountKey);
                 if (acc == null) return "";
+                boolean isLinuxdo = "linuxdo".equals(SiteProtocol.provider(store.findSite(siteKey), store.findAccount(accountKey)));
                 String cid = acc.optString("credentialId", "");
                 if (!cid.isEmpty()) {
                     JSONObject c = store.findCredential(cid);
                     if (c != null) {
-                        String gu = c.optString("githubUser", "");
+                        String gu = isLinuxdo ? c.optString("siteAccount", "") : c.optString("githubUser", "");
                         if (!gu.isEmpty()) return gu;
                     }
                 }
