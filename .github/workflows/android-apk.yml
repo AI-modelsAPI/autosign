@@ -26,6 +26,11 @@ jobs:
         working-directory: android
 
       - uses: android-actions/setup-android@v3
+        with:
+          # v3 默认会去装已废弃的 'tools' 包，新版 runner SDK 已移除该包 → sdkmanager 退出码1。
+          # 显式指定 packages 跳过 'tools'，预装 compileSdk 34 平台 + build-tools + platform-tools。
+          cmdline-tools-version: "latest"
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
       - name: 构建 Debug APK（debug 签名，下载即可安装）
         run: |
