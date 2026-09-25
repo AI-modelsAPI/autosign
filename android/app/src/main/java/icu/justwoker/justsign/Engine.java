@@ -76,18 +76,10 @@ public class Engine {
             if (accSiteUserId != null) siteUserId = accSiteUserId;
         } catch (Exception ignored) {}
         JSONObject r = attempt(url, token, cookie, siteUserId, method, buildClient(useProxy, proxy), jsonBody);
-        /* 429 = 当前代理节点被 WAF/限流盯上。自动探测本机其它存活代理端口，
-         * 找到就持久化切过去并重试一次（60s 冷却防横跳）。 */
-        if (r != null && r.optInt("http") == 429 && useProxy) {
-            JSONObject switched = switchToBackupProxy(proxy);
-            if (switched != null) {
-                store.opLog("", "", "代理", "info",
-                        "429 触发换代理节点", switched.optString("host") + ":" + switched.optInt("port"), "auto");
-                r = attempt(url, token, cookie, siteUserId, method,
-                        buildClient(true, store.config().optJSONObject("proxy")), jsonBody);
-            }
-        }
-        if (r == null && useProxy) r = attempt(url, token, cookie, siteUserId, method, plain, jsonBody);
+        // A transport failure may have happened AFTER a write reached the server.
+        // Never replay writes (including side-effecting GETs), nor evade a 429 by switching exits.
+        if (r == null && useProxy && ReadFallback.allowed(method, path))
+            r = attempt(url, token, cookie, siteUserId, method, plain, jsonBody);
         if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
                 + (lastError.isEmpty() ? "" : ": " + lastError));
         return r;
@@ -127,13 +119,126 @@ public class Engine {
     }
 
     /**
+     * v1.1.14 每账号「操作级」事务锁（类似 git 的 index.lock）。
+     * 真机实证：手动刷新与定时签到/定时刷新并发跑，各自独立走「会话续期」，
+     * 而站点用一次性轮换 Refresh Cookie —— 一个流程刚轮换、旧 Cookie 即作废，
+     * 另一个仍拿旧值请求 → 自伤式 401 → 误报「登录已过期」（00:52:01 刷新成功 $410，
+     * 00:52:03 又被并发的定时刷新打出 401 覆盖）。refreshLock 只锁「换 token」那一小步，
+     * 覆盖不到整条 status/checkin/logout 操作。此锁把「同一账号的一次完整业务操作」串行化：
+     * 锁获取顺序恒为 opLock → refreshLock，绝不反向，无死锁；同时天然消除并发重复请求。
+     */
+    private static final ConcurrentHashMap<String, Object> OP_LOCKS = new ConcurrentHashMap<>();
+    private static Object opLock(String accountKey) {
+        return OP_LOCKS.computeIfAbsent(accountKey == null ? "" : accountKey, k -> new Object());
+    }
+
+    /**
      * 带凭据的业务请求。短期令牌过期时只续期当前站点会话，绝不发起 OAuth。
      * 网络错误、403、429、5xx 等保持原错误，不得误判成登录失效。
      */
     public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path) throws Exception {
-        return callWithAuth(site, accountKey, method, path, null);
+        return callWithAuth(site, accountKey, method, path, null, true);
     }
     public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path, String jsonBody) throws Exception {
+        return callWithAuth(site, accountKey, method, path, jsonBody, true);
+    }
+    /**
+     * @param allowReauth 只读兜底仍救不回时，是否允许对 linuxdo 站尝试静默重授权重建会话后重试一次。
+     *   重试时传 false 以防循环。所有业务调用（Key 列表/新建/删除/划转/日志/刷新）默认 true——
+     *   v1.1.16 修复：此前静默重授权只写在 statusLocked（刷新链），Key 列表等走 callWithAuth 的
+     *   业务请求在会话失效时只有「只读离屏」一层兜底，而只读救不回已过期的会话 → 恒 503。
+     *   真机日志实证 05:40~05:51 AnyRouter Key 列表连续 503、只读兜底「未拿到可用数据」，同期
+     *   05:54 刷新链靠静默重授权成功重建会话刷出 $154.62——正是这条不对称。现把重授权收敛到
+     *   callWithAuth 这个所有业务请求的必经点，Key 列表等一并获得「原生→只读→静默重授权→重试」完整自愈链。
+     */
+    public JSONObject callWithAuth(JSONObject site, String accountKey, String method, String path,
+                                   String jsonBody, boolean allowReauth) throws Exception {
+        JSONObject response = null;
+        Exception failure = null;
+        try {
+            response = callWithAuthNative(site, accountKey, method, path, jsonBody);
+        } catch (Exception e) {
+            failure = e;
+        }
+        /* v1.1.24：瞬时 WAF-503 快速原生重试。真机实证——同一会话同一套原生 OkHttp，
+         * /api/token/ 拿到 HTTP 200、13 秒后 /api/user/self 却 503，且 08:54 self 原生直接 200——
+         * 证明这是「按端点/瞬时」的 WAF 抖动，不是会话失效。此前一遇 503 就跳到离屏(23s)+
+         * 静默重授权(30s)，既慢又无谓（会话明明活着，Key 列表 200 就是铁证）。现对幂等 GET
+         * 先做至多 2 次廉价原生重试（短退避），一旦拿到「无需重试的返回」（非 503/非 WAF，
+         * 如 200 成功或确定性错误）立即停止；仍是 503/WAF 才落到离屏兜底。这直接回答用户三问：
+         * ①key成功/刷新失败无代码差异，是瞬时WAF ②会话不需重建 ③慢就是这条重试链、现按需短路。 */
+        if (allowReauth && failure == null && response != null
+                && ReadFallback.allowed(method, path) && "GET".equalsIgnoreCase(method)) {
+            int h0 = response.optInt("http");
+            boolean wafish = h0 == 503 || Engine.wafBlocked(response.optString("body", ""));
+            long[] backoff = {600L, 1000L};
+            for (int i = 0; wafish && i < backoff.length; i++) {
+                try { Thread.sleep(backoff[i]); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                JSONObject retry;
+                try { retry = callWithAuthNative(site, accountKey, method, path, jsonBody); }
+                catch (Exception e) { break; }   // 传输层异常：交给下方兜底/抛出，不在此消化
+                response = retry;
+                int rh = retry.optInt("http");
+                wafish = rh == 503 || Engine.wafBlocked(retry.optString("body", ""));
+                if (!wafish) {   // 拿到无需重试的返回：立即停止
+                    store.opLog(site.optString("key"), accountKey, "瞬时重试", "info",
+                            "原生重试第" + (i + 1) + "次已越过瞬时防护",
+                            "path=" + path.split("\\?", 2)[0] + "; http=" + rh, "auto");
+                    break;
+                }
+            }
+        }
+        if (ReadFallback.shouldTry(method, path, response, failure)) {
+            JSONObject acc = store.findAccount(accountKey);
+            String uid = acc == null ? "" : SessionFence.userIdOf(acc);
+            String reason = failure == null ? "http=" + (response == null ? 0 : response.optInt("http"))
+                    : ReadFallback.category(failure);
+            store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
+                    "原生请求失败，转离屏验证", "path=" + path.split("\\?", 2)[0]
+                    + "; reason=" + reason + "; oauth=false; maxAttempts=1", "auto");
+            try {
+                JSONObject recovered = OffscreenReadRunner.read(ctx, site.optString("baseUrl"),
+                        site.optString("key"), accountKey, uid,
+                        path, site.optString("baseUrl"), 25);
+                if (ReadFallback.usableResponse(path, recovered, uid)) {
+                    store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
+                            "离屏读取成功", "path=" + path.split("\\?", 2)[0] + "; oauth=false", "auto");
+                    return recovered;
+                }
+                store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "warn",
+                        "离屏未拿到可用数据，保留原始错误", "path=" + path.split("\\?", 2)[0], "auto");
+            } catch (Exception e) {
+                store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "err",
+                        "离屏执行异常，保留原始错误", "reason=" + ReadFallback.category(e), "auto");
+            }
+        }
+        /* 只读兜底救不回「已失效的会话」（WAF 归一化 503 / 401 / 403）时，对 linuxdo 站复用论坛会话
+         * 静默重建站点会话，成功后重试一次（禁止再次静默避免循环）。仅响应型会话失效信号触发，
+         * 传输层异常（网络断）不触发——WebView 走同一出口也救不了网络问题。 */
+        if (allowReauth && sessionLikelyDead(response, failure)) {
+            JSONObject acc = store.findAccount(accountKey);
+            if (acc != null && "linuxdo".equals(SiteProtocol.provider(site, acc))) {
+                int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
+                if (rc == OffscreenReauth.REAUTH_OK) {
+                    resetTokenCache();
+                    return callWithAuth(site, accountKey, method, path, jsonBody, false);
+                }
+            }
+        }
+        if (failure != null) throw failure;
+        return response;
+    }
+
+    /** 响应是否呈现「会话失效/被拦」信号（可被静默重授权自愈）；传输层异常不算。 */
+    private boolean sessionLikelyDead(JSONObject response, Exception failure) {
+        if (failure != null || response == null) return false;
+        int http = response.optInt("http");
+        return http == 401 || http == 403 || http == 503
+                || Engine.wafBlocked(response.optString("body", ""));
+    }
+
+    private JSONObject callWithAuthNative(JSONObject site, String accountKey, String method, String path, String jsonBody) throws Exception {
         JSONObject acc = store.findAccount(accountKey);
         String token = cachedToken(accountKey);
         if (token.isEmpty() && acc != null) token = clean(acc.optString("token", ""));
@@ -150,7 +255,8 @@ public class Engine {
         }
 
         JSONObject result = call(site, token, cookie, siteUserId, method, path, jsonBody);
-        if (result.optInt("http") != 401 || !hasRefreshCookie(cookie)) return result;
+        if (result.optInt("http") != 401 || !hasRefreshCookie(cookie)
+                || !ReadFallback.allowed(method, path)) return result;
 
         /* 401 表示本次使用的 token 已被服务端拒绝。锁内仅当存储 token 仍等于
          * failedToken 时真正续期；若已变化，说明并发线程已经完成续期，直接复用。 */
@@ -245,6 +351,9 @@ public class Engine {
      * 返回 ReauthManager 的分级码：CONFIRMED / ABSENT / UNCONFIRMED / DENIED。
      */
     public int logoutSession(String accountKey) {
+        synchronized (opLock(accountKey)) { return logoutSessionLocked(accountKey); }
+    }
+    private int logoutSessionLocked(String accountKey) {
         JSONObject site = store.siteOfAccount(accountKey);
         JSONObject acc = store.findAccount(accountKey);
         if (site == null || acc == null) return ReauthManager.UNCONFIRMED;
@@ -455,6 +564,66 @@ public class Engine {
         return out.toString();
     }
 
+        /** 合并两个 Cookie 头值（"a=1; b=2" 形式），后者覆盖同名项；空值/deleted 视为删除。 */
+    public static String mergeCookieHeaders(String a, String b) {
+        java.util.LinkedHashMap<String, String> m = new java.util.LinkedHashMap<>();
+        for (String raw : new String[]{a, b}) {
+            if (raw == null) continue;
+            for (String pair : raw.split(";")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                String k = pair.substring(0, eq).trim(), v = pair.substring(eq + 1).trim();
+                if (v.isEmpty() || "deleted".equalsIgnoreCase(v)) m.remove(k);
+                else m.put(k, v);
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : m.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        return sb.toString();
+    }
+    /**
+     * v1.0.7：阿里云 WAF 放行 Cookie 白名单。只有这几个键是 JS 质询产物，
+     * 值得跨请求长期复用；业务 session 绝不从缓存回填（避免旧会话互相污染）。
+     */
+    private static final String[] WAF_COOKIE_KEYS = {"acw_sc__v2", "acw_tc", "cdn_sec_tc"};
+    /** 从 Cookie 头值里只挑 WAF 相关键（用于落库缓存）。 */
+    public static String pickWafCookies(String cookie) {
+        StringBuilder sb = new StringBuilder();
+        if (cookie == null) return "";
+        for (String pair : cookie.split(";")) {
+            String p = pair.trim();
+            int eq = p.indexOf('=');
+            if (eq <= 0) continue;
+            String name = p.substring(0, eq).trim();
+            for (String k : WAF_COOKIE_KEYS) {
+                if (k.equals(name)) {
+                    if (sb.length() > 0) sb.append("; ");
+                    sb.append(p);
+                    break;
+                }
+            }
+        }
+        return sb.toString();
+    }
+    /** 某站点缓存的 WAF 放行 Cookie（授权时由真实 WebView 过质询取得）。 */
+    public String wafCookieForSite(String siteKey) {
+        if (siteKey == null || siteKey.isEmpty()) return "";
+        try { return clean(store.siteMeta(siteKey, "wafCookie", "")); } catch (Exception e) { return ""; }
+    }
+    /** URL → 站点 key（与 Store.siteKeyOf 同规则），用于查该站的 WAF 缓存。 */
+    private static String siteKeyOfUrl(String url) {
+        try {
+            int i = url.indexOf("//");
+            if (i < 0) return "";
+            String rest = url.substring(i + 2);
+            int s = rest.indexOf('/');
+            String host = (s < 0 ? rest : rest.substring(0, s)).toLowerCase(java.util.Locale.US);
+            return Store.siteKeyOf("https://" + host);
+        } catch (Exception e) { return ""; }
+    }
     /** 供WebView签到入口预先取得可用Token；只续期现有会话，绝不OAuth。 */
     public String ensureBusinessToken(JSONObject site, String accountKey) {
         JSONObject acc = store.findAccount(accountKey);
@@ -486,22 +655,49 @@ public class Engine {
         synchronized (tokenCache) { tokenCache.put(accountKey, token); }
     }
 
+    /** v1.1.11：按 host:port 缓存代理客户端，杜绝「每次请求 new 一个 OkHttpClient」
+     * 带来的连接池 / Dispatcher 线程池 / 后台清理线程叠加。此前每刷一次额度、每查一次
+     * Key 都新建客户端（各自独立连接池，永不 evict），高频刷新下句柄/线程持续累积，
+     * 是真实的资源叠加隐患。复用 = 站点侧看到的是同一连接池的少量长连接，也更像浏览器。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, OkHttpClient> proxyClients =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private OkHttpClient buildClient(boolean useProxy, JSONObject proxy) {
         if (!useProxy || proxy == null) return plain;
+        String host = proxy.optString("host", "127.0.0.1");
+        int port = proxy.optInt("port", 10808);
+        String key = host + ":" + port;
+        OkHttpClient cached = proxyClients.get(key);
+        if (cached != null) return cached;
         try {
-            return new OkHttpClient.Builder()
+            OkHttpClient built = new OkHttpClient.Builder()
                     .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-                    .proxy(new Proxy(Proxy.Type.SOCKS,
-                            new InetSocketAddress(proxy.optString("host", "127.0.0.1"), proxy.optInt("port", 10808))))
+                    // Bounded pool so a stuck egress can't fan out unbounded sockets.
+                    .connectionPool(new okhttp3.ConnectionPool(4, 5, TimeUnit.MINUTES))
+                    .proxy(new Proxy(Proxy.Type.SOCKS, new InetSocketAddress(host, port)))
                     .build();
+            OkHttpClient prev = proxyClients.putIfAbsent(key, built);
+            if (prev != null) { built.dispatcher().executorService().shutdown(); return prev; }
+            return built;
         } catch (Exception e) { return plain; }
     }
 
+    /** v1.1.25：WAF 就地解 JS 的递归上限。旧实现用「本次 cookie 是否已带 acw_sc__v2」
+     * 当递归判据，只要 stored cookie 里残留一个过期 acw_sc__v2，就误判「已过盾」直接跳过
+     * 求解 → 业务恒 503，而质询页里明明带着可当场算的新 arg1（真机 09:33 self 偶发 503
+     * 而 token 200 的机制层根因）。现改为「有界求解深度」：每层都从质询页当前 arg1 现解、
+     * 覆盖旧 acw_sc__v2，最多 MAX_WAF_SOLVE 层，仍质询才落 503 兜底。2 层足够覆盖
+     * 「过期 cookie 重解一次」+「极端下二次质询」，且严格有界不会递归爆栈。 */
+    private static final int MAX_WAF_SOLVE = 2;
+
     private JSONObject attempt(String url, String token, String cookie, String siteUserId, String method, OkHttpClient client) {
-        return attempt(url, token, cookie, siteUserId, method, client, null);
+        return attempt(url, token, cookie, siteUserId, method, client, null, 0);
     }
     /** v0.6.0：带 JSON body 的请求（aff_transfer 等写操作用） */
     private JSONObject attempt(String url, String token, String cookie, String siteUserId, String method, OkHttpClient client, String jsonBody) {
+        return attempt(url, token, cookie, siteUserId, method, client, jsonBody, 0);
+    }
+    /** v1.1.25：内部实现，solveDepth = 本请求已就地解 JS 的次数（入口恒 0）。 */
+    private JSONObject attempt(String url, String token, String cookie, String siteUserId, String method, OkHttpClient client, String jsonBody, int solveDepth) {
         Response resp = null;
         try {
             Request.Builder rb = new Request.Builder().url(url)
@@ -510,12 +706,13 @@ public class Engine {
                      * 实测依据：日志中 agentrouter 刷新被阿里云 WAF 拦截 11 次、定时刷新 2 次，
                      * 远多于登出（4 次）——WAF 按请求头特征识别非浏览器客户端，
                      * 只给登出补头治标不治本。这些头对不设 WAF 的站点无副作用。 */
-                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
                     .header("Origin", url.substring(0, url.indexOf('/', 8)))
                     .header("Referer", url.substring(0, url.indexOf('/', 8)) + "/")
                     .header("Sec-Fetch-Dest", "empty")
                     .header("Sec-Fetch-Mode", "cors")
                     .header("Sec-Fetch-Site", "same-origin")
+                    .header("Sec-CH-UA", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"")
                     .header("Sec-CH-UA-Mobile", "?1")
                     .header("Sec-CH-UA-Platform", "\"Android\"")
                     .header("X-Requested-With", "XMLHttpRequest");
@@ -546,7 +743,40 @@ public class Engine {
             /* v0.4.3（glm-5.3 审计方案1）：WAF 假 200——HTTP 200 但 body 是拦截页 HTML。
              * 归一化为 http=503 + waf=true + 通俗 message，上层据此不覆盖额度、
              * toast 提示换代理节点；技术细节只进日志。 */
-            if (resp.code() == 200 && wafBlocked(txt)) {
+                        if (resp.code() == 200 && wafBlocked(txt)) {
+                /* v1.1.6：WAF 自愈不再依赖缓存字段（就地求解质询页 arg1，纯 OkHttp 自愈）。
+                 * v1.1.25：递归判据从「本次 cookie 是否已带 acw_sc__v2」（存在性）改为
+                 * 「已就地求解次数 < MAX_WAF_SOLVE」（有界深度）。根因：存在性判据下，只要
+                 * stored cookie 残留一个【过期】acw_sc__v2，就被误判「已过盾」→ 跳过求解 →
+                 * 直接 503，而质询页里带着可当场算的【新】arg1。改深度后：每层都从当前质询页
+                 * arg1 现解、用 mergeCookie【覆盖】旧 acw_sc__v2，acw_sc__v2 过期即当场重解，
+                 * 业务请求秒过，不再落 23s 离屏 + 30s 重授权慢链。 */
+                if (solveDepth < MAX_WAF_SOLVE) {
+                    if (WafChallenge.isChallenge(txt)) {
+                        String v = WafChallenge.solve(WafChallenge.arg1(txt));
+                        if (!v.isEmpty()) {
+                            /* 关键：acw_tc 是质询的会话标识，必须与 acw_sc__v2 同时回送。
+                             * 沙箱对照实测：只带 acw_sc__v2 仍被拦，两者齐带才放行。
+                             * acw_tc 由站点在质询响应里下发，此处从响应头捕获后合并。
+                             * mergeCookie 原地【替换】旧 acw_sc__v2/acw_tc（不追加重复）。 */
+                            String tc = WafChallenge.acwTcFromResponse(resp);
+                            try {
+                                String sk = siteKeyOfUrl(url);
+                                store.opLog(sk == null ? "" : sk, "", "WAF 就地求解", "info",
+                                        "第" + (solveDepth + 1) + "次现解质询 arg1，覆盖旧盾 Cookie 后重发",
+                                        "acw_sc__v2 过期即当场重解，避免落离屏慢链", "sys");
+                            } catch (Exception ignored) {}
+                            return attempt(url, token, WafChallenge.mergeCookie(cookie, v, tc),
+                                    siteUserId, method, client, jsonBody, solveDepth + 1);
+                        }
+                    }
+                    /* 兜底：授权阶段真实浏览器过质询拿到的放行 Cookie（若已缓存）。 */
+                    String cached = pickWafCookies(wafCookieForSite(siteKeyOfUrl(url)));
+                    if (!cached.isEmpty()) {
+                        return attempt(url, token, mergeCookieHeaders(cookie, cached),
+                                siteUserId, method, client, jsonBody, solveDepth + 1);
+                    }
+                }
                 lastError = "WAF200: " + txt.substring(0, Math.min(120, txt.length()));
                 return new JSONObject().put("http", 503).put("waf", true)
                         .put("message", "站点防护拦截了本次请求，请更换代理节点后重试");
@@ -554,6 +784,17 @@ public class Engine {
             JSONObject out = new JSONObject().put("http", resp.code());
             try { out.put("data", new JSONObject(txt)); }
             catch (Exception e) { out.put("data", new JSONObject()); }
+            /* v1.1.6：本次请求带了本地解出的 acw_sc__v2 且拿到了真实业务响应，
+             * 说明放行有效 —— 回存到本站 wafCookie，后续请求直接复用，省一次往返。
+             * 只回存「确实带来放行」的值（走到这里即证明已通过），不存中间态。 */
+            if (cookie != null && cookie.contains("acw_sc__v2") && resp.code() != 401) {
+                try {
+                    String sk = siteKeyOfUrl(url);
+                    if (sk != null && !sk.isEmpty()) {
+                        store.putSiteMeta(sk, "wafCookie", pickWafCookies(cookie));
+                    }
+                } catch (Exception ignored) {}
+            }
             return out;
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : (" " + e.getMessage()));
@@ -570,6 +811,8 @@ public class Engine {
         String b = body.length() > 4096 ? body.substring(0, 4096) : body;
         String l = b.toLowerCase(java.util.Locale.US);
         return l.contains("aliyun_waf")
+                || (l.contains("<script") && (l.contains("arg1=") || l.contains("arg1 =")))
+                || l.contains("acw_sc__v2")
                 || l.contains("errors.aliyun.com")
                 || (l.contains("cloudflare") && (l.contains("just a moment") || l.contains("attention required")))
                 || l.contains("waf.tencent-cloud.com")
@@ -660,6 +903,17 @@ public class Engine {
     /* ================= 业务：刷新（读取三大额度 + 签到奖励） ================= */
 
     public JSONObject status(String key) throws Exception {
+        return status(key, true);
+    }
+
+    /**
+     * v1.1.1：logSummary=false 供「同一轮刷新内的二次状态获取」（如邀请划转后的复核）
+     * 使用——不再重复写「额度已更新」操作日志（该场景曾导致同账号一轮出现两条额度文案）。
+     */
+    public JSONObject status(String key, boolean logSummary) throws Exception {
+        synchronized (opLock(key)) { return statusLocked(key, logSummary, true); }
+    }
+    private JSONObject statusLocked(String key, boolean logSummary, boolean allowSilentReauth) throws Exception {
         JSONObject tk = store.findAccount(key);
         if (tk == null) throw new Exception("账号不存在");
         JSONObject site = store.siteOfAccount(key);
@@ -669,9 +923,42 @@ public class Engine {
         /* 每轮刷新开头清一次缓存，读取本轮最新 token */
         resetTokenCache();
 
-        /* 统一走 callWithAuth：过期先换、401 再换，全程后台无弹窗 */
-        JSONObject self = callWithAuth(site, key, "GET", "/api/user/self");
+        /* 统一走 callWithAuth：过期先换、401 再换，全程后台无弹窗。
+         * 这里传 allowReauth=false：刷新链的静默重授权由下方 statusLocked 自己那段处理
+         * （已真机验证，且成功后需重跑整条 status 重算额度），不让 callWithAuth 再触发一次，避免双重重授权。 */
+        JSONObject self = callWithAuth(site, key, "GET", "/api/user/self", null, false);
         int selfHttp = self.optInt("http");
+
+        /*
+         * v1.1.15 静默重授权自愈（仅 linuxdo 站，一轮刷新最多一次）：
+         * 真机实证——旧会话失效后，原生被 WAF 挡成 503、离屏只读也救不回已过期的会话，
+         * 但用户手动「重新授权」在同节点 ~2s 成功（关键是账号专属分区里 connect.linux.do
+         * 论坛会话仍活着，SPA 复用它直通确认页）。此处把那条路搬到离屏：self 不合法且像
+         * 「会话失效/被拦」（401 或 WAF 归一化的 503）时，尝试 OffscreenReauth 复用论坛会话
+         * 重建站点会话，成功即用新 Cookie 重跑一次 status。论坛会话也失效/需人机验证时
+         * OffscreenReauth 返回 needUi，这里不再重试、按原错误返回，行为不比现状差。
+         */
+        if (allowSilentReauth
+                && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
+                && "linuxdo".equals(SiteProtocol.provider(site, tk))
+                && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503
+                    || Engine.wafBlocked(self.optString("body", "")))) {
+            int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
+            if (rc == OffscreenReauth.REAUTH_OK) {
+                resetTokenCache();
+                return statusLocked(key, logSummary, false); // 用新会话重跑一次，禁止再次静默避免循环
+            }
+        }
+
+        if (!SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))) {
+            String message = self.optString("message", "");
+            if (message.isEmpty()) message = selfHttp == 200
+                    ? "站点业务响应或账号身份异常，保留上次额度" : httpHint(selfHttp);
+            store.opLog(sKey, key, "刷新", "err", message,
+                    "GET /api/user/self；HTTP " + selfHttp + "；businessValid=false", "user");
+            return new JSONObject().put("ok", false).put("http", selfHttp)
+                    .put("message", message).put("account", key).put("site", site.optString("name"));
+        }
 
         JSONObject stat;
         try { stat = call(site, null, "GET", "/api/status"); }
@@ -721,7 +1008,8 @@ public class Engine {
         store.appendLog(sKey, key, "status", "http=" + selfHttp);
 
         if (selfHttp == 200) {
-            store.opLog(sKey, key, "刷新", "ok", "额度已更新",
+            /* v1.1.1：同轮复核不重复写额度文案（logSummary 控制） */
+            if (logSummary) store.opLog(sKey, key, "刷新", "ok", "额度已更新",
                     "可用 $" + Ui.usd(Math.round(quota / unit * 100.0) / 100.0)
                             + (todayUsed >= 0 ? (" · 今日消耗 $" + Ui.usd(todayUsed)) : ""), "user");
         } else {
@@ -732,8 +1020,15 @@ public class Engine {
         if (selfHttp == 200) {
             boolean loginKind = "login".equals(siteKind(site));
             JSONObject cs = null;
-            try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
-            if ((cs == null || !cs.optBoolean("checked", false)) && loginKind) {
+            if (SiteProtocol.isAnyRouter(site)) {
+                boolean receipt = SiteProtocol.hasSignInReceipt(tk, System.currentTimeMillis());
+                cs = new JSONObject().put("checked", receipt).put("rewardKnown", false);
+                out.put("checkinStateKnown", receipt);
+                if (receipt) out.put("checkinSource", "api_sign_in");
+            } else {
+                try { cs = checkinStatus(key, unit); } catch (Exception ignored) {}
+            }
+            if ((cs == null || !cs.optBoolean("checked", false)) && loginKind && !SiteProtocol.isAnyRouter(site)) {
                 /* 登录即得站以「今日系统奖励记录」为最终判据。checkinStatus 已按北京时间
                  * 严格比对 checkin_date；这里再用今日奖励日志兜底（日志接口偶发被 WAF 拦）。
                  * todayBonus 内部已用 isToday(北京时间) 过滤，只会命中当日记录。 */
@@ -843,7 +1138,7 @@ public class Engine {
             store.opLog(sKey, key, "Key 管理", "info", "开始获取 Key 列表",
                     "token=" + hasToken + " cookie=" + hasCookie + " uid=" + (uid.isEmpty() ? "无" : "有"), "auto");
         } catch (Exception ignored) {}
-        JSONObject r = callWithAuth(site, key, "GET", "/api/token/?p=1&size=100");
+        JSONObject r = callWithAuth(site, key, "GET", SiteProtocol.tokenListPath(site));
         int http = r.optInt("http");
         JSONObject rd = r.optJSONObject("data");
         /* 调试日志：HTTP 状态 + data 结构形态 */
@@ -929,6 +1224,11 @@ public class Engine {
     public JSONObject checkinStatus(String key, long unit) throws Exception {
         JSONObject site = store.siteOfAccount(key);
         if (site == null) throw new Exception("站点不存在");
+        if (SiteProtocol.isAnyRouter(site)) {
+            boolean receipt = SiteProtocol.hasSignInReceipt(store.findAccount(key), System.currentTimeMillis());
+            return new JSONObject().put("checked", receipt).put("rewardKnown", false)
+                    .put("stateUnknown", !receipt).put("message", receipt ? "本应用今日签到请求已确认" : "站点无只读签到状态接口");
+        }
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
         String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
         JSONObject r = callWithAuth(site, key, "GET",
@@ -962,6 +1262,9 @@ public class Engine {
     }
 
     public JSONObject checkin(String key) throws Exception {
+        synchronized (opLock(key)) { return checkinLocked(key); }
+    }
+    private JSONObject checkinLocked(String key) throws Exception {
         JSONObject tk = store.findAccount(key);
         JSONObject site = store.siteOfAccount(key);
         if (tk == null || site == null) throw new Exception("账号或站点不存在");
@@ -1156,6 +1459,9 @@ public class Engine {
 
     public static boolean isCheckedToday(JSONObject acc) {
         if (acc == null) return false;
+        String sk = acc.optString("siteKey", "");
+        if ("anyrouter-top".equals(sk) || sk.contains("anyrouter"))
+            return SiteProtocol.hasSignInReceipt(acc, System.currentTimeMillis());
         JSONObject lc = acc.optJSONObject("lastCheckin");
         return lc != null && todayStr().equals(lc.optString("date", ""));
     }
@@ -1242,7 +1548,12 @@ public class Engine {
         return -1;
     }
 
-    public void runAllOnce() {
+    public void runAllOnce() { runScheduled(false); }
+
+    /** 八点专属任务只能触达AnyRouter，不牵连其他站点的授权流程。 */
+    public void runAnyRouterOnce() { runScheduled(true); }
+
+    private void runScheduled(boolean anyOnly) {
         if (!scheduleAllowsToday()) {
             store.opLog("", "", "定时签到", "info", "今日跳过（仅工作日执行）", "", "cron");
             return;
@@ -1252,6 +1563,11 @@ public class Engine {
         for (int i = 0; i < sites.length(); i++) {
             JSONObject site = sites.optJSONObject(i);
             if (site == null) continue;
+            if (anyOnly && !SiteProtocol.isAnyRouter(site)) continue;
+            if (SiteProtocol.isAnyRouter(site) && !SiteProtocol.rewardWindowOpen(System.currentTimeMillis())) {
+                store.opLog(site.optString("key"), "", "定时签到", "info", "AnyRouter等待北京时间08:00后领取", "未请求领取，未标记本日完成", "cron");
+                continue;
+            }
             final String sKey = site.optString("key", "");
             JSONArray accs = site.optJSONArray("accounts");
             if (accs == null) continue;
@@ -1293,14 +1609,15 @@ public class Engine {
                         if (!ev[0].endsWith("fail")) {
                             try {
                                 JSONObject st = status(key);
-                                if (st != null && st.optInt("http", 0) == 200) {
+                                if (SiteProtocol.canStoreStatus(st)) {
                                     JSONObject patch = new JSONObject().put("lastStatus", st);
-                                    if (st.optBoolean("todayChecked", false)) {
+                                    if (st.optBoolean("todayChecked", false) && !SiteProtocol.isAnyRouter(store.findSite(sKey))) {
                                         JSONObject lc2 = new JSONObject()
                                                 .put("date", todayStr())
                                                 .put("time", System.currentTimeMillis());
                                         if (st.optBoolean("todayRewardKnown", false))
                                             lc2.put("reward", st.optDouble("todayRewardUSD", 0));
+                                        if ("api_sign_in".equals(st.optString("checkinSource", ""))) lc2.put("source", "api_sign_in");
                                         patch.put("lastCheckin", lc2);
                                     }
                                     store.patchAccount(key, patch);
@@ -1314,7 +1631,7 @@ public class Engine {
                         JSONObject r = status(key);
                         int hc = r == null ? 0 : r.optInt("http");
                         boolean reloginSite = needsReloginCheckin(site);
-                        if (reloginSite && hc == 200 && !r.optBoolean("todayChecked", false)) {
+                        if (reloginSite && SiteProtocol.canStoreStatus(r) && !r.optBoolean("todayChecked", false)) {
                             store.appendLog(sKey, key, "cron-relogin", "今日无奖励，执行登出重登签到");
                             store.opLog(sKey, key, "定时签到", "info",
                                     "今日无签到奖励，登出旧会话并重新登录触发发放", "", "cron");
@@ -1344,7 +1661,7 @@ public class Engine {
                             if ("cron-relogin-ok".equals(rlEv[0])) {
                                 JSONObject r2 = status(key);
                                 int hc2 = r2 == null ? 0 : r2.optInt("http");
-                                if (hc2 == 200) {
+                                if (SiteProtocol.canStoreStatus(r2)) {
                                     JSONObject patch = new JSONObject().put("lastStatus", r2);
                                     if (r2.optBoolean("todayChecked", false)) {
                                         JSONObject lc2 = new JSONObject()
@@ -1356,7 +1673,7 @@ public class Engine {
                                     }
                                     store.patchAccount(key, patch);
                                 }
-                                boolean verified = hc2 == 200 && r2.optBoolean("todayChecked", false);
+                                boolean verified = SiteProtocol.canStoreStatus(r2) && r2.optBoolean("todayChecked", false);
                                 store.opLog(sKey, key, "定时签到", verified ? "ok" : "err",
                                         verified ? "北京时间当日奖励已核验" : "重登成功但未发现北京时间当日奖励记录",
                                         "刷新成功不等于奖励到账", "cron");
@@ -1365,11 +1682,35 @@ public class Engine {
                         } else {
                             /* v0.4.6：登录保活改走 status()，额度同时写入 lastStatus */
                             store.appendLog(sKey, key, "cron-login-refresh", "http=" + hc);
+                            boolean valid = SiteProtocol.canStoreStatus(r);
                             store.opLog(sKey, key, "定时刷新",
-                                    hc == 200 ? "ok" : "err",
-                                    hc == 200 ? "登录保活成功" : httpHint(hc), "", "cron");
-                            if (hc == 200) {
-                                try { store.patchAccount(key, new JSONObject().put("lastStatus", r)); } catch (Exception ignored) {}
+                                    valid ? "ok" : "err",
+                                    valid ? "登录保活成功" : (r == null ? httpHint(hc) : r.optString("message", httpHint(hc))), "", "cron");
+                            if (valid) {
+                                /* v1.1.23：保活分支此前只写 lastStatus、不写 lastCheckin，导致：
+                                 * (1) 服务端已 todayChecked 的账号(如 AgentRouter L站)标签永远停在「待签」；
+                                 * (2) isCheckedToday 恒 false → 打开 App 的补跑判定 ranToday 恒 false →
+                                 *     「定时签到」每次开 App 都重复触发。现补齐 lastCheckin 落库(与
+                                 * MainActivity.buildStatusPatch 同款受保护逻辑)：todayChecked 则置已签，
+                                 * 服务端明确未签则清脏徽章；AnyRouter 回执(api_sign_in/状态未知)绝不改写。 */
+                                try {
+                                    JSONObject patch = new JSONObject().put("lastStatus", r);
+                                    boolean receiptOnly = "api_sign_in".equals(r.optString("checkinSource", ""))
+                                            || !r.optBoolean("checkinStateKnown", true);
+                                    if (!receiptOnly) {
+                                        if (r.optBoolean("todayChecked", false)) {
+                                            JSONObject lc = new JSONObject()
+                                                    .put("date", todayStr())
+                                                    .put("time", System.currentTimeMillis());
+                                            if (r.optBoolean("todayRewardKnown", false))
+                                                lc.put("reward", r.optDouble("todayRewardUSD", 0));
+                                            patch.put("lastCheckin", lc);
+                                        } else if (r.optBoolean("checkinStateKnown", true)) {
+                                            patch.put("lastCheckin", JSONObject.NULL);   // 服务端明确未签：清脏徽章
+                                        }
+                                    }
+                                    store.patchAccount(key, patch);
+                                } catch (Exception ignored) {}
                             }
                         }
                     }
@@ -1382,6 +1723,9 @@ public class Engine {
                 }
             }
         }
+        /* v1.1.23：完整跑完一轮（非 AnyRouter 专属 8 点任务）→ 标记今日已运行。
+         * 补跑判定用它「一天只触发一次」，不再因某个死会话账号签不上而反复触发。 */
+        if (!anyOnly) store.markCronRun(todayStr());
     }
 
     public static class CheckWorker extends Worker {
@@ -1398,6 +1742,7 @@ public class Engine {
         try { sch = new Store(c).schedule(); } catch (Exception e) { sch = new JSONObject(); }
         boolean enabled = sch.optBoolean("enabled", true);
         WorkManager wm = WorkManager.getInstance(c);
+        AnyRouterWorker.sync(c);
         if (!enabled) { wm.cancelUniqueWork("justsign-check"); return; }
 
         String mode = sch.optString("mode", "daily");

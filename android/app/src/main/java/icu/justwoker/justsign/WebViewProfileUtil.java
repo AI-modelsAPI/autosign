@@ -112,6 +112,30 @@ public final class WebViewProfileUtil {
         return CookieManager.getInstance();
     }
 
+    /**
+     * v1.0.7：读取该 Profile 下指定 URL 的 Cookie 头值（脱敏用途之外的内部判断用）。
+     * 用于 WAF 放行判断（是否已拿到 acw_sc__v2/acw_tc）与 linuxdo 会话探测。
+     * 返回值仅供内部包含性检查，禁止写入日志或外传。
+     */
+    @Nullable
+    public static String cookieHeader(@Nullable Profile profile, @NonNull String url) {
+        try {
+            return cookieManagerFor(profile).getCookie(url);
+        } catch (Throwable t) { return null; }
+    }
+    /**
+     * v1.0.7：该 Profile 下 Linux DO（connect.linux.do）是否已有会话。
+     * Discourse 的登录 Cookie 是 _linuxdo_session / _forum_session / logged_in=yes，
+     * 不同部署命名不同，故做宽松包含性探测；探不到只是走人工登录，不影响正确性。
+     */
+    public static boolean linuxdoLoggedIn(@Nullable Profile profile) {
+        try {
+            String c = cookieManagerFor(profile).getCookie("https://connect.linux.do");
+            if (c == null || c.isEmpty()) return false;
+            String l = c.toLowerCase(java.util.Locale.US);
+            return l.contains("session") || l.contains("logged_in=yes");
+        } catch (Throwable t) { return false; }
+    }
     /** 该 Profile（或 Default）下是否已有 GitHub 会话 Cookie。 */
     public static boolean githubLoggedIn(@Nullable Profile profile) {
         try {
@@ -123,11 +147,55 @@ public final class WebViewProfileUtil {
 
     /** 清空该 Profile（或 Default）的所有 Cookie 并落盘。仅用于首次授权。 */
     public static void clearCookies(@Nullable Profile profile) {
+        clearCookies(profile, null);
+    }
+
+    /** v1.0.8：异步清空全部 Cookie，完成后回调；用于强制重新授权。 */
+    public static void clearCookies(@Nullable Profile profile, @Nullable Runnable after) {
         try {
             CookieManager cm = cookieManagerFor(profile);
             cm.removeAllCookies(ok -> {
                 try { cm.flush(); } catch (Throwable ignored) {}
+                if (after != null) {
+                    try { after.run(); } catch (Throwable ignored) {}
+                }
             });
+        } catch (Throwable ignored) {
+            if (after != null) {
+                try { after.run(); } catch (Throwable ignored2) {}
+            }
+        }
+    }
+    /** v1.0.7：只清指定域的 Cookie（保留其他域如 linux.do 的登录态）。
+     * 用于站点 session 失效（半登录态导致 /login 被 302 到 /console）时重置。 */
+    public static void clearCookiesForUrl(@Nullable Profile profile, @NonNull String url) {
+        try {
+            CookieManager cm = cookieManagerFor(profile);
+            String ck = cm.getCookie(url);
+            if (ck == null || ck.isEmpty()) return;
+            /* v1.1.10：会话 Cookie 常带 Domain=.host（域 Cookie），而 host-only 的删除
+             * 写入不会覆盖域 Cookie（内核视为两条不同 Cookie）。故对每个名字同时下发
+             * host-only 与 Domain=.host / Domain=host 三种作用域的过期指令，确保真正清掉。 */
+            String host = "";
+            try {
+                String h = java.net.URI.create(url).getHost();
+                host = h == null ? "" : h;
+            } catch (Exception ignored) {}
+            boolean any = false;
+            for (String pair : ck.split(";")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                String name = pair.substring(0, eq).trim();
+                if (name.isEmpty()) continue;
+                String expire = "=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/";
+                cm.setCookie(url, name + expire);                                  // host-only
+                if (!host.isEmpty()) {
+                    cm.setCookie(url, name + expire + "; Domain=" + host);          // domain (host)
+                    cm.setCookie(url, name + expire + "; Domain=." + host);         // domain (.host)
+                }
+                any = true;
+            }
+            if (any) cm.flush();
         } catch (Throwable ignored) {}
     }
 
