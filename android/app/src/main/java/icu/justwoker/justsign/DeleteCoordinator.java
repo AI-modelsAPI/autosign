@@ -22,13 +22,20 @@ public final class DeleteCoordinator {
         public final boolean localDeleted;
         public final int remoteOk;
         public final int remoteUnconfirmed;
+        /** v1.1.15：本地已删、远端注销仍在后台进行（UI 已可立即刷新）。 */
+        public final boolean pendingRemote;
         Result(boolean localDeleted, int remoteOk, int remoteUnconfirmed) {
+            this(localDeleted, remoteOk, remoteUnconfirmed, false);
+        }
+        Result(boolean localDeleted, int remoteOk, int remoteUnconfirmed, boolean pendingRemote) {
             this.localDeleted = localDeleted;
             this.remoteOk = remoteOk;
             this.remoteUnconfirmed = remoteUnconfirmed;
+            this.pendingRemote = pendingRemote;
         }
         public String message() {
             if (!localDeleted) return "删除失败：本地数据未能清除";
+            if (pendingRemote) return "已从本机删除，正在后台注销远端会话";
             if (remoteUnconfirmed == 0) return "已完全删除，本地会话与远端登录均已清理";
             return "已从本机删除；" + remoteUnconfirmed + " 个远端会话未确认注销";
         }
@@ -68,14 +75,27 @@ public final class DeleteCoordinator {
         String siteKey = site.optString("key", "");
         DELETING_ACCOUNTS.put(accountKey, true);
         new Thread(() -> {
-            int remote = logout(site, account) ? 1 : 0;
+            /* v1.1.15：先做「本地删除 + 立即回调刷新 UI」，再后台尽力注销远端。
+             * 旧实现把阻塞的远端 logout（每账号 connect+read 可达 16s）放在最前，
+             * 本地删除与 render() 被拖在其后 —— 顶栏「几站几号」统计要等网络回来才更新，
+             * 表现为「删除后统计没变」。凭据在本地删除前已拷贝进 site/account 对象，
+             * 后台线程仍可用它完成远端注销，不影响登出效果。 */
             boolean deleted = store.removeAccountSecure(accountKey);
             WebViewProfileUtil.deleteProfileFor(siteKey, accountKey);
             store.purgeLogs(siteKey, accountKey);
             store.opLog(siteKey, "", "删除账号", deleted ? "ok" : "err",
-                    deleted ? "账号及本地会话已删除" : "本地数据删除失败",
-                    remote == 1 ? "远端已注销" : "远端会话未确认注销", "user");
-            deliver(callback, new Result(deleted, remote, remote == 1 ? 0 : 1));
+                    deleted ? "账号及本地会话已删除，正在后台注销远端" : "本地数据删除失败",
+                    "", "user");
+            deliver(callback, new Result(deleted, 0, 0, true));
+            /* 后台尽力注销远端会话，结果只落日志，不再回调 UI（UI 已刷新）。 */
+            if (deleted) new Thread(() -> {
+                int remote = logout(site, account) ? 1 : 0;
+                store.opLog(siteKey, "", "删除账号", "info",
+                        remote == 1 ? "远端会话已注销" : "远端会话未确认注销",
+                        "本地已删除；远端为尽力注销", "auto");
+                DELETING_ACCOUNTS.remove(accountKey);
+            }, "delete-account-remote").start();
+            else DELETING_ACCOUNTS.remove(accountKey);
         }, "delete-account").start();
     }
 
@@ -93,16 +113,27 @@ public final class DeleteCoordinator {
         DELETING_SITES.put(siteKey, true);
         for (JSONObject a : accounts) DELETING_ACCOUNTS.put(a.optString("key", ""), true);
         new Thread(() -> {
-            int remote = 0;
-            for (JSONObject a : accounts) if (logout(site, a)) remote++;
+            /* v1.1.15：同 deleteAccount —— 先本地删 + 立即回调刷新，再后台尽力注销远端。
+             * 旧实现把 N 个账号的阻塞 logout 串行放在最前（N×16s 最坏），顶栏「几站几号」
+             * 统计与看板要等所有网络回来才刷新。凭据已在 accounts 列表对象里，后台仍可注销。 */
             boolean deleted = store.removeSiteSecure(siteKey);
             for (JSONObject a : accounts)
                 WebViewProfileUtil.deleteProfileFor(siteKey, a.optString("key", ""));
             store.purgeLogs(siteKey, null);
             store.opLog("", "", "删除站点", deleted ? "ok" : "err",
-                    deleted ? "站点及本地会话已删除" : "本地数据删除失败",
-                    (accounts.size() - remote) == 0 ? "远端已注销" : "部分远端会话未确认注销", "user");
-            deliver(callback, new Result(deleted, remote, accounts.size() - remote));
+                    deleted ? "站点及本地会话已删除，正在后台注销远端" : "本地数据删除失败",
+                    "", "user");
+            deliver(callback, new Result(deleted, 0, 0, true));
+            if (deleted) new Thread(() -> {
+                int remote = 0;
+                for (JSONObject a : accounts) if (logout(site, a)) remote++;
+                store.opLog("", "", "删除站点", "info",
+                        (accounts.size() - remote) == 0 ? "远端会话已全部注销"
+                                : (accounts.size() - remote) + " 个远端会话未确认注销",
+                        "本地已删除；远端为尽力注销", "auto");
+                for (JSONObject a : accounts) DELETING_ACCOUNTS.remove(a.optString("key", ""));
+            }, "delete-site-remote").start();
+            else for (JSONObject a : accounts) DELETING_ACCOUNTS.remove(a.optString("key", ""));
         }, "delete-site").start();
     }
 

@@ -40,10 +40,18 @@ public class Store {
                         JSONObject acc = accs.optJSONObject(j);
                         if (acc == null) continue;
                         JSONObject lc = acc.optJSONObject("lastCheckin");
-                        if (lc != null && !today.equals(lc.optString("date", ""))) { acc.remove("lastCheckin"); changed = true; }
+                        boolean any = SiteProtocol.isAnyRouter(site);
+                        boolean validReceipt = any ? SiteProtocol.hasSignInReceipt(acc, System.currentTimeMillis())
+                                : lc != null && today.equals(lc.optString("date", ""));
+                        if (lc != null && !validReceipt) { acc.remove("lastCheckin"); changed = true; }
                         JSONObject ls = acc.optJSONObject("lastStatus");
+                        if (any && ls != null && !validReceipt
+                                && (ls.has("todayChecked") || ls.has("todayRewardUSD") || ls.has("todayRewardKnown"))) {
+                            ls.remove("todayChecked"); ls.remove("todayRewardUSD"); ls.remove("todayRewardKnown"); changed = true;
+                        }
                         if (ls != null && !today.equals(ls.optString("statusDate", ""))) {
-                            ls.remove("todayChecked"); ls.remove("todayRewardUSD"); ls.remove("todayRewardKnown"); ls.remove("todayUsed");
+                            if (!any) { ls.remove("todayChecked"); ls.remove("todayRewardUSD"); ls.remove("todayRewardKnown"); }
+                            ls.remove("todayUsed");
                             ls.put("statusDate", today); changed = true;
                         }
                     }
@@ -172,6 +180,57 @@ public class Store {
                         s.put("affUrl", aff);
                         dirty = true;
                     }
+                }
+                if (dirty) sp.edit().putString("config", cfg.toString()).commit();
+            }
+            /* v7（v1.0.7）：内置清单新增站点自动补齐到已安装用户。
+             * 背景：v5 之后 Catalog 只作为「批量导入」候选，已有安装不会自动出现新站；
+             * AnyRouter 这类新增内置站需要无需手动添加即可见。同时把 oauthProvider
+             * 同步进已存在的内置站（自定义站不动）。本迁移幂等，每次启动都跑。 */
+            {
+                JSONArray sites = cfg.optJSONArray("sites");
+                if (sites == null) { sites = new JSONArray(); cfg.put("sites", sites); }
+                boolean dirty = false;
+                java.util.LinkedHashMap<String, JSONObject> byProvider = new java.util.LinkedHashMap<>();
+                for (JSONObject c : Catalog.all()) {
+                    String k = c.optString("key", "");
+                    if (!k.isEmpty()) byProvider.put(k, c);
+                }
+                /* 1) 已存在的内置站：补齐 oauthProvider + oauthProviders（多登录方式声明，
+                 *    v1.1.16：AgentRouter 等站声明 github,linuxdo 后，已安装用户也能在添加账号时列出双身份） */
+                for (int i = 0; i < sites.length(); i++) {
+                    JSONObject s = sites.optJSONObject(i);
+                    if (s == null) continue;
+                    JSONObject c = byProvider.get(s.optString("key", ""));
+                    if (c == null) continue;   // 自定义站不动
+                    String want = c.optString("oauthProvider", "github");
+                    if (!want.equals(s.optString("oauthProvider", ""))) {
+                        s.put("oauthProvider", want);
+                        dirty = true;
+                    }
+                    String wantMulti = c.optString("oauthProviders", "");
+                    if (!wantMulti.equals(s.optString("oauthProviders", ""))) {
+                        s.put("oauthProviders", wantMulti);
+                        dirty = true;
+                    }
+                }
+                /* 2) 缺失的内置站：按清单顺序追加（无账号，等待用户授权） */
+                for (JSONObject c : Catalog.all()) {
+                    String k = c.optString("key", "");
+                    if (k.isEmpty() || findSiteObj(cfg, k) != null) continue;
+                    sites.put(new JSONObject()
+                            .put("key", k)
+                            .put("name", c.optString("name", ""))
+                            .put("baseUrl", c.optString("homeUrl", ""))
+                            .put("homeUrl", c.optString("homeUrl", ""))
+                            .put("affUrl", c.optString("affUrl", ""))
+                            .put("checkinType", c.optString("checkinType", "login"))
+                            .put("oauthProvider", c.optString("oauthProvider", "github"))
+                            .put("oauthProviders", c.optString("oauthProviders", ""))
+                            .put("reward", c.optString("reward", ""))
+                            .put("note", c.optString("note", ""))
+                            .put("accounts", new JSONArray()));
+                    dirty = true;
                 }
                 if (dirty) sp.edit().putString("config", cfg.toString()).commit();
             }
@@ -542,6 +601,12 @@ public class Store {
     /* ---------- 定时签到配置（v0.2.0，可设置周期） ----------
      * schedule = { enabled, mode: daily|weekday|interval, hour, minute, intervalHours } */
 
+    /* v1.1.23：定时任务「今日是否已运行」标记（yyyy-MM-dd，北京时区）。
+     * 补跑判定改用它，而不是「所有账号今日都已签」——否则有一个死会话/未授权账号
+     * 永远签不上，ranToday 恒 false，打开 App 就无限重复触发定时签到。 */
+    public String cronRunDate() { return sp.getString("cronRunDate", ""); }
+    public void markCronRun(String today) { sp.edit().putString("cronRunDate", today).commit(); }
+
     public JSONObject schedule() {
         JSONObject s = config().optJSONObject("schedule");
         if (s == null) s = new JSONObject();
@@ -806,17 +871,19 @@ public class Store {
 
     /* ---------- 统计（顶栏摘要用） ---------- */
 
-    /** 返回 {sites, accounts, checked, pending, totalUSD} */
+    /** 返回 {sites, accounts, checked, pending, boardUSD, totalUSD} */
     public JSONObject summary() {
         int nSite = 0, nAcc = 0, nChecked = 0, nPending = 0;
-        double total = 0;
+        double boardTotal = 0;
+        double fullTotal = 0;
         try {
             JSONArray sites = config().optJSONArray("sites");
             if (sites != null) {
-                nSite = sites.length();
                 for (int i = 0; i < sites.length(); i++) {
                     JSONObject s = sites.optJSONObject(i);
                     if (s == null) continue;
+                    boolean hidden = s.optBoolean("hideOnBoard", false);
+                    if (!hidden) nSite++;
                     JSONArray accs = s.optJSONArray("accounts");
                     if (accs == null) continue;
                     for (int j = 0; j < accs.length(); j++) {
@@ -831,7 +898,11 @@ public class Store {
                         if (state == Engine.ST_CHECKED) nChecked++;
                         else if (state == Engine.ST_PENDING) nPending++;
                         JSONObject st = a.optJSONObject("lastStatus");
-                        if (st != null && st.optBoolean("ok")) total += st.optDouble("availableUSD", 0);
+                        if (st != null && st.optBoolean("ok")) {
+                            double usd = st.optDouble("availableUSD", 0);
+                            fullTotal += usd;
+                            if (!hidden) boardTotal += usd;
+                        }
                     }
                 }
             }
@@ -839,7 +910,8 @@ public class Store {
         try {
             return new JSONObject().put("sites", nSite).put("accounts", nAcc)
                     .put("checked", nChecked).put("pending", nPending)
-                    .put("totalUSD", Math.round(total * 100.0) / 100.0);
+                    .put("boardUSD", Math.round(boardTotal * 100.0) / 100.0)
+                    .put("totalUSD", Math.round(fullTotal * 100.0) / 100.0);
         } catch (Exception e) { return new JSONObject(); }
     }
 }

@@ -58,6 +58,10 @@ public final class OffscreenCheckin {
         final int to = timeoutSec > 0 ? timeoutSec : 100;
         final String trace = Long.toString(System.nanoTime(), 36);
         final Store startStore = new Store(app);
+        if (SiteProtocol.isAnyRouter(startStore.findSite(siteKey))) {
+            AnyRouterCheckin.run(app, siteKey, accountKey, cb);
+            return;
+        }
         startStore.opLog(siteKey, accountKey, "后台签到V2", "info", "签到链路开始",
                 "schema=" + LOG_SCHEMA + "；trace=" + trace + "；preRefresh=true；oauth=false", "auto");
         /* WebView签到先通过Engine续期现有站点会话，绝不运行OAuth；完成后再读取快照。 */

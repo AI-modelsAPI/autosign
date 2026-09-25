@@ -476,7 +476,14 @@ public class SettingsView extends FrameLayout {
             row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
             row.setPadding(Ui.dp(act, 12), Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 10));
             LinearLayout info = Ui.col(act);
-            info.addView(Ui.tv(act, s.optString("name", s.optString("key")), 14, Ui.TXT, true));
+            LinearLayout titleRow = Ui.row(act);
+            titleRow.addView(Ui.tv(act, s.optString("name", s.optString("key")), 14, Ui.TXT, true));
+            boolean hidden = s.optBoolean("hideOnBoard", false);
+            if (hidden) {
+                titleRow.addView(Ui.gapW(act, 6));
+                titleRow.addView(Ui.pill(act, "看板已隐藏", 10, Ui.SUB, Ui.LINE_SOFT));
+            }
+            info.addView(titleRow);
             JSONArray accs = s.optJSONArray("accounts");
             int an = accs == null ? 0 : accs.length();
             info.addView(Ui.tv(act, s.optString("baseUrl", "") + "  ·  "
@@ -542,6 +549,17 @@ public class SettingsView extends FrameLayout {
             order.addView(up);
             order.addView(down);
             row.addView(order);
+            View vis = Ui.iconBtn(act, hidden ? "eye_off" : "eye", 16, hidden ? Ui.ORANGE : Ui.SUB, 7);
+            vis.setOnClickListener(v -> {
+                try {
+                    s.put("hideOnBoard", !hidden);
+                    new Store(act).upsertSite(s);
+                    act.toast(s.optString("name") + (hidden ? " 已在看板显示" : " 已在看板隐藏"));
+                    buildSites();
+                    act.render();
+                } catch (Exception ignored) {}
+            });
+            row.addView(vis);
             View edit = Ui.iconBtn(act, "edit", 16, Ui.SUB, 7);
             edit.setOnClickListener(v -> editSiteDialog(s));
             View del = Ui.iconBtn(act, "trash", 16, Ui.RED, 7);
@@ -658,6 +676,20 @@ public class SettingsView extends FrameLayout {
         segBtns[initIdx].setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         segBtns[initIdx].setBackground(Ui.round(Ui.CARD, Ui.dp(act, 4)));
 
+        box.addView(Ui.gapH(act, 12));
+        boolean initialHide = !isNew && site.optBoolean("hideOnBoard", false);
+        final boolean[] hideOnBoard = { initialHide };
+        LinearLayout hideRow = Ui.row(act);
+        hideRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView hideLabel = Ui.tv(act, "在看板中显示", 13, Ui.TXT, true);
+        hideRow.addView(hideLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+        android.widget.Switch hideSw = new android.widget.Switch(act);
+        hideSw.setChecked(!initialHide);
+        hideSw.setOnCheckedChangeListener((btn, isChecked) -> hideOnBoard[0] = !isChecked);
+        hideRow.addView(hideSw);
+        box.addView(hideRow);
+        box.addView(Ui.tv(act, "关闭后该站点不在主页看板展示，一键签到/刷新与定时任务不受影响", 11, Ui.SUB2));
+
         new AlertDialog.Builder(act).setTitle(isNew ? "添加站点" : "编辑站点")
                 .setView(Ui.scroll(act, box))
                 .setPositiveButton("保存", (d, w) -> {
@@ -672,11 +704,13 @@ public class SettingsView extends FrameLayout {
                         s.put("baseUrl", u);
                         if (!s.has("homeUrl")) s.put("homeUrl", u);
                         s.put("checkinType", type[0]);
+                        s.put("hideOnBoard", hideOnBoard[0]);
                         store.upsertSite(s);
                         store.opLog(s.optString("key"), "", isNew ? "添加站点" : "编辑站点", "ok",
                                 s.optString("name"), u, "user");
                         act.toast(isNew ? "站点已添加" : "已保存");
                         buildSites();
+                        act.render();
                     } catch (Exception ignored) {}
                 })
                 .setNegativeButton("取消", null).show();
@@ -723,10 +757,19 @@ public class SettingsView extends FrameLayout {
             String gh = c.optString("githubUser", "");
             String sa = c.optString("siteAccount", "");
             info.addView(Ui.tv(act, c.optString("alias", gh.isEmpty() ? sa : gh), 14, Ui.TXT, true));
-            StringBuilder sub = new StringBuilder();
-            if (!gh.isEmpty()) sub.append("GitHub @").append(gh);
-            if (!sa.isEmpty()) { if (sub.length() > 0) sub.append("  ·  "); sub.append(sa); }
-            info.addView(Ui.tv(act, sub.length() == 0 ? "未填账号" : sub.toString(), 11, Ui.SUB));
+            LinearLayout provRow = Ui.row(act);
+            if (!gh.isEmpty()) {
+                provRow.addView(Ui.pill(act, "GitHub: @" + gh, 10, Ui.BLUE, Ui.BLUE_BG));
+                provRow.addView(Ui.gapW(act, 5));
+            }
+            if (!sa.isEmpty()) {
+                provRow.addView(Ui.pill(act, "Linux DO: " + sa, 10, 0xFFB45309, 0xFFFEF3C7));
+                provRow.addView(Ui.gapW(act, 5));
+            }
+            if (gh.isEmpty() && sa.isEmpty()) {
+                provRow.addView(Ui.tv(act, "未填授权账号", 11, Ui.SUB));
+            }
+            info.addView(provRow);
             LinearLayout flags = Ui.row(act);
             boolean hasPwd = !c.optString("password", "").isEmpty();
             flags.addView(Ui.pill(act, hasPwd ? "已存密码" : "无密码", 10,
@@ -774,9 +817,9 @@ public class SettingsView extends FrameLayout {
         EditText[] alias = new EditText[1], ghUser = new EditText[1], siteAcc = new EditText[1];
         box.addView(Ui.field(act, "别名（用于区分，如 主号 / 小号）", "主号", alias));
         box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.field(act, "GitHub 用户名（OAuth 授权用）", "your-github-username", ghUser));
+        box.addView(Ui.field(act, "GitHub 用户名（用于 GitHub 授权登录）", "如 your-github-name", ghUser));
         box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.field(act, "站点登录账号 / 邮箱", "user@example.com", siteAcc));
+        box.addView(Ui.field(act, "Linux DO 用户名（用于 AnyRouter 等 Linux DO 授权）", "如 your-linuxdo-name", siteAcc));
         box.addView(Ui.gapH(act, 10));
 
         /* 密码：明密文切换 */
