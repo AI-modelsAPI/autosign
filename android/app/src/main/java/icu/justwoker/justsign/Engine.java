@@ -1608,22 +1608,37 @@ public class Engine {
             return null;
         }
         JSONObject lb = lg.optJSONObject("lastBonus");
+        if (lb != null && lb.has("time")) {
+            long t = parseTimeMs(lb.optString("time"));
+            if (t > 0 && isToday(t)) {
+                double usd = lb.optDouble("usd", -1);
+                lb.put("rewardUSD", usd >= 0 ? usd : 0);
+                lb.put("rewardKnown", usd >= 0);
+                return lb;
+            }
+        }
+        /* v0.4.6：严格签到文案未命中今日时，回退到「今日系统到账」lastSysCredit。
+         * logs 已保证它是 type=4、今日、有额度、且非注册/邀请/兑换的最新一条——
+         * 覆盖 AgentRouter 等到账文案不含「签到」二字的 login 站。 */
+        JSONObject sc = lg.optJSONObject("lastSysCredit");
+        if (sc != null && sc.has("time")) {
+            double usd = sc.optDouble("usd", -1);
+            sc.put("rewardUSD", usd >= 0 ? usd : 0);
+            sc.put("rewardKnown", usd >= 0);
+            return sc;
+        }
         if (lb == null || !lb.has("time")) {
             store.opLog(sKey, key, "奖励检测", "warn", "签到奖励未显示：近30条系统日志无签到记录",
                     "接口返回正常但无「每日签到」类文案（站点可能当日未发奖励）", "user");
             return null;
         }
         long t = parseTimeMs(lb.optString("time"));
-        if (t <= 0 || !isToday(t)) {
+        {
             String ts = new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US).format(new java.util.Date(t > 0 ? t : 0));
             store.opLog(sKey, key, "奖励检测", "warn", "签到奖励未显示：最近签到记录非今日",
                     "最近一条签到时间：" + ts, "user");
             return null;
         }
-        double usd = lb.optDouble("usd", -1);
-        lb.put("rewardUSD", usd >= 0 ? usd : 0);
-        lb.put("rewardKnown", usd >= 0);
-        return lb;
     }
 
     private static long parseTimeMs(String s) {
@@ -1697,6 +1712,7 @@ public class Engine {
         if (code != 200) out.put("message", httpHint(code));
         JSONArray rows = new JSONArray();
         JSONObject lastBonus = null;
+        JSONObject lastSysCredit = null;
         if (code == 200) {
             JSONObject d = dd(r);
             JSONArray list = d.optJSONArray("items");
@@ -1726,10 +1742,21 @@ public class Engine {
                  * 「最后一条匹配」=最旧记录（实测 08-28 覆盖了 09-07），
                  * 导致今日已签却判定「非今日」。改为命中第一条（最新）即停。 */
                 if (isCheckinText(text) && lastBonus == null) lastBonus = row;
+                /* v0.4.6：AgentRouter 等 login 站的到账文案可能不含「签到」二字，
+                 * 严格 isCheckinText 会漏判。额外取「最新一条今日系统到账」作兜底：
+                 * type=4、今日(北京时区)、quota>0 或文案含正 USD、且文案不含 注册/邀请/兑换
+                 * （排除一次性赠送，不误伤）。接口按时间倒序，命中第一条（最新）即停。 */
+                if (lastSysCredit == null) {
+                    long rt = parseTimeMs(row.optString("time"));
+                    boolean hasCredit = q > 0 || usdFromText > 0;
+                    boolean oneOff = text.contains("注册") || text.contains("邀请") || text.contains("兑换");
+                    if (rt > 0 && isToday(rt) && hasCredit && !oneOff) lastSysCredit = row;
+                }
             }
         }
         out.put("rows", rows);
         out.put("lastBonus", lastBonus == null ? JSONObject.NULL : lastBonus);
+        out.put("lastSysCredit", lastSysCredit == null ? JSONObject.NULL : lastSysCredit);
         return out;
     }
     /** 是否为「每日签到」类文案（排除注册赠送/邀请赠送等同类型条目） */

@@ -696,94 +696,17 @@ public class SettingsView extends FrameLayout {
                 "系统 token 用户ID（可选，部分站点 Bearer 调用需 New-Api-User）",
                 "数字 ID", sysUidOut));
 
-        /* 功能3：站点级 API Key（sk-…，用于模型测试，可手填或从 KeyPanel 复制贴入） */
-        box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.tv(act, "API Key（sk-…，用于模型测试）", 11, Ui.SUB, true));
-        LinearLayout keyRow = Ui.row(act);
-        LinearLayout.LayoutParams keyLp = new LinearLayout.LayoutParams(-1, -2);
-        keyLp.topMargin = Ui.dp(act, 5);
-        EditText keyEt = Ui.input(act, "sk-…");
-        EditText[] keyOut = { keyEt };
-        keyRow.addView(keyEt, new LinearLayout.LayoutParams(0, -2, 1f));
-        View keyCopy = Ui.iconBtn(act, "copy", 16, Ui.SUB, 7);
-        keyCopy.setOnClickListener(v -> {
-            String k0 = keyOut[0].getText().toString().trim();
-            if (k0.isEmpty()) { act.toast("API Key 为空"); return; }
-            try {
-                android.content.ClipboardManager cm = (android.content.ClipboardManager)
-                        act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
-                cm.setText(k0);
-                act.toast("已复制 API Key");
-            } catch (Exception ignored) {}
-        });
-        keyRow.addView(keyCopy);
-        box.addView(keyRow, keyLp);
-
-        /* 功能5：获取模型 → 列出 → 点某模型直接 testModel → toast 结果（合并流程，最少交互） */
-        box.addView(Ui.gapH(act, 8));
-        TextView fetchBtn = Ui.iconBtnText(act, "download", "获取模型并测试", 12,
-                Ui.BLUE, Ui.BLUE_BG, 12, 8);
-        fetchBtn.setOnClickListener(v -> {
-            final String base = uOut[0].getText().toString().trim().replaceAll("/+$", "");
-            final String sysTok = tokOut[0].getText().toString().trim();
-            final String apiK = keyOut[0].getText().toString().trim();
-            final String sysUid = sysUidOut[0].getText().toString().trim();
-            if (base.isEmpty() || !base.startsWith("http")) { act.toast("请先填写有效的 API 地址"); return; }
-            final String bearer = !sysTok.isEmpty() ? sysTok : apiK;   // systemToken 优先，否则 apiKey
-            act.toast("正在获取模型…");
-            new Thread(() -> {
-                String err = "";
-                org.json.JSONArray models = null;
-                try { models = new Engine(act).fetchModels(base, bearer, sysUid); }
-                catch (Exception e) { err = String.valueOf(e.getMessage()); }
-                final String fErr = err;
-                final org.json.JSONArray fModels = models;
-                act.runOnUiThread(() -> {
-                    if (!fErr.isEmpty()) { act.toast("获取模型失败：" + fErr); return; }
-                    if (fModels == null || fModels.length() == 0) { act.toast("该站点未返回任何模型"); return; }
-                    final String[] names = new String[fModels.length()];
-                    for (int i = 0; i < fModels.length(); i++) names[i] = fModels.optString(i, "");
-                    new AlertDialog.Builder(act)
-                            .setTitle("选择模型测试（共 " + names.length + " 个）")
-                            .setItems(names, (dd, which) -> {
-                                final String model = names[which];
-                                if (apiK.isEmpty() && sysTok.isEmpty()) {
-                                    act.toast("模型测试需 API Key 或系统 token"); return;
-                                }
-                                /* 模型测试 Bearer：apiKey 优先（OpenAI 端点的调用密钥），否则退回 systemToken */
-                                final String testKey = !apiK.isEmpty() ? apiK : sysTok;
-                                act.toast("测试中：" + model + " …");
-                                new Thread(() -> {
-                                    String terr = "";
-                                    JSONObject res = null;
-                                    try { res = new Engine(act).testModel(base, testKey, model); }
-                                    catch (Exception e) { terr = String.valueOf(e.getMessage()); }
-                                    final String fTerr = terr;
-                                    final JSONObject fRes = res;
-                                    act.runOnUiThread(() -> {
-                                        if (!fTerr.isEmpty()) { act.toast("❌ 测试失败：" + fTerr); return; }
-                                        if (fRes != null && fRes.optBoolean("ok", false)) {
-                                            act.toast("✅ 可用：" + model);
-                                        } else {
-                                            int h = fRes == null ? 0 : fRes.optInt("http", 0);
-                                            String msg = fRes == null ? "" : fRes.optString("message", "");
-                                            act.toast("❌ HTTP " + h + "：" + msg);
-                                        }
-                                    });
-                                }, "model-test").start();
-                            })
-                            .setNegativeButton("关闭", null).show();
-                });
-            }, "model-fetch").start();
-        });
-        box.addView(fetchBtn);
+        /* 任务1（v0.4.6）：API 密钥管理区——完整 key CRUD 从账号行钥匙面板搬到此处，
+         * 支持列出多把 key、每把可复制/删除/用它拉模型测试、以及新建。
+         * 放在 systemToken/systemUserId 之后、看板 Switch 之前。 */
+        box.addView(Ui.gapH(act, 14));
+        buildKeyMgrSection(box, site, isNew);
 
         if (!isNew) {
             nOut[0].setText(site.optString("name"));
             uOut[0].setText(site.optString("baseUrl"));
             tokOut[0].setText(site.optString("systemToken", ""));
             sysUidOut[0].setText(site.optString("systemUserId", ""));
-            keyOut[0].setText(site.optString("apiKey", ""));
         }
         /* 初始化选中态 */
         int initIdx = "login".equals(type[0]) ? 1 : ("web".equals(type[0]) ? 2 : 0);
@@ -822,7 +745,6 @@ public class SettingsView extends FrameLayout {
                         s.put("hideOnBoard", hideOnBoard[0]);
                         s.put("systemToken", tokOut[0].getText().toString().trim());
                         s.put("systemUserId", sysUidOut[0].getText().toString().trim());
-                        s.put("apiKey", keyOut[0].getText().toString().trim());
                         store.upsertSite(s);
                         store.opLog(s.optString("key"), "", isNew ? "添加站点" : "编辑站点", "ok",
                                 s.optString("name"), u, "user");
@@ -830,6 +752,279 @@ public class SettingsView extends FrameLayout {
                         buildSites();
                         act.render();
                     } catch (Exception ignored) {}
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    /* ================= 任务1：API 密钥管理区（搬自 KeyPanel 的完整 CRUD + 多 key 选一测试） ================= */
+
+    /** 该站首个已授权账号（token 或 siteCookie 非空）；无则返回 null。 */
+    private JSONObject firstAuthedAccount(JSONObject site) {
+        if (site == null) return null;
+        JSONArray accs = site.optJSONArray("accounts");
+        if (accs == null) return null;
+        for (int i = 0; i < accs.length(); i++) {
+            JSONObject a = accs.optJSONObject(i);
+            if (a == null) continue;
+            if (!a.optString("token", "").isEmpty() || !a.optString("siteCookie", "").isEmpty()) return a;
+        }
+        return null;
+    }
+
+    /** rawKey 补 sk- 前缀（照 KeyPanel：New API 站点返回的 key 无 sk-）。 */
+    private static String normKey(String rawKey) {
+        if (rawKey == null || rawKey.isEmpty()) return "";
+        return rawKey.startsWith("sk-") ? rawKey : "sk-" + rawKey;
+    }
+
+    private void copyText(String text, String okMsg) {
+        try {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            cm.setText(text);
+            act.toast(okMsg);
+        } catch (Exception ignored) {}
+    }
+
+    /** 构建「API 密钥管理」区并挂到站点编辑弹窗。 */
+    private void buildKeyMgrSection(LinearLayout box, JSONObject site, boolean isNew) {
+        box.addView(Ui.tv(act, "API 密钥管理", 12, Ui.SUB, true));
+        final String baseUrl = site == null ? "" : site.optString("baseUrl", "").replaceAll("/+$", "");
+        JSONObject targetAcc = isNew ? null : firstAuthedAccount(site);
+
+        /* 新站 / 无已授权账号：只给灰字提示，不渲染列表/按钮（CRUD 需账号会话） */
+        if (targetAcc == null) {
+            TextView tip = Ui.tv(act, "保存站点并在卡片完成账号授权后，可在此管理 API Key", 11, Ui.SUB2);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
+            tlp.topMargin = Ui.dp(act, 6);
+            box.addView(tip, tlp);
+            return;
+        }
+
+        final String acctKey = targetAcc.optString("key", "");
+        final String siteKey = site.optString("key", "");
+        final String alias = targetAcc.optString("alias", acctKey);
+        final String siteUserId = targetAcc.optString("siteUserId", "");
+
+        TextView who = Ui.tv(act, "当前管理账号：" + alias + "（API Key 属账户级，取该站首个已授权账号）", 11, Ui.SUB2);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
+        wlp.topMargin = Ui.dp(act, 4);
+        box.addView(who, wlp);
+
+        /* 操作行：刷新/获取 Key + 新建 Key */
+        box.addView(Ui.gapH(act, 6));
+        LinearLayout opRow = Ui.row(act);
+        opRow.setGravity(Gravity.CENTER_VERTICAL);
+        final LinearLayout listBody = Ui.col(act);
+        final TextView hint = Ui.tv(act, "点「获取 Key」加载该账号的 API Key 列表", 11, Ui.SUB2);
+
+        TextView refreshBtn = Ui.iconBtnText(act, "refresh", "获取/刷新 Key", 12, Ui.BLUE, Ui.BLUE_BG, 12, 8);
+        refreshBtn.setOnClickListener(v -> reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        opRow.addView(refreshBtn);
+        TextView addBtn = Ui.iconBtnText(act, "plus", "+ 新建 Key", 12, Ui.GREEN_D, Ui.GREEN_BG, 12, 8);
+        LinearLayout.LayoutParams albp = new LinearLayout.LayoutParams(-2, -2);
+        albp.leftMargin = Ui.dp(act, 8);
+        addBtn.setOnClickListener(v -> promptCreateKey(acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        opRow.addView(addBtn, albp);
+        box.addView(opRow);
+
+        box.addView(Ui.gapH(act, 6));
+        box.addView(hint);
+        box.addView(listBody);
+    }
+
+    private void reloadKeyList(String acctKey, String siteKey, String baseUrl, String siteUserId,
+                               LinearLayout listBody, TextView hint) {
+        listBody.removeAllViews();
+        hint.setVisibility(View.VISIBLE);
+        hint.setText("正在获取 Key 列表…");
+        new Thread(() -> {
+            String err = "";
+            JSONArray items = new JSONArray();
+            try {
+                items = new Engine(act).tokenList(acctKey).optJSONArray("items");
+                if (items == null) items = new JSONArray();
+            } catch (Exception e) { err = String.valueOf(e.getMessage()); }
+            final JSONArray fItems = items;
+            final String fErr = err;
+            act.runOnUiThread(() -> {
+                if (!fErr.isEmpty()) { hint.setText("获取失败：" + fErr + "（可展开操作日志看诊断）"); return; }
+                if (fItems.length() == 0) { hint.setText("暂无 API Key"); return; }
+                hint.setVisibility(View.GONE);
+                listBody.removeAllViews();
+                long unit = 500000;
+                try { unit = new Store(act).siteMetaLong(siteKey, "quotaPerUnit", 500000); } catch (Exception ignored) {}
+                if (unit <= 0) unit = 500000;
+                for (int i = 0; i < fItems.length(); i++) {
+                    JSONObject t = fItems.optJSONObject(i);
+                    if (t == null) continue;
+                    listBody.addView(keyRow(t, unit, acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+                }
+            });
+        }, "sv-token-list").start();
+    }
+
+    /** 单把 Key 行：名称+状态 | 已用 | 复制 | 删除 | 测试模型；脱敏 key 第二行（照抄 KeyPanel.keyRow）。 */
+    private LinearLayout keyRow(JSONObject t, long unit, String acctKey, String siteKey,
+                                String baseUrl, String siteUserId, LinearLayout listBody, TextView hint) {
+        LinearLayout kbox = Ui.col(act);
+        kbox.setPadding(0, Ui.dp(act, 6), 0, Ui.dp(act, 6));
+        final String name = t.optString("name", "未命名");
+        final String keyStr = normKey(t.optString("key", ""));
+        final long id = t.optLong("id", 0);
+        final int status = t.optInt("status", 1);
+        final boolean enabled = status == 1;
+        double used = t.optDouble("used_quota", 0);
+
+        LinearLayout r1 = Ui.row(act);
+        r1.setGravity(Gravity.CENTER_VERTICAL);
+        TextView nameTv = Ui.tv(act, name, 13, Ui.TXT, true);
+        nameTv.setSingleLine(true);
+        nameTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        r1.addView(nameTv, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView st = Ui.tv(act, enabled ? "● 正常" : "● 已失效", 10, enabled ? Ui.GREEN_D : Ui.RED_D);
+        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(-2, -2);
+        stlp.leftMargin = Ui.dp(act, 6);
+        r1.addView(st, stlp);
+        r1.addView(Ui.tv(act, " 已用 $" + String.format("%.2f", used / unit), 10, Ui.SUB2));
+        View copyBtn = Ui.iconBtn(act, "copy", 16, Ui.BLUE, 3);
+        copyBtn.setOnClickListener(v -> {
+            if (keyStr.isEmpty()) { act.toast("该 Key 无内容"); return; }
+            copyText(keyStr, "已复制 Key 到剪贴板");
+        });
+        r1.addView(copyBtn);
+        View delBtn = Ui.iconBtn(act, "trash", 16, Ui.RED, 3);
+        delBtn.setOnClickListener(v -> confirmDeleteKey(name, id, acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        r1.addView(delBtn);
+        kbox.addView(r1);
+
+        /* 脱敏 key 行 */
+        if (!keyStr.isEmpty()) {
+            String masked = keyStr.length() > 8
+                    ? keyStr.substring(0, Math.min(3, keyStr.length())) + "••••••" + keyStr.substring(keyStr.length() - 4)
+                    : keyStr;
+            TextView keyTv = Ui.tv(act, masked, 12, Ui.SUB);
+            keyTv.setTypeface(android.graphics.Typeface.MONOSPACE);
+            keyTv.setBackground(Ui.round(Ui.LINE_SOFT, Ui.dp(act, 4)));
+            keyTv.setPadding(Ui.dp(act, 8), Ui.dp(act, 3), Ui.dp(act, 8), Ui.dp(act, 3));
+            LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(-2, -2);
+            klp.topMargin = Ui.dp(act, 4);
+            kbox.addView(keyTv, klp);
+        }
+
+        /* 测试模型行：用这把 key 作 Bearer 拉模型 → 选一个 → testModel */
+        TextView testBtn = Ui.iconBtnText(act, "bolt", "用此 Key 获取模型并测试", 11, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        LinearLayout.LayoutParams tbp = new LinearLayout.LayoutParams(-2, -2);
+        tbp.topMargin = Ui.dp(act, 4);
+        testBtn.setEnabled(!keyStr.isEmpty());
+        if (keyStr.isEmpty()) testBtn.setAlpha(0.5f);
+        testBtn.setOnClickListener(v -> testWithKey(baseUrl, keyStr, siteUserId, name));
+        kbox.addView(testBtn, tbp);
+
+        if (!enabled) kbox.setAlpha(0.6f);
+        return kbox;
+    }
+
+    /** 用指定 key 作 Bearer 拉模型，弹列表，点选后 testModel（多 key 选一测试的核心）。 */
+    private void testWithKey(String baseUrl, String keyStr, String siteUserId, String keyName) {
+        final String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.isEmpty() || !base.startsWith("http")) { act.toast("站点地址无效"); return; }
+        if (keyStr == null || keyStr.isEmpty()) { act.toast("该 Key 无内容"); return; }
+        act.toast("正在用「" + keyName + "」获取模型…");
+        new Thread(() -> {
+            String err = "";
+            org.json.JSONArray models = null;
+            /* /api/user/models：用这把用户 key 作 Bearer；部分站点另需 New-Api-User → 传 targetAcc.siteUserId */
+            try { models = new Engine(act).fetchModels(base, keyStr, siteUserId); }
+            catch (Exception e) { err = String.valueOf(e.getMessage()); }
+            final String fErr = err;
+            final org.json.JSONArray fModels = models;
+            act.runOnUiThread(() -> {
+                if (!fErr.isEmpty()) { act.toast("获取模型失败：" + fErr); return; }
+                if (fModels == null || fModels.length() == 0) { act.toast("该 Key 未返回任何模型"); return; }
+                final String[] names = new String[fModels.length()];
+                for (int i = 0; i < fModels.length(); i++) names[i] = fModels.optString(i, "");
+                new AlertDialog.Builder(act)
+                        .setTitle("选择模型测试（" + keyName + "，共 " + names.length + " 个）")
+                        .setItems(names, (dd, which) -> {
+                            final String model = names[which];
+                            act.toast("测试中：" + model + " …");
+                            new Thread(() -> {
+                                String terr = "";
+                                JSONObject res = null;
+                                try { res = new Engine(act).testModel(base, keyStr, model); }
+                                catch (Exception e) { terr = String.valueOf(e.getMessage()); }
+                                final String fTerr = terr;
+                                final JSONObject fRes = res;
+                                act.runOnUiThread(() -> {
+                                    if (!fTerr.isEmpty()) { act.toast("❌ 测试失败：" + fTerr); return; }
+                                    if (fRes != null && fRes.optBoolean("ok", false)) {
+                                        act.toast("✅ 可用：" + model);
+                                    } else {
+                                        int h = fRes == null ? 0 : fRes.optInt("http", 0);
+                                        String msg = fRes == null ? "" : fRes.optString("message", "");
+                                        act.toast("❌ HTTP " + h + "：" + msg);
+                                    }
+                                });
+                            }, "sv-model-test").start();
+                        })
+                        .setNegativeButton("关闭", null).show();
+            });
+        }, "sv-model-fetch").start();
+    }
+
+    private void promptCreateKey(String acctKey, String siteKey, String baseUrl, String siteUserId,
+                                 LinearLayout listBody, TextView hint) {
+        LinearLayout cbox = Ui.col(act);
+        cbox.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        EditText[] nameOut = new EditText[1];
+        cbox.addView(Ui.field(act, "Key 名称（如 Cursor / NextChat）", "我的 Key", nameOut));
+        EditText nameEt = nameOut[0];
+        nameEt.setInputType(InputType.TYPE_CLASS_TEXT);
+        new AlertDialog.Builder(act)
+                .setTitle("新建 API Key")
+                .setView(cbox)
+                .setPositiveButton("创建", (d, w) -> {
+                    String name = nameEt.getText().toString().trim();
+                    if (name.isEmpty()) { act.toast("请输入名称"); return; }
+                    act.toast("正在创建…");
+                    new Thread(() -> {
+                        String err = "";
+                        try { new Engine(act).tokenCreate(acctKey, name); }
+                        catch (Exception e) { err = String.valueOf(e.getMessage()); }
+                        final String fErr = err;
+                        act.runOnUiThread(() -> {
+                            if (!fErr.isEmpty()) { act.toast("创建失败：" + fErr); return; }
+                            act.toast("Key 创建成功");
+                            try { new Store(act).opLog(siteKey, acctKey, "Key 管理", "ok", "新建 API Key", name, "user"); } catch (Exception ignored) {}
+                            reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint);
+                        });
+                    }, "sv-token-create").start();
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void confirmDeleteKey(String name, long id, String acctKey, String siteKey,
+                                  String baseUrl, String siteUserId, LinearLayout listBody, TextView hint) {
+        if (id <= 0) { act.toast("该 Key 无有效 ID，无法删除"); return; }
+        new AlertDialog.Builder(act)
+                .setTitle("删除 API Key")
+                .setMessage("确定删除 Key「" + name + "」吗？\n删除后使用该 Key 的应用将立即失效。")
+                .setPositiveButton("删除", (d, w) -> {
+                    act.toast("正在删除…");
+                    new Thread(() -> {
+                        String err = "";
+                        try { new Engine(act).tokenDelete(acctKey, id); }
+                        catch (Exception e) { err = String.valueOf(e.getMessage()); }
+                        final String fErr = err;
+                        act.runOnUiThread(() -> {
+                            if (!fErr.isEmpty()) { act.toast("删除失败：" + fErr); return; }
+                            act.toast("已删除「" + name + "」");
+                            try { new Store(act).opLog(siteKey, acctKey, "Key 管理", "ok", "删除 API Key", name + " (id=" + id + ")", "user"); } catch (Exception ignored) {}
+                            /* 站点列表接口有短暂延迟，延迟 800ms 再刷（照 KeyPanel.confirmDelete） */
+                            listBody.postDelayed(() -> reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint), 800);
+                        });
+                    }, "sv-token-delete").start();
                 })
                 .setNegativeButton("取消", null).show();
     }

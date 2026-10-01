@@ -633,11 +633,8 @@ public class MainActivity extends Activity {
         View ovf = Ui.iconBtn(this, "more", 15, Ui.SUB2, 5);
         ovf.setOnClickListener(v -> accountMenu(site, acc));
         r1.addView(ovf);
-        /* v0.6.2：钥匙图标（API Key 入口，UI设计师方案：账号行右端）*/
-        if (authed) {
-            View keyBtn = KeyPanel.build(this, site, acc, box);
-            r1.addView(keyBtn);
-        }
+        /* v0.4.6：账号行钥匙图标入口已移除——API Key 管理搬到「站点编辑弹窗」的
+         * 「API 密钥管理」区（SettingsView.buildKeyMgrSection），不再在账号行重复入口。 */
         box.addView(r1);
 
         /* 行2：可用余额 + 今日签到奖励 */
