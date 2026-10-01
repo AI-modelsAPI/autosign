@@ -8,12 +8,6 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
 
 /** 安全删除：先冻结任务，尽力注销远端会话，再原子清理本地记录与 WebView Profile。 */
 public final class DeleteCoordinator {
@@ -43,9 +37,6 @@ public final class DeleteCoordinator {
 
     private static final ConcurrentHashMap<String, Boolean> DELETING_ACCOUNTS = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Boolean> DELETING_SITES = new ConcurrentHashMap<>();
-    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-    private static final OkHttpClient HTTP = new OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build();
     private DeleteCoordinator() {}
 
     public static boolean blocked(String siteKey, String accountKey) {
@@ -145,7 +136,6 @@ public final class DeleteCoordinator {
         int r = ReauthManager.logoutVerified(site, account);
         return r == ReauthManager.CONFIRMED || r == ReauthManager.ABSENT;
     }
-    private static String clean(String s) { return s == null || "null".equals(s) ? "" : s.trim(); }
     private static void deliver(Callback cb, Result result) {
         if (cb != null) new Handler(Looper.getMainLooper()).post(() -> cb.done(result));
     }

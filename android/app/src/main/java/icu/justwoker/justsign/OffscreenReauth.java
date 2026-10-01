@@ -10,8 +10,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.webkit.Profile;
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
@@ -48,8 +46,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class OffscreenReauth {
 
-    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+    private static final String UA = Engine.UA_OFFSCREEN;
 
     public static final int REAUTH_OK = 0;       // 会话已重建并落库
     public static final int REAUTH_NEEDS_UI = 1; // 静默不成，需可见授权（论坛会话也失效/人机验证）
@@ -211,12 +208,7 @@ public final class OffscreenReauth {
                 main.post(() -> {
                     if (finished) return;
                     if (!alive) { then.run(); return; }
-                    try {
-                        ProxyConfig pc = new ProxyConfig.Builder()
-                                .addProxyRule(scheme + "://" + host + ":" + port)
-                                .addDirect().build();
-                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, then);
-                    } catch (Exception e) { then.run(); }
+                    ProxyMount.apply(scheme + "://" + host + ":" + port, then, then);
                 });
             }, "offscreen-reauth-proxy").start();
         }

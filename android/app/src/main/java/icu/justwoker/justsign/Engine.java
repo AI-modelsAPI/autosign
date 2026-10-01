@@ -40,7 +40,10 @@ public class Engine {
     /* v1.0.6：去掉 UA 中的 "; wv" 与 Version/4.0 标记。
      * 实测阿里云 WAF 对 WebView 特征 UA 更易触发 JS 质询；改为标准 Chrome Mobile UA，
      * 与 OffscreenLogout/OffscreenCheckin 的 UA 保持同族，避免同账号 UA 前后跳变。 */
-    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+    public static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+    /** v0.x：WebView/离屏通道历史上用的是 Chrome/131.0（无 .0.0 后缀）变体，与上面 UA 一字之差。
+     * WAF 对 UA 敏感，两者不可互换，故单独保留此常量，仅收敛 5 处离屏类里逐字相同的副本。 */
+    public static final String UA_OFFSCREEN = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
 
     private final Store store;
     private final Context ctx;
@@ -201,7 +204,7 @@ public class Engine {
                 JSONObject recovered = OffscreenReadRunner.read(ctx, site.optString("baseUrl"),
                         site.optString("key"), accountKey, uid,
                         path, site.optString("baseUrl"), 25);
-                if (ReadFallback.usableResponse(path, recovered, uid)) {
+                if (ReadFallback.usable(path, recovered, uid)) {
                     store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
                             "离屏读取成功", "path=" + path.split("\\?", 2)[0] + "; oauth=false", "auto");
                     return recovered;
@@ -989,8 +992,8 @@ public class Engine {
                 .put("account", key).put("site", site.optString("name"))
                 .put("http", selfHttp)
                 .put("authorized", selfHttp == 200)
-                .put("availableUSD", Math.round(quota / unit * 100.0) / 100.0)
-                .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
+                .put("availableUSD", Ui.round2(quota / unit))
+                .put("usedUSD", Ui.round2(used / unit))
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user)
                 .put("statusDate", todayStr());
         if (selfHttp != 200) {
@@ -1004,13 +1007,13 @@ public class Engine {
         if (selfHttp == 200) {
             try { todayUsed = todayUsage(site, key, unit); } catch (Exception ignored) {}
         }
-        if (todayUsed >= 0) out.put("todayUsed", Math.round(todayUsed * 100.0) / 100.0);
+        if (todayUsed >= 0) out.put("todayUsed", Ui.round2(todayUsed));
         store.appendLog(sKey, key, "status", "http=" + selfHttp);
 
         if (selfHttp == 200) {
             /* v1.1.1：同轮复核不重复写额度文案（logSummary 控制） */
             if (logSummary) store.opLog(sKey, key, "刷新", "ok", "额度已更新",
-                    "可用 $" + Ui.usd(Math.round(quota / unit * 100.0) / 100.0)
+                    "可用 $" + Ui.usd(Ui.round2(quota / unit))
                             + (todayUsed >= 0 ? (" · 今日消耗 $" + Ui.usd(todayUsed)) : ""), "user");
         } else {
             store.opLog(sKey, key, "刷新", "err", httpHint(selfHttp), "GET /api/user/self", "user");
@@ -1249,7 +1252,7 @@ public class Engine {
             String date = o.optString("checkin_date", o.optString("date", ""));
             if (today.equals(date)) {
                 double raw = o.optDouble("quota_awarded", o.optDouble("quota", 0));
-                reward = raw >= 1000 ? Math.round(raw / (double) unit * 100.0) / 100.0 : raw;
+                reward = raw >= 1000 ? Ui.round2(raw / (double) unit) : raw;
                 rewardKnown = true;
                 if (!checked) checked = true;
                 break;
@@ -1376,7 +1379,7 @@ public class Engine {
     private static double quotaToUSD(long q, long unit) {
         if (q <= 0) return 0;
         if (unit <= 0) unit = QUOTA_PER_UNIT_DEFAULT;
-        return q >= 1000 ? Math.round(q / (double) unit * 100.0) / 100.0 : q;
+        return q >= 1000 ? Ui.round2(q / (double) unit) : q;
     }
 
     private void markChecked(String accountKey, double reward, boolean rewardKnown) {
@@ -1542,7 +1545,7 @@ public class Engine {
         java.util.regex.Matcher m = java.util.regex.Pattern
                 .compile("[＄$]\\s*([0-9]+(?:\\.[0-9]+)?)").matcher(text);
         if (m.find()) {
-            try { return Math.round(Double.parseDouble(m.group(1)) * 100.0) / 100.0; }
+            try { return Ui.round2(Double.parseDouble(m.group(1))); }
             catch (Exception ignored) {}
         }
         return -1;

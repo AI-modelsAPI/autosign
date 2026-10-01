@@ -9,8 +9,6 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
@@ -36,8 +34,7 @@ public final class SilentAuth {
         void onResult(boolean ok, boolean needUi, String user, String msg);
     }
 
-    private static final String UA =
-            "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+    private static final String UA = Engine.UA_OFFSCREEN;
 
     /* OAuth code 交换门禁。业务续期不经过这里。 */
     /* v0.6.7：全局「凭据交换」并发闸门——保证一次授权动作只交换一次 session。
@@ -68,9 +65,7 @@ public final class SilentAuth {
         try {
             byte[] h = java.security.MessageDigest.getInstance("SHA-256")
                     .digest(cookie.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) sb.append(String.format("%02x", h[i]));
-            return sb.toString();
+            return Crypto.hex(java.util.Arrays.copyOfRange(h, 0, 4));
         } catch (Exception e) { return "(err)"; }
     }
 
@@ -82,30 +77,10 @@ public final class SilentAuth {
         new Handler(Looper.getMainLooper()).post(() -> new Runner(app, siteKey, accountKey, cb).start());
     }
 
-    public static boolean githubLoggedIn() {
-        try {
-            String ck = CookieManager.getInstance().getCookie("https://github.com");
-            if (ck == null) return false;
-            return ck.contains("user_session=") || ck.contains("logged_in=yes");
-        } catch (Exception e) { return false; }
-    }
-
     /** opus4.8 审计·B-02：从 OkHttp 响应头拼装 Cookie 头值。
      * 只保留有值的 cookie（删除态 Max-Age=0/空值跳过），形如 "session=xxx; other=yyy"。 */
     private static String extractCookies(java.util.List<String> setCookies) {
-        if (setCookies == null || setCookies.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        for (String sc : setCookies) {
-            int semi = sc.indexOf(';');
-            String pair = (semi >= 0 ? sc.substring(0, semi) : sc).trim();
-            int eq = pair.indexOf('=');
-            if (eq <= 0) continue;
-            String val = pair.substring(eq + 1).trim();
-            if (val.isEmpty() || "deleted".equalsIgnoreCase(val)) continue;
-            if (sb.length() > 0) sb.append("; ");
-            sb.append(pair);
-        }
-        return sb.toString();
+        return CookieUtil.extractCookies(setCookies);
     }
 
     /* ================= JWT 剩余期判定 =================
@@ -785,12 +760,7 @@ public final class SilentAuth {
                 main.post(() -> {
                     if (done) return;
                     if (!alive) { then.run(); return; }
-                    try {
-                        ProxyConfig pc = new ProxyConfig.Builder()
-                                .addProxyRule("socks5://" + host + ":" + port)
-                                .addDirect().build();
-                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, then);
-                    } catch (Exception e) { then.run(); }
+                    ProxyMount.apply("socks5://" + host + ":" + port, then, then);
                 });
             }, "silent-auth-proxy").start();
         }

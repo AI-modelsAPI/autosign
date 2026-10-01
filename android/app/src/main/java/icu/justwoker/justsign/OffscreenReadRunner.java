@@ -9,8 +9,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.webkit.Profile;
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
@@ -143,12 +141,7 @@ public final class OffscreenReadRunner {
                 main.post(() -> {
                     if (done) return;
                     if (!alive) { next.run(); return; }
-                    try {
-                        ProxyConfig pc = new ProxyConfig.Builder()
-                                .addProxyRule(scheme + "://" + host + ":" + port)
-                                .addDirect().build();
-                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, next);
-                    } catch (Exception e) { next.run(); }
+                    ProxyMount.apply(scheme + "://" + host + ":" + port, next, next);
                 });
             }, "offscreen-read-proxy").start();
         }
