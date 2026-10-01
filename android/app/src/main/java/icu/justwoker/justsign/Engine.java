@@ -248,6 +248,17 @@ public class Engine {
         String cookie = acc == null ? "" : clean(acc.optString("siteCookie", ""));
         String siteUserId = acc == null ? "" : clean(acc.optString("siteUserId", ""));
 
+        /* 功能1+2：站点级「系统 token」分流。用户在站点编辑里填了 systemToken，
+         * 则该站所有业务请求直接用它当 Bearer（systemUserId 非空时作 New-Api-User），
+         * 旁路 refresh-cookie 续期链与 401 再换 token。systemToken 为空时下面原逻辑一字不动。 */
+        String sysToken = site == null ? "" : clean(site.optString("systemToken", ""));
+        if (!sysToken.isEmpty()) {
+            token = sysToken;
+            String sysUid = site == null ? "" : clean(site.optString("systemUserId", ""));
+            if (!sysUid.isEmpty()) siteUserId = sysUid;   // 否则沿用账号 siteUserId
+            return call(site, token, cookie, siteUserId, method, path, jsonBody);
+        }
+
         /* 只有持有 Refresh Cookie 的新版站点才按 JWT 到期时间主动续期。
          * session Cookie 站点（如 AgentRouter）直接复用 Cookie，不因 token 为空而授权。 */
         if (hasRefreshCookie(cookie) && SilentAuth.needsExchange(token)) {
@@ -1128,6 +1139,114 @@ public class Engine {
      * create: POST /api/token/ {"name":...} → 返回含完整 key，自动复制
      * delete: DELETE /api/token/{id}
      */
+    /* ================= 功能5：获取模型 + 模型测试 ================= */
+
+    /**
+     * 功能5：拉取站点可用模型名列表。GET baseUrl + /api/user/models。
+     * bearer 可空（匿名站可不带 Authorization），newApiUser 可空（有则带 New-Api-User）。
+     * 独立 OkHttp（复用 buildClientFromConfig，带代理）；信封多形态容错：
+     * data 直接是数组 / data.data 是数组 / data.items / data.records；元素为字符串或
+     * {id|name} 对象。返回模型名 JSONArray（可能为空）。
+     */
+    public org.json.JSONArray fetchModels(String baseUrl, String bearer, String newApiUser) throws Exception {
+        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.isEmpty() || !base.startsWith("http")) throw new Exception("API 地址无效");
+        Request.Builder rb = new Request.Builder().url(base + "/api/user/models")
+                .header("User-Agent", UA)
+                .header("Accept", "application/json, text/plain, */*")
+                .get();
+        String bb = clean(bearer == null ? "" : bearer);
+        if (!bb.isEmpty()) rb.header("Authorization", "Bearer " + bb);
+        String uid = clean(newApiUser == null ? "" : newApiUser);
+        if (!uid.isEmpty()) rb.header("New-Api-User", uid);
+        Response resp = null;
+        try {
+            resp = buildClientFromConfig().newCall(rb.build()).execute();
+            int http = resp.code();
+            String body = resp.body() == null ? "" : resp.body().string();
+            if (http != 200) throw new Exception("站点返回 HTTP " + http);
+            JSONObject json;
+            try { json = new JSONObject(body); } catch (Exception e) { json = new JSONObject(); }
+            /* 定位模型数组：data 直数组 / data.data / data.items / data.records / 顶层 data=array */
+            org.json.JSONArray arr = null;
+            Object dataObj = json.opt("data");
+            if (dataObj instanceof org.json.JSONArray) {
+                arr = (org.json.JSONArray) dataObj;
+            } else if (dataObj instanceof JSONObject) {
+                JSONObject d = (JSONObject) dataObj;
+                if (d.opt("data") instanceof org.json.JSONArray) arr = d.optJSONArray("data");
+                else if (d.opt("items") instanceof org.json.JSONArray) arr = d.optJSONArray("items");
+                else if (d.opt("records") instanceof org.json.JSONArray) arr = d.optJSONArray("records");
+            }
+            if (arr == null && json.opt("items") instanceof org.json.JSONArray) arr = json.optJSONArray("items");
+            if (arr == null) throw new Exception("响应无模型列表字段");
+            org.json.JSONArray names = new org.json.JSONArray();
+            for (int i = 0; i < arr.length(); i++) {
+                Object el = arr.opt(i);
+                String name = "";
+                if (el instanceof String) name = (String) el;
+                else if (el instanceof JSONObject) {
+                    JSONObject o = (JSONObject) el;
+                    name = o.optString("id", o.optString("model", o.optString("name", "")));
+                }
+                if (name != null && !name.trim().isEmpty()) names.put(name.trim());
+            }
+            return names;
+        } finally {
+            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * 功能5：对单个模型跑连通性测试。POST baseUrl + /v1/chat/completions（OpenAI 兼容端点）。
+     * 请求头仅 Authorization: Bearer <apiKey>——绝不带 Cookie / New-Api-User，避免污染会话。
+     * body {"model":...,"messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}。
+     * 独立 OkHttp（复用 buildClientFromConfig，带代理），15s 读超时。
+     * 返回 {ok, http, message}：2xx 且无 error 即 ok=true；否则 message 取 error.message 或 HTTP 码。
+     */
+    public JSONObject testModel(String baseUrl, String apiKey, String model) throws Exception {
+        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.isEmpty() || !base.startsWith("http")) throw new Exception("API 地址无效");
+        String key = clean(apiKey == null ? "" : apiKey);
+        if (key.isEmpty()) throw new Exception("API Key 为空");
+        String m = model == null ? "" : model.trim();
+        if (m.isEmpty()) throw new Exception("模型名为空");
+        String payload = new JSONObject()
+                .put("model", m)
+                .put("messages", new org.json.JSONArray()
+                        .put(new JSONObject().put("role", "user").put("content", "hi")))
+                .put("max_tokens", 1)
+                .put("stream", false)
+                .toString();
+        /* 独立 15s 客户端（在 buildClientFromConfig 的代理设置基础上加长读超时） */
+        OkHttpClient client = buildClientFromConfig().newBuilder()
+                .readTimeout(15, TimeUnit.SECONDS)
+                .connectTimeout(15, TimeUnit.SECONDS).build();
+        Request req = new Request.Builder().url(base + "/v1/chat/completions")
+                .header("User-Agent", UA)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Authorization", "Bearer " + key)   // 仅此一个鉴权头，无 Cookie / New-Api-User
+                .post(RequestBody.create(payload, MediaType.parse("application/json")))
+                .build();
+        Response resp = null;
+        try {
+            resp = client.newCall(req).execute();
+            int http = resp.code();
+            String body = resp.body() == null ? "" : resp.body().string();
+            JSONObject json;
+            try { json = new JSONObject(body); } catch (Exception e) { json = new JSONObject(); }
+            String errMsg = "";
+            Object errObj = json.opt("error");
+            if (errObj instanceof JSONObject) errMsg = ((JSONObject) errObj).optString("message", "");
+            else if (errObj instanceof String) errMsg = (String) errObj;
+            boolean ok = http >= 200 && http < 300 && errMsg.isEmpty();
+            return new JSONObject().put("ok", ok).put("http", http)
+                    .put("message", ok ? "可用" : (errMsg.isEmpty() ? ("HTTP " + http) : errMsg));
+        } finally {
+            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
+        }
+    }
+
     public JSONObject tokenList(String key) throws Exception {
         JSONObject acc = store.findAccount(key);
         if (acc == null) throw new Exception("账号不存在");

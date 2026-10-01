@@ -629,8 +629,27 @@ public class SettingsView extends FrameLayout {
         EditText[] nOut = new EditText[1], uOut = new EditText[1];
         box.addView(Ui.field(act, "站点名称", "如 JustDoWork", nOut));
         box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.field(act, "API 地址（Base URL）", "https://api.example.com", uOut));
-        uOut[0].setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        box.addView(Ui.tv(act, "API 地址（Base URL）", 11, Ui.SUB, true));
+        LinearLayout urlRow = Ui.row(act);
+        LinearLayout.LayoutParams urlLp = new LinearLayout.LayoutParams(-1, -2);
+        urlLp.topMargin = Ui.dp(act, 5);
+        EditText urlEt = Ui.input(act, "https://api.example.com");
+        urlEt.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        uOut[0] = urlEt;
+        urlRow.addView(urlEt, new LinearLayout.LayoutParams(0, -2, 1f));
+        View urlCopy = Ui.iconBtn(act, "copy", 16, Ui.SUB, 7);
+        urlCopy.setOnClickListener(v -> {
+            String u0 = uOut[0].getText().toString().trim();
+            if (u0.isEmpty()) { act.toast("地址为空"); return; }
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                cm.setText(u0);
+                act.toast("已复制地址");
+            } catch (Exception ignored) {}
+        });
+        urlRow.addView(urlCopy);
+        box.addView(urlRow, urlLp);
         box.addView(Ui.gapH(act, 10));
 
         /* 签到方式单选（三种形态，与 Engine.siteKind 对齐） */
@@ -666,9 +685,105 @@ public class SettingsView extends FrameLayout {
         slp.topMargin = Ui.dp(act, 5);
         box.addView(seg, slp);
 
+        /* 功能1+2：系统 token（Bearer）+ 用户ID（New-Api-User），均可选 */
+        box.addView(Ui.gapH(act, 10));
+        EditText[] tokOut = new EditText[1], sysUidOut = new EditText[1];
+        box.addView(Ui.field(act,
+                "系统 token（可选，New-API 中转站个人设置里生成；留空走原登录流程）",
+                "sk-… 或访问令牌", tokOut));
+        box.addView(Ui.gapH(act, 8));
+        box.addView(Ui.field(act,
+                "系统 token 用户ID（可选，部分站点 Bearer 调用需 New-Api-User）",
+                "数字 ID", sysUidOut));
+
+        /* 功能3：站点级 API Key（sk-…，用于模型测试，可手填或从 KeyPanel 复制贴入） */
+        box.addView(Ui.gapH(act, 10));
+        box.addView(Ui.tv(act, "API Key（sk-…，用于模型测试）", 11, Ui.SUB, true));
+        LinearLayout keyRow = Ui.row(act);
+        LinearLayout.LayoutParams keyLp = new LinearLayout.LayoutParams(-1, -2);
+        keyLp.topMargin = Ui.dp(act, 5);
+        EditText keyEt = Ui.input(act, "sk-…");
+        EditText[] keyOut = { keyEt };
+        keyRow.addView(keyEt, new LinearLayout.LayoutParams(0, -2, 1f));
+        View keyCopy = Ui.iconBtn(act, "copy", 16, Ui.SUB, 7);
+        keyCopy.setOnClickListener(v -> {
+            String k0 = keyOut[0].getText().toString().trim();
+            if (k0.isEmpty()) { act.toast("API Key 为空"); return; }
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                cm.setText(k0);
+                act.toast("已复制 API Key");
+            } catch (Exception ignored) {}
+        });
+        keyRow.addView(keyCopy);
+        box.addView(keyRow, keyLp);
+
+        /* 功能5：获取模型 → 列出 → 点某模型直接 testModel → toast 结果（合并流程，最少交互） */
+        box.addView(Ui.gapH(act, 8));
+        TextView fetchBtn = Ui.iconBtnText(act, "download", "获取模型并测试", 12,
+                Ui.BLUE, Ui.BLUE_BG, 12, 8);
+        fetchBtn.setOnClickListener(v -> {
+            final String base = uOut[0].getText().toString().trim().replaceAll("/+$", "");
+            final String sysTok = tokOut[0].getText().toString().trim();
+            final String apiK = keyOut[0].getText().toString().trim();
+            final String sysUid = sysUidOut[0].getText().toString().trim();
+            if (base.isEmpty() || !base.startsWith("http")) { act.toast("请先填写有效的 API 地址"); return; }
+            final String bearer = !sysTok.isEmpty() ? sysTok : apiK;   // systemToken 优先，否则 apiKey
+            act.toast("正在获取模型…");
+            new Thread(() -> {
+                String err = "";
+                org.json.JSONArray models = null;
+                try { models = new Engine(act).fetchModels(base, bearer, sysUid); }
+                catch (Exception e) { err = String.valueOf(e.getMessage()); }
+                final String fErr = err;
+                final org.json.JSONArray fModels = models;
+                act.runOnUiThread(() -> {
+                    if (!fErr.isEmpty()) { act.toast("获取模型失败：" + fErr); return; }
+                    if (fModels == null || fModels.length() == 0) { act.toast("该站点未返回任何模型"); return; }
+                    final String[] names = new String[fModels.length()];
+                    for (int i = 0; i < fModels.length(); i++) names[i] = fModels.optString(i, "");
+                    new AlertDialog.Builder(act)
+                            .setTitle("选择模型测试（共 " + names.length + " 个）")
+                            .setItems(names, (dd, which) -> {
+                                final String model = names[which];
+                                if (apiK.isEmpty() && sysTok.isEmpty()) {
+                                    act.toast("模型测试需 API Key 或系统 token"); return;
+                                }
+                                /* 模型测试 Bearer：apiKey 优先（OpenAI 端点的调用密钥），否则退回 systemToken */
+                                final String testKey = !apiK.isEmpty() ? apiK : sysTok;
+                                act.toast("测试中：" + model + " …");
+                                new Thread(() -> {
+                                    String terr = "";
+                                    JSONObject res = null;
+                                    try { res = new Engine(act).testModel(base, testKey, model); }
+                                    catch (Exception e) { terr = String.valueOf(e.getMessage()); }
+                                    final String fTerr = terr;
+                                    final JSONObject fRes = res;
+                                    act.runOnUiThread(() -> {
+                                        if (!fTerr.isEmpty()) { act.toast("❌ 测试失败：" + fTerr); return; }
+                                        if (fRes != null && fRes.optBoolean("ok", false)) {
+                                            act.toast("✅ 可用：" + model);
+                                        } else {
+                                            int h = fRes == null ? 0 : fRes.optInt("http", 0);
+                                            String msg = fRes == null ? "" : fRes.optString("message", "");
+                                            act.toast("❌ HTTP " + h + "：" + msg);
+                                        }
+                                    });
+                                }, "model-test").start();
+                            })
+                            .setNegativeButton("关闭", null).show();
+                });
+            }, "model-fetch").start();
+        });
+        box.addView(fetchBtn);
+
         if (!isNew) {
             nOut[0].setText(site.optString("name"));
             uOut[0].setText(site.optString("baseUrl"));
+            tokOut[0].setText(site.optString("systemToken", ""));
+            sysUidOut[0].setText(site.optString("systemUserId", ""));
+            keyOut[0].setText(site.optString("apiKey", ""));
         }
         /* 初始化选中态 */
         int initIdx = "login".equals(type[0]) ? 1 : ("web".equals(type[0]) ? 2 : 0);
@@ -705,6 +820,9 @@ public class SettingsView extends FrameLayout {
                         if (!s.has("homeUrl")) s.put("homeUrl", u);
                         s.put("checkinType", type[0]);
                         s.put("hideOnBoard", hideOnBoard[0]);
+                        s.put("systemToken", tokOut[0].getText().toString().trim());
+                        s.put("systemUserId", sysUidOut[0].getText().toString().trim());
+                        s.put("apiKey", keyOut[0].getText().toString().trim());
                         store.upsertSite(s);
                         store.opLog(s.optString("key"), "", isNew ? "添加站点" : "编辑站点", "ok",
                                 s.optString("name"), u, "user");
