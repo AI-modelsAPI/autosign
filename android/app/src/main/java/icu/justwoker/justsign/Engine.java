@@ -545,6 +545,32 @@ public class Engine {
         JSONObject proxy = store.config().optJSONObject("proxy");
         return buildClient(proxy != null && proxy.optBoolean("enabled"), proxy);
     }
+
+    /**
+     * 诊断类请求执行（模型获取/测试用）：优先走配置的代理，代理不通时自动回退直连（plain）。
+     * 修复：原来直接 buildClientFromConfig().newCall() 单次执行——代理开启但未连通时，
+     * OkHttp 抛「failed to connect to /127.0.0.1:10808」，toast 原样显示该内网地址，
+     * 误导用户以为站点 URL 写错。这些端点（/api/user/models、/v1/chat/completions）都是
+     * 幂等/只读的连通性探测，直连回退安全。timeoutSec 同时作读/连超时。
+     */
+    private Response execDiag(Request req, int timeoutSec) throws Exception {
+        JSONObject proxy = store.config().optJSONObject("proxy");
+        boolean useProxy = proxy != null && proxy.optBoolean("enabled");
+        OkHttpClient base = buildClient(useProxy, proxy).newBuilder()
+                .readTimeout(timeoutSec, TimeUnit.SECONDS)
+                .connectTimeout(timeoutSec, TimeUnit.SECONDS).build();
+        try {
+            return base.newCall(req).execute();
+        } catch (Exception e) {
+            if (!useProxy) throw e;   // 本就直连，无回退可做
+            /* 代理不可达 → 直连重试一次。保留原异常信息到 lastError 便于诊断。 */
+            lastError = "proxy-failed:" + e.getClass().getSimpleName();
+            OkHttpClient direct = plain.newBuilder()
+                    .readTimeout(timeoutSec, TimeUnit.SECONDS)
+                    .connectTimeout(timeoutSec, TimeUnit.SECONDS).build();
+            return direct.newCall(req).execute();
+        }
+    }
     private static String clean(String value) {
         return value == null || "null".equals(value) ? "" : value;
     }
@@ -1161,7 +1187,7 @@ public class Engine {
         if (!uid.isEmpty()) rb.header("New-Api-User", uid);
         Response resp = null;
         try {
-            resp = buildClientFromConfig().newCall(rb.build()).execute();
+            resp = execDiag(rb.build(), 15);
             int http = resp.code();
             String body = resp.body() == null ? "" : resp.body().string();
             if (http != 200) throw new Exception("站点返回 HTTP " + http);
@@ -1218,10 +1244,7 @@ public class Engine {
                 .put("max_tokens", 1)
                 .put("stream", false)
                 .toString();
-        /* 独立 15s 客户端（在 buildClientFromConfig 的代理设置基础上加长读超时） */
-        OkHttpClient client = buildClientFromConfig().newBuilder()
-                .readTimeout(15, TimeUnit.SECONDS)
-                .connectTimeout(15, TimeUnit.SECONDS).build();
+        /* 独立 15s 客户端，带代理不通→直连回退（execDiag）；避免 toast 只报 socks 127.0.0.1:xxxx 连接失败 */
         Request req = new Request.Builder().url(base + "/v1/chat/completions")
                 .header("User-Agent", UA)
                 .header("Accept", "application/json, text/plain, */*")
@@ -1230,7 +1253,7 @@ public class Engine {
                 .build();
         Response resp = null;
         try {
-            resp = client.newCall(req).execute();
+            resp = execDiag(req, 15);
             int http = resp.code();
             String body = resp.body() == null ? "" : resp.body().string();
             JSONObject json;
