@@ -696,6 +696,10 @@ public class MainActivity extends Activity {
             r3.addView(Ui.tv(this, todayTxt, 11, todayColor));
             r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
             r3.addView(Ui.tv(this, "累计已用 $" + Ui.usd(st.optDouble("usedUSD", 0)), 11, Ui.SUB));
+            if (st.has("grantedUSD") && !st.isNull("grantedUSD")) {
+                r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
+                r3.addView(Ui.tv(this, "总额 $" + Ui.usd(st.optDouble("grantedUSD", 0)), 11, Ui.SUB));
+            }
         }
         r3.addView(Ui.spring(this));
         TextView logBtn = Ui.textIcon(this, "日志", "chevron", 11, Ui.SUB, true);
@@ -1134,6 +1138,19 @@ singleBusy = true;
                 return;
             }
             final String m = msg == null ? "" : msg;
+            /* CF 逃生梯 L2（可见自动兜底）：AnyRouter 后台静默重登(L1)判定需人机/论坛会话失效时，
+             * anyRouterRelogin 回 needUi 约定串「需要在应用内重新登录」。此处据此自动拉起可见授权
+             * （前台真实 WebView，managed challenge 通常前台无感自动过），复用现有 openAuthActivity +
+             * REQ_AUTH，不新造 UI。授权成功后 onActivityResult 对 AnyRouter 补写签到回执(见该处)。 */
+            if (m.contains("需要在应用内重新登录") && SiteProtocol.isAnyRouter(site)) {
+                JSONObject acc = store.findAccount(key);
+                if (acc != null) {
+                    toast("需要在应用内重新登录，正在打开授权…");
+                    store.opLog(sk, key, "签到", "info", "后台静默重登需人机，转可见授权(L2)", "", "user");
+                    openAuthActivity(sk, key, acc.optString("alias"), acc.optString("credentialId", ""));
+                    return;
+                }
+            }
             /* 弹窗政策（对齐 just 站流程）：刷新和签到一律纯后台，失败绝不弹页。
              * 可见兜底页跑的是同一套 JS，结果必然相同 —— 跳转只会打断用户，
              * 表现为「突然跳出一个页面、等待、最后仍失败」。失败统一：toast 说明
@@ -1683,7 +1700,22 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
                         }
                     } catch (Exception ignored) {}
                 }
-                if (!ak.isEmpty()) refreshOne(ak);
+                if (!ak.isEmpty()) {
+                    /* CF 逃生梯 L2/L3：AnyRouter 经可见 AuthActivity 登录成功 = 领奖。
+                     * 在 refreshOne 之外补写 relogin 回执 + best-effort sign_in（复用
+                     * Engine.anyRouterSignInReceipt），确保可见登录这条也落签到回执，
+                     * 不会判未签重复弹授权页。仅对 AnyRouter 账号执行，不影响其他站。 */
+                    final String fak = ak;
+                    JSONObject accAuth = store.findAccount(fak);
+                    JSONObject siteAuth = store.siteOfAccount(fak);
+                    if (SiteProtocol.isAnyRouter(siteAuth) && accAuth != null) {
+                        new Thread(() -> {
+                            try { new Engine(getApplicationContext()).anyRouterSignInReceipt(fak); }
+                            catch (Exception ignored) {}
+                        }, "anyrouter-auth-receipt").start();
+                    }
+                    refreshOne(ak);
+                }
             } else {
                 String err = data == null ? "" : data.getStringExtra("error");
                 store.opLog("", "", "授权", "err", err == null || err.isEmpty() ? "授权未完成" : err, "", "user");

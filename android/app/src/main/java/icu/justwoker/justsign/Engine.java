@@ -994,6 +994,7 @@ public class Engine {
                 .put("authorized", selfHttp == 200)
                 .put("availableUSD", Ui.round2(quota / unit))
                 .put("usedUSD", Ui.round2(used / unit))
+                .put("grantedUSD", Ui.round2((quota + used) / unit))
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user)
                 .put("statusDate", todayStr());
         if (selfHttp != 200) {
@@ -1348,6 +1349,86 @@ public class Engine {
             try { callWithAuth(site, key, "GET", "/api/user/self"); } catch (Exception ignored) {}
         }
         return out;
+    }
+
+    /**
+     * AnyRouter 签到 ≡ 重登（北京 08:00 后重新登录即发放当日 $25）。后台工作线程调用。
+     * 返回 {ok, already, needUi, message}。CF 逃生梯 L1：OffscreenReauth 离屏复用论坛会话静默重登。
+     *   REAUTH_OK      → 重登成功=已领奖，补发一次原生 sign_in(best-effort)，写 relogin 回执。
+     *   REAUTH_NEEDS_UI/SKIP → needUi=true，交由上层拉起可见授权(L2)。
+     */
+    public JSONObject anyRouterRelogin(String accountKey) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject site = store.siteOfAccount(accountKey);
+            JSONObject acc = store.findAccount(accountKey);
+            if (!SiteProtocol.isAnyRouter(site) || acc == null
+                    || !acc.optString("siteUserId", "").matches("[1-9][0-9]{0,14}")) {
+                return out.put("ok", false).put("already", false).put("needUi", false)
+                        .put("message", "站点或账号不匹配，请重新授权此账号");
+            }
+            long now = System.currentTimeMillis();
+            if (!SiteProtocol.rewardWindowOpen(now)) {
+                return out.put("ok", false).put("already", false).put("needUi", false)
+                        .put("message", "未到北京08:00，未领取");
+            }
+            if (SiteProtocol.hasSignInReceipt(acc, now)) {
+                return out.put("ok", true).put("already", true).put("needUi", false)
+                        .put("message", "本周期已签到(金额未知)");
+            }
+            int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
+            if (rc == OffscreenReauth.REAUTH_OK) {
+                /* 重登成功=已领奖。补发 sign_in + 写 relogin 回执（抽成 anyRouterSignInReceipt 复用）。 */
+                anyRouterSignInReceipt(accountKey);
+                return out.put("ok", true).put("already", false).put("needUi", false)
+                        .put("message", "重登成功，已领取(金额未知)");
+            }
+            /* REAUTH_NEEDS_UI / REAUTH_SKIP：论坛会话也失效或需人机，须可见授权(L2)。 */
+            return out.put("ok", false).put("already", false).put("needUi", true)
+                    .put("message", "需要在应用内重新登录");
+        } catch (Exception e) {
+            try {
+                return out.put("ok", false).put("already", false).put("needUi", true)
+                        .put("message", "需要在应用内重新登录");
+            } catch (Exception ignored) { return out; }
+        }
+    }
+
+    /**
+     * AnyRouter 登录成功后的「领奖落账」子逻辑（best-effort 原生 sign_in + 写 relogin 回执）。
+     * 供两条路径复用：anyRouterRelogin（L1 离屏静默重登成功后）、
+     * MainActivity 可见授权成功后（L2/L3，确保可见登录这条也=领奖、落签到回执，不重复弹）。
+     * siteCookie 已由重登/授权流程更新，这里勿覆盖。失败不致命（仅记日志）。
+     */
+    public void anyRouterSignInReceipt(String accountKey) {
+        try {
+            JSONObject site = store.siteOfAccount(accountKey);
+            JSONObject acc2 = store.findAccount(accountKey);
+            if (!SiteProtocol.isAnyRouter(site) || acc2 == null) return;
+            String siteKey = site.optString("key", "");
+            long now = System.currentTimeMillis();
+            try {
+                JSONObject r = call(site, null, acc2.optString("siteCookie", ""),
+                        acc2.optString("siteUserId", ""), "POST", "/api/user/sign_in", "{}");
+                JSONObject d = dd(r);
+                boolean success = r.optInt("http") == 200 && d.optBoolean("success", true);
+                String sm = d.optString("message", r.optString("message", ""));
+                store.opLog(siteKey, accountKey, "AnyRouter重登", "info",
+                        success ? "重登后 sign_in 已发送" : "重登后 sign_in 未确认",
+                        "http=" + r.optInt("http") + "；" + sm, "auto");
+            } catch (Exception ignored) {
+                store.opLog(siteKey, accountKey, "AnyRouter重登", "info",
+                        "重登成功；补发 sign_in 失败（不致命）", "oauth=false", "auto");
+            }
+            try {
+                JSONObject lc = new JSONObject()
+                        .put("date", SiteProtocol.rewardDate(now))
+                        .put("time", now)
+                        .put("source", "relogin");
+                store.patchAccount(accountKey, new JSONObject()
+                        .put("lastCheckin", lc).put("lastLogin", now));
+            } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
     }
 
     private double todayUsage(JSONObject site, String accountKey, long unit) {

@@ -57,7 +57,17 @@ public final class OffscreenCheckin {
         final String trace = Long.toString(System.nanoTime(), 36);
         final Store startStore = new Store(app);
         if (SiteProtocol.isAnyRouter(startStore.findSite(siteKey))) {
-            AnyRouterCheckin.run(app, siteKey, accountKey, cb);
+            /* AnyRouter 签到 ≡ 重登（CF 逃生梯 L1 后台静默）。起工作线程调 Engine.anyRouterRelogin，
+             * 结果回主线程转成 Callback；needUi 用 message 约定串"需要在应用内重新登录"透传，
+             * 由 MainActivity 据此拉起可见授权(L2)——不改 Callback 接口，减少波及面。 */
+            new Thread(() -> {
+                JSONObject r = new Engine(app).anyRouterRelogin(accountKey);
+                final boolean ok = r.optBoolean("ok", false);
+                final boolean already = r.optBoolean("already", false);
+                final String message = r.optString("message", "");
+                new Handler(Looper.getMainLooper()).post(() ->
+                        cb.onResult(ok, already, 0, false, message));
+            }, "anyrouter-relogin").start();
             return;
         }
         startStore.opLog(siteKey, accountKey, "后台签到V2", "info", "签到链路开始",
