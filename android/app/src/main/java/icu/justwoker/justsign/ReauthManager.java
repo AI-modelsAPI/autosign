@@ -79,8 +79,7 @@ public final class ReauthManager {
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     /** 浏览器化 UA：WAF 对纯 OkHttp 默认 UA 会直接返回 JS 质询页。 */
-    private static final String BROWSER_UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) "
-            + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+    private static final String BROWSER_UA = Engine.UA;
     private static final OkHttpClient HTTP = new OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build();
 

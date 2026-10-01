@@ -70,24 +70,12 @@ public final class WebViewProfileUtil {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] d = md.digest(raw.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder("p_");
-            for (int i = 0; i < 8; i++) {
-                sb.append(Character.forDigit((d[i] >> 4) & 0xF, 16));
-                sb.append(Character.forDigit(d[i] & 0xF, 16));
-            }
+            sb.append(Crypto.hex(java.util.Arrays.copyOfRange(d, 0, 8)));
             return sb.toString();
         } catch (Exception e) {
             String safe = raw.replaceAll("[^A-Za-z0-9_]", "_");
             return "p_" + (safe.length() > 40 ? safe.substring(0, 40) : safe);
         }
-    }
-
-    /** 确保 Profile 存在（不支持多 Profile 时返回 null，调用方走 Default 路径）。 */
-    @Nullable
-    public static Profile ensureProfile(@NonNull String name) {
-        if (!multiProfileSupported()) return null;
-        try {
-            return ProfileStore.getInstance().getOrCreateProfile(name);
-        } catch (Throwable t) { return null; }
     }
 
     /**
@@ -145,27 +133,6 @@ public final class WebViewProfileUtil {
         } catch (Throwable t) { return false; }
     }
 
-    /** 清空该 Profile（或 Default）的所有 Cookie 并落盘。仅用于首次授权。 */
-    public static void clearCookies(@Nullable Profile profile) {
-        clearCookies(profile, null);
-    }
-
-    /** v1.0.8：异步清空全部 Cookie，完成后回调；用于强制重新授权。 */
-    public static void clearCookies(@Nullable Profile profile, @Nullable Runnable after) {
-        try {
-            CookieManager cm = cookieManagerFor(profile);
-            cm.removeAllCookies(ok -> {
-                try { cm.flush(); } catch (Throwable ignored) {}
-                if (after != null) {
-                    try { after.run(); } catch (Throwable ignored) {}
-                }
-            });
-        } catch (Throwable ignored) {
-            if (after != null) {
-                try { after.run(); } catch (Throwable ignored2) {}
-            }
-        }
-    }
     /** v1.0.7：只清指定域的 Cookie（保留其他域如 linux.do 的登录态）。
      * 用于站点 session 失效（半登录态导致 /login 被 302 到 /console）时重置。 */
     public static void clearCookiesForUrl(@Nullable Profile profile, @NonNull String url) {

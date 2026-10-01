@@ -39,6 +39,13 @@ public final class Crypto {
 
     private Crypto() {}
 
+    /** 标准 byte[] → 小写十六进制串（无分隔符）。minSdk=24，不能用 java.util.HexFormat（需 API34）。 */
+    static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte value : b) sb.append(String.format(Locale.US, "%02x", value));
+        return sb.toString();
+    }
+
     /* ================= 密钥 ================= */
 
     private static SecretKey key() {
@@ -99,9 +106,6 @@ public final class Crypto {
             return new String(c.doFinal(ct), "UTF-8");
         } catch (Exception e) { return ""; }
     }
-
-    /** 是否已是本类加密过的密文 */
-    public static boolean isEnc(String s) { return s != null && s.startsWith(PREFIX); }
 
     /* ================= 2FA ================= */
 

@@ -76,7 +76,6 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Ui.initIcons(this);
         new Store(this).rolloverDailyState();
         engine = new Engine(this);
         Engine.schedule(this);

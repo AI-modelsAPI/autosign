@@ -358,8 +358,6 @@ public class Store {
             } catch (Exception ignored) { return false; }
         }
     }
-    public void removeSite(String siteKey) { removeSiteSecure(siteKey); }
-
     /** 由 baseUrl 自动生成站点 key（小写、去协议/特殊字符） */
     public static String siteKeyOf(String baseUrl) {
         String k = baseUrl == null ? "site" : baseUrl.toLowerCase()
@@ -538,8 +536,6 @@ public class Store {
             } catch (Exception ignored) { return false; }
         }
     }
-    public void removeAccount(String key) { removeAccountSecure(key); }
-
     /* ---------- 默认配置 ---------- */
     public static JSONObject defaultConfig() {
         try {
@@ -910,8 +906,8 @@ public class Store {
         try {
             return new JSONObject().put("sites", nSite).put("accounts", nAcc)
                     .put("checked", nChecked).put("pending", nPending)
-                    .put("boardUSD", Math.round(boardTotal * 100.0) / 100.0)
-                    .put("totalUSD", Math.round(fullTotal * 100.0) / 100.0);
+                    .put("boardUSD", Ui.round2(boardTotal))
+                    .put("totalUSD", Ui.round2(fullTotal));
         } catch (Exception e) { return new JSONObject(); }
     }
 }

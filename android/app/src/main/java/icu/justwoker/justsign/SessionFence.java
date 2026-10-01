@@ -21,19 +21,6 @@ public final class SessionFence {
     }
 
     /** 响应身份必须精确等于本地保存的站点ID。缺少任一侧一律拒绝。 */
-    public static boolean identity(JSONObject self, JSONObject acc) {
-        if (self == null || acc == null) return false;
-        if (self.optInt("http") != 200) return false;
-        String saved = acc.optString("siteUserId", "").trim();
-        if (!validId(saved)) return false;
-        JSONObject env = self.optJSONObject("data");
-        if (env == null || env.opt("success") != Boolean.TRUE) return false;
-        Object payload = env.opt("data");
-        if (!(payload instanceof JSONObject)) return false;
-        Object id = ((JSONObject) payload).opt("id");
-        return id != null && saved.equals(String.valueOf(id).trim()) && validId(String.valueOf(id).trim());
-    }
-
     public static boolean identityMatches(JSONObject self, String siteUserId) {
         if (self == null || siteUserId == null) return false;
         if (self.optInt("http") != 200) return false;
@@ -45,11 +32,6 @@ public final class SessionFence {
         if (!(payload instanceof JSONObject)) return false;
         Object id = ((JSONObject) payload).opt("id");
         return id != null && saved.equals(String.valueOf(id).trim());
-    }
-
-    /** 凭据字段是否与快照一致（并发写回栅栏）。 */
-    public static boolean sameSecret(JSONObject before, JSONObject after) {
-        return unchanged(before, after);
     }
 
     /** 本地保存的站点账号ID（去空白），供离屏身份校验使用。 */

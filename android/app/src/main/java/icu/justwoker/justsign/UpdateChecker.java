@@ -14,7 +14,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.security.MessageDigest;
-import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -134,7 +133,7 @@ public final class UpdateChecker {
         android.content.pm.Signature[] signatures = Build.VERSION.SDK_INT >= 28
                 ? info.signingInfo.getApkContentsSigners() : info.signatures;
         if (signatures == null || signatures.length == 0) throw new Exception("缺少签名");
-        return bytesToHex(MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray()));
+        return Crypto.hex(MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray()));
     }
     private static void requestInstall(MainActivity activity, File file) {
         if (!canInstall(activity) && Build.VERSION.SDK_INT >= 26) {
@@ -189,8 +188,7 @@ public final class UpdateChecker {
             int bv = i < bb.length ? Integer.parseInt(bb[i]) : 0; if (av != bv) return Integer.compare(av, bv); }
         return 0;
     }
-    private static String bytesToHex(byte[] bytes) { StringBuilder out = new StringBuilder();
-        for (byte value : bytes) out.append(String.format(Locale.US, "%02x", value)); return out.toString(); }
+    private static String bytesToHex(byte[] bytes) { return Crypto.hex(bytes); }
     private static String safeMessage(Exception e) { String m = e.getMessage(); return m == null || m.length() > 80 ? "请稍后重试" : m; }
     private static final class Release { final String version, url; final long size;
         Release(String version, String url, long size) { this.version = version; this.url = url; this.size = size; } }

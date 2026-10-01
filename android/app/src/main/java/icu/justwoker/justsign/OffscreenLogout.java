@@ -7,8 +7,6 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
 import java.util.concurrent.CountDownLatch;
@@ -37,8 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class OffscreenLogout {
     private static final String LOG_SCHEMA = "auth-v2";
-    private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+    private static final String UA = Engine.UA_OFFSCREEN;
 
     /** 备用通道结果分级（与 ReauthManager 分级解耦，由调用方映射）。 */
     public static final int LOGOUT_OK = 0;
@@ -191,9 +188,7 @@ public final class OffscreenLogout {
                 String host = proxy.optString("host", "127.0.0.1");
                 int port = proxy.optInt("port", 0);
                 if (port <= 0) { then.run(); return; }
-                ProxyConfig cfg = new ProxyConfig.Builder()
-                        .addProxyRule(host + ":" + port).addDirect().build();
-                ProxyController.getInstance().setProxyOverride(cfg, Runnable::run, then);
+                ProxyMount.apply(host + ":" + port, then, then);
             } catch (Exception e) {
                 then.run();
             }

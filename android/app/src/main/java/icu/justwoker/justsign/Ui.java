@@ -164,9 +164,6 @@ public final class Ui {
 
     /* ================= 图标（Icons 绘制，单色扁平） ================= */
 
-    /** 兼容旧调用；图标改为程序化绘制后无需初始化，保留空实现 */
-    public static void initIcons(Context c) { /* no-op since v0.2.1 */ }
-
     /** 纯图标（无文字）ImageView */
     public static android.widget.ImageView icon(Context c, String name, int sizeDp, int color) {
         return Icons.view(c, name, sizeDp, color);
@@ -314,6 +311,11 @@ public final class Ui {
     public static String usd(double d) {
         if (d >= 1000) return String.format(java.util.Locale.US, "%.0f", d);
         return String.format(java.util.Locale.US, "%.2f", d);
+    }
+
+    /** USD 两位小数取整（四舍五入到分）。各处 Math.round(v*100.0)/100.0 的统一实现。 */
+    public static double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
     }
 
     public static int alpha(int color, int a) {

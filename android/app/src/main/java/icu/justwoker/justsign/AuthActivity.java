@@ -21,8 +21,6 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
@@ -1471,8 +1469,8 @@ if (exchanging) return r.sameHost;
                         .put("ok", true).put("http", 200).put("authorized", true)
                         .put("account", accountKey)
                         .put("site", siteObj == null ? "" : siteObj.optString("name", ""))
-                        .put("availableUSD", Math.round(quota / unit * 100.0) / 100.0)
-                        .put("usedUSD", Math.round(used / unit * 100.0) / 100.0)
+                        .put("availableUSD", Ui.round2(quota / unit))
+                        .put("usedUSD", Ui.round2(used / unit))
                         .put("user", (uName == null || uName.isEmpty()) ? JSONObject.NULL : uName)
                         .put("statusDate", Engine.todayStr());
                 if (SiteProtocol.canStoreStatus(lastStatus)) {
@@ -1560,19 +1558,7 @@ if (exchanging) return r.sameHost;
 
     /** opus4.8 审计·B-02：从 OkHttp 响应头拼装 Cookie 头值（仅保留有值 cookie） */
     private static String extractCookies(java.util.List<String> setCookies) {
-        if (setCookies == null || setCookies.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        for (String sc : setCookies) {
-            int semi = sc.indexOf(';');
-            String pair = (semi >= 0 ? sc.substring(0, semi) : sc).trim();
-            int eq = pair.indexOf('=');
-            if (eq <= 0) continue;
-            String val = pair.substring(eq + 1).trim();
-            if (val.isEmpty() || "deleted".equalsIgnoreCase(val)) continue;
-            if (sb.length() > 0) sb.append("; ");
-            sb.append(pair);
-        }
-        return sb.toString();
+        return CookieUtil.extractCookies(setCookies);
     }
 
     /** opus4.8 复审·B1 锚点强化：确保凭据缓存了 GitHub 数字 ID（githubId）。
@@ -1663,16 +1649,10 @@ if (exchanging) return r.sameHost;
                     then.run();
                     return;
                 }
-                try {
-                    ProxyConfig pc = new ProxyConfig.Builder()
-                            .addProxyRule("socks5://" + host + ":" + port)
-                            .addDirect()
-                            .build();
-                    ProxyController.getInstance().setProxyOverride(pc, Runnable::run, () -> {
-                        showTip("已挂载代理 " + host + ":" + port + " · GitHub 授权中");
-                        then.run();
-                    });
-                } catch (Exception e) { then.run(); }
+                ProxyMount.apply("socks5://" + host + ":" + port, () -> {
+                    showTip("已挂载代理 " + host + ":" + port + " · GitHub 授权中");
+                    then.run();
+                }, then);
             });
         }, "auth-proxy").start();
     }

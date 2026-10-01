@@ -43,11 +43,6 @@ public final class Waiters {
         h.postDelayed(tick[0], Math.max(16L, tickMs));
     }
 
-    /** 轮询到条件成立只执行一次；超时什么也不做（用于「等页面就绪」这类可省略的等待）。 */
-    public static void untilQuiet(Handler h, Cond cond, long capMs, Runnable onReady) {
-        until(h, TICK_MS, cond, capMs, onReady, null);
-    }
-
     private static void run(Runnable r) {
         if (r == null) return;
         try { r.run(); } catch (Throwable ignored) {}

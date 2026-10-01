@@ -63,10 +63,6 @@ public final class ReadFallback {
         return null;
     }
 
-    /** 只读结果的薄封装校验（不含各接口的业务字段判断）。 */
-    public static boolean usableResponse(String path, JSONObject r, String uid) {
-        return usable(path, r, uid);
-    }
     /** Error categories, never raw messages/URLs/cookie values. */
     public static String category(Throwable t) {
         if (t == null) return "response";

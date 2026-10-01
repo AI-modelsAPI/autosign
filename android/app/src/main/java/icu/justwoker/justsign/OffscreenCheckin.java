@@ -10,8 +10,6 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-import androidx.webkit.ProxyConfig;
-import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
@@ -107,7 +105,7 @@ public final class OffscreenCheckin {
     }
 
     private static final class Runner {
-        private static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+        private static final String UA = Engine.UA_OFFSCREEN;
 
         private final Context ctx;
         private final String siteKey, accountKey;
@@ -205,14 +203,7 @@ public final class OffscreenCheckin {
                 main.post(() -> {
                     if (done) return;
                     if (!use) { then.run(); return; }
-                    try {
-                        ProxyConfig pc = new ProxyConfig.Builder()
-                                .addProxyRule("socks5://" + host + ":" + port)
-                                /* 站点与 CF 挑战都走代理，本地回环直连 */
-                                .addDirect()
-                                .build();
-                        ProxyController.getInstance().setProxyOverride(pc, Runnable::run, then);
-                    } catch (Exception e) { then.run(); }
+                    ProxyMount.apply("socks5://" + host + ":" + port, then, then);
                 });
             }, "offcheckin-proxy").start();
         }

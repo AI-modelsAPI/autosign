@@ -67,11 +67,6 @@ final class WafChallenge {
         } catch (Exception e) { return ""; }
     }
 
-    /** 便捷入口：给定质询页正文，直接得到 acw_sc__v2；非质询页返回 ""。 */
-    static String solveFromBody(String body) {
-        return isChallenge(body) ? solve(arg1(body)) : "";
-    }
-
     /** 从质询响应头捕获 acw_tc（质询会话标识）。
      * 沙箱对照实测：只回送 acw_sc__v2 仍会被拦，两者齐带才放行。 */
     static String acwTcFromResponse(Object resp) {
@@ -87,11 +82,6 @@ final class WafChallenge {
         Matcher m = Pattern.compile("(?:^|[;,\\s])" + Pattern.quote(name) + "=([^;,\\s]+)")
                 .matcher(setCookie);
         return m.find() ? m.group(1) : "";
-    }
-
-    /** 兼容两参调用（无 acw_tc）。 */
-    static String mergeCookie(String existing, String acwScV2) {
-        return mergeAcwScV2(existing, acwScV2);
     }
 
     /** 合并 acw_sc__v2（必需）与 acw_tc（可选）进既有 Cookie；同键覆盖、异键追加。 */
