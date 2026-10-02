@@ -1544,13 +1544,28 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
             boolean valid = false;
             boolean definitive = false;
             String reason = "";
+            int http = 0;
             try {
-                JSONObject st = new Engine(getApplicationContext()).status(ak);
-                int http = st == null ? 0 : st.optInt("http");
+                /* v1.3.1（用户现场 2026-10-02）：预检只认「站点会话」凭据。原来用 status()，
+                 * 账号填了系统令牌时它拿系统令牌当 Bearer → 200 → 弹「无需重新授权」；而系统令牌
+                 * 只服务查询/Key 管理，签到走的是浏览器会话（另一套凭据，可能早已 401）→
+                 * 用户被夹在两条互相矛盾的提示之间，站点会话死了也修不回来。 */
+                JSONObject st = new Engine(getApplicationContext()).sessionStatus(ak);
+                http = st == null ? 0 : st.optInt("http");
                 valid = st != null && st.optBoolean("ok", false) && http == 200;
                 definitive = valid || http == 401;
                 reason = st == null ? "" : st.optString("message", "");
             } catch (Exception e) { reason = e.getClass().getSimpleName(); }
+            /* 预检留痕：以后「无需重新授权」到底依据什么判的，日志里一眼可见（此前这段不下日志，
+             * 现场只能靠猜）。 */
+            try {
+                new Store(getApplicationContext()).opLog(sk0, ak0, "重新授权预检",
+                        valid ? "info" : "warn",
+                        valid ? "站点会话仍然有效"
+                              : (http == 401 ? "站点会话已失效（HTTP 401）" : "站点会话状态不确定（HTTP " + http + "）"),
+                        "凭据=站点会话（忽略系统令牌）；definitive=" + definitive
+                                + (reason.isEmpty() ? "" : "；message=" + reason), "auto");
+            } catch (Exception ignored) {}
             final boolean fValid = valid, fDefinitive = definitive;
             final String fReason = reason;
             runOnUiThread(() -> {
@@ -1559,8 +1574,17 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                     ReauthManager.release(sk0, ak0);
                     AlertDialog d = new AlertDialog.Builder(this)
                             .setTitle("无需重新授权")
-                            .setMessage("当前登录仍然有效。为避免额外建立站点会话，已停止重新授权。请关闭此窗口继续使用。")
-                            .setPositiveButton("关闭", null).create();
+                            .setMessage("当前站点会话仍然有效。为避免额外建立站点会话，已停止重新授权。请关闭此窗口继续使用。")
+                            .setPositiveButton("关闭", null)
+                            /* v1.3.1：逃生口。预检只是建议，不能变成拦路的墙——
+                             * 例如签到用的浏览器会话与这里探的会话不一致时，用户必须能强制重建。 */
+                            .setNeutralButton("仍要重新授权", (x, y) -> {
+                                if (ReauthManager.acquire(sk0, ak0)) {
+                                    reauthorizeWithLogout(site, acc, sk0, ak0);
+                                } else {
+                                    toast("该账号已有授权流程进行中，请稍候");
+                                }
+                            }).create();
                     d.setOnShowListener(x -> Ui.styleDialog(d));
                     d.show();
                 } else if (fDefinitive) {
@@ -1666,7 +1690,10 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
                 new Thread(() -> {
                     boolean authed = false;
                     try {
-                        JSONObject st = new Engine(getApplicationContext()).status(ak);
+                        /* v1.3.1：这里问的是「刚落库的站点会话是否可用」，同样不能被系统令牌顶替 ——
+                         * status() 对填了系统令牌的账号恒 200，会把一个其实没建起来的会话判成
+                         * 「授权已生效」并跳过可见授权，等于又把人锁死在死会话上。 */
+                        JSONObject st = new Engine(getApplicationContext()).sessionStatus(ak);
                         authed = SiteProtocol.canStoreStatus(st);
                     } catch (Exception ignored) {}
                     final boolean fAuthed = authed;

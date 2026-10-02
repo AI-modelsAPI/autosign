@@ -232,27 +232,40 @@ public class AuthActivity extends Activity {
             h.post(() -> handleBundle(json, ""));
         }
         @JavascriptInterface public void onExchangeDone(int status, String body) {
-            h.post(() -> {
-                if (isAuthInactive() || !exchanging) return;
-                try { android.webkit.CookieManager.getInstance().flush(); } catch (Exception ignored) {}
-                /* 兑换 fetch 的 Set-Cookie（登录 session）由内核在响应头处理时写入，
-                 * r.text() resolve 时已落地 —— flush 后读全量 Cookie 即登录后凭据。 */
-                String freshCk = WebViewProfileUtil.cookieHeader(mProfile, baseUrl);
-                authLog("info", "同源兑换响应", "HTTP " + status + "；body=" + body.length() + "B；cookieLen=" + (freshCk == null ? 0 : freshCk.length()));
-                if (status >= 200 && status < 300) {
-                    handleBundle(body, freshCk == null ? "" : freshCk);
-                } else {
-                    String errCode = "", errMessage = "";
-                    try {
-                        JSONObject eo = new JSONObject(body);
-                        errCode = eo.optString("code", "");
-                        errMessage = eo.optString("message", "");
-                    } catch (Exception ignored) {}
-                    exchanging = false;
-                    SilentAuth.releaseExchange(accountKey);
-                    showLoadError(mapExchangeError(errCode, errMessage.isEmpty() ? ("HTTP " + status) : errMessage));
-                }
-            });
+            h.post(() -> handleExchangeDone(status, body, 0));
+        }
+        /**
+         * v1.3.1：兑换结果落地。两处修正：
+         * 1. flush 必须打在这次兑换所用的那个分区上——原来刷的是 Default 分区
+         *    （CookieManager.getInstance()），命名分区写盘是异步的，紧接着读会读到空；
+         *    真机现场 2026-10-02 16:11 因此打出 cookieLen=0，而该分区里其实已经有
+         *    seekai.cc/new_api_refresh（httpOnly、有效期一个月），refresh cookie 没进账号字段
+         *    → 原生续期链 hasRefreshCookie=false → JWT 15 分钟到期后必掉线。
+         * 2. 读空时再等 450ms 重读一次（仍只重试读，不重放写请求），仍空才按空处理。
+         */
+        private void handleExchangeDone(int status, String body, int attempt) {
+            if (isAuthInactive() || !exchanging) return;
+            WebViewProfileUtil.flush(mProfile);
+            String freshCk = WebViewProfileUtil.cookieHeader(mProfile, baseUrl);
+            boolean ok2xx = status >= 200 && status < 300;
+            if (ok2xx && (freshCk == null || freshCk.isEmpty()) && attempt == 0) {
+                h.postDelayed(() -> handleExchangeDone(status, body, 1), 450L);
+                return;
+            }
+            authLog("info", "同源兑换响应", "HTTP " + status + "；body=" + body.length() + "B；cookieLen=" + (freshCk == null ? 0 : freshCk.length()));
+            if (ok2xx) {
+                handleBundle(body, freshCk == null ? "" : freshCk);
+            } else {
+                String errCode = "", errMessage = "";
+                try {
+                    JSONObject eo = new JSONObject(body);
+                    errCode = eo.optString("code", "");
+                    errMessage = eo.optString("message", "");
+                } catch (Exception ignored) {}
+                exchanging = false;
+                SilentAuth.releaseExchange(accountKey);
+                showLoadError(mapExchangeError(errCode, errMessage.isEmpty() ? ("HTTP " + status) : errMessage));
+            }
         }
         @JavascriptInterface public void onExchangeFailed(String error) {
             h.post(() -> {
@@ -266,7 +279,7 @@ public class AuthActivity extends Activity {
             h.post(() -> {
                 if (isAuthInactive() || !observingLogin) return;   /* 已收凭据/已停止：忽略迟到的探测结果 */
                 if (!AuthProbeJs.sameOrigin(wv == null ? null : wv.getUrl(), baseUrl)) return;
-                try { android.webkit.CookieManager.getInstance().flush(); } catch (Exception ignored) {}
+                try { WebViewProfileUtil.flush(mProfile); } catch (Exception ignored) {}
                 String ck = WebViewProfileUtil.cookieHeader(mProfile, baseUrl);
                 /* 诊断只记长度与状态码，不落正文/头/凭据 */
                 authLog("info", "登录态检测响应", "HTTP " + status + "；body=" + body.length() + "B；cookieLen=" + (ck == null ? 0 : ck.length()));
@@ -315,7 +328,7 @@ public class AuthActivity extends Activity {
                     authLog("info", "引导取参被质询，等页面刷新后重试", "statusBlocked=true");
                     return;   /* 不写 bootstrapJson、不解 latch，等下一轮注入 */
                 }
-                try { android.webkit.CookieManager.getInstance().flush(); } catch (Exception ignored) {}
+                try { WebViewProfileUtil.flush(mProfile); } catch (Exception ignored) {}
                 String snap = WebViewProfileUtil.cookieHeader(mProfile, baseUrl);
                 if (snap != null && !snap.isEmpty())
                     stateSessionCookie = snap;   /* 直接覆盖：fetch 后的快照才是 S1 */
@@ -1863,7 +1876,7 @@ if (exchanging) return r.sameHost;
 
     @Override protected void onPause() {
         super.onPause();
-        try { CookieManager.getInstance().flush(); } catch (Exception ignored) {}
+        WebViewProfileUtil.flush(mProfile);   /* v1.3.1：本页用的是命名分区，刷 Default 分区等于没刷 */
     }
 
     @Override protected void onDestroy() {

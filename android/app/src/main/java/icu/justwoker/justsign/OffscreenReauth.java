@@ -243,7 +243,7 @@ public final class OffscreenReauth {
             /* 抓取该 Profile 的最新 Cookie（含刚重建的站点会话 + WAF 放行）落库。 */
             String cookie = "";
             try {
-                CookieManager.getInstance().flush();
+                WebViewProfileUtil.flush(profile);   /* v1.3.1：刷的必须是本 Profile，不是 Default 分区 */
                 cookie = WebViewProfileUtil.cookieHeader(profile, base);
             } catch (Exception ignored) {}
             if (cookie == null || cookie.trim().isEmpty()) {

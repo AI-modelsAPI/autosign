@@ -69,6 +69,12 @@ public class Engine {
     private JSONObject call(JSONObject site, String token, String cookie, String accSiteUserId, String method, String path, String jsonBody) throws Exception {
         JSONObject proxy = store.config().optJSONObject("proxy");
         boolean useProxy = proxy != null && proxy.optBoolean("enabled");
+        /* v1.3.1（真机现场 2026-10-02）：代理没在跑就直接走直连，别先把请求塞进死代理等 10 秒超时。
+         * 与 WebView 路径（先探活再决定挂不挂代理）对齐；失败后再靠下面的白名单回退太窄——
+         * 邀请划转、会话续期这类 POST 都不在白名单里，只会留下一条「代理与直连均不可达」的
+         * 误导性报错（直连其实没试过）。 */
+        if (useProxy && !ProxyDetect.reachable(proxy.optString("host", "127.0.0.1"),
+                proxy.optInt("port", 10808), 1200)) useProxy = false;
         String base = site.optString("baseUrl", "").replaceAll("/+$", "");
         if (base.isEmpty()) throw new Exception("站点 baseUrl 为空");
         String url = base + path;
@@ -254,6 +260,14 @@ public class Engine {
     }
 
     private JSONObject callWithAuthNative(JSONObject site, String accountKey, String method, String path, String jsonBody) throws Exception {
+        return callWithAuthNative(site, accountKey, method, path, jsonBody, false);
+    }
+
+    /**
+     * @param ignoreSystemToken true = 忽略账号的系统令牌，只按站点会话凭据（token/siteCookie）请求。
+     *   仅供「重新授权」预检使用（见 {@link #sessionStatus}）。
+     */
+    private JSONObject callWithAuthNative(JSONObject site, String accountKey, String method, String path, String jsonBody, boolean ignoreSystemToken) throws Exception {
         JSONObject acc = store.findAccount(accountKey);
         String token = cachedToken(accountKey);
         if (token.isEmpty() && acc != null) token = clean(acc.optString("token", ""));
@@ -267,7 +281,7 @@ public class Engine {
          * systemToken 为空时下面原逻辑一字不动。 */
         String sysToken = acc == null ? "" : clean(acc.optString("systemToken", ""));
         if (sysToken.isEmpty()) sysToken = site == null ? "" : clean(site.optString("systemToken", ""));
-        if (!sysToken.isEmpty()) {
+        if (!sysToken.isEmpty() && !ignoreSystemToken) {
             token = sysToken;
             String sysUid = acc == null ? "" : clean(acc.optString("systemUserId", ""));
             if (sysUid.isEmpty()) sysUid = site == null ? "" : clean(site.optString("systemUserId", ""));
@@ -559,7 +573,16 @@ public class Engine {
 
     private OkHttpClient buildClientFromConfig() {
         JSONObject proxy = store.config().optJSONObject("proxy");
-        return buildClient(proxy != null && proxy.optBoolean("enabled"), proxy);
+        boolean on = proxy != null && proxy.optBoolean("enabled");
+        /* v1.3.1（真机现场 2026-10-02）：代理没在跑时别再往死代理里塞请求。
+         * 此前这里无条件挂 SOCKS，代理一停（127.0.0.1:10808 ECONNREFUSED）所有原生请求
+         * 报 SocketException —— 其中最要命的是 POST /api/user/auth/refresh（会话续期），
+         * 它没有 call() 那层只读直连回退，于是「页面打得开（WebView 会先探活再决定挂不挂代理）、
+         * 会话续期却永远失败」。WebView 路径一向先探活（OffscreenCheckin/SilentAuth/OffscreenReauth），
+         * 这里对齐同一套行为：探不通就直接走直连。 */
+        if (on && !ProxyDetect.reachable(proxy.optString("host", "127.0.0.1"),
+                proxy.optInt("port", 10808), 1200)) on = false;
+        return buildClient(on, proxy);
     }
 
     private static String clean(String value) {
@@ -932,6 +955,40 @@ public class Engine {
     }
 
     /* ================= 业务：刷新（读取三大额度 + 签到奖励） ================= */
+
+    /* ================= 重新授权预检（只认站点会话） ================= */
+
+    /**
+     * v1.3.1（用户现场 2026-10-02）：「是否需要重新授权」只看站点会话凭据，与系统令牌无关。
+     *
+     * 此前预检复用 status()，而 status() 在账号填了系统令牌时拿它当 Bearer（v1.3.0 分流），
+     * 于是：系统令牌有效 → 200 → 弹「无需重新授权」；但签到走的是浏览器会话（另一套凭据，
+     * 09-22 就已过期）→ 恒报「授权已过期」。用户被夹在两条互相矛盾的提示之间，站点会话死了
+     * 也修不回来（真机现场：该账号 09-10 之后再无一次成功授权）。
+     *
+     * 语义与 status() 对齐（ok/http/message），供 MainActivity 做三态判定：
+     * valid → 无需授权；http=401 → 确定失效 → 重新授权；其余 → 交给用户决定。
+     */
+    public JSONObject sessionStatus(String key) throws Exception {
+        JSONObject acc = store.findAccount(key);
+        if (acc == null) throw new Exception("账号不存在");
+        JSONObject site = store.siteOfAccount(key);
+        if (site == null) throw new Exception("站点不存在");
+        resetTokenCache();
+        JSONObject self;
+        try {
+            self = callWithAuthNative(site, key, "GET", "/api/user/self", null, true);
+        } catch (Exception e) {
+            String m = e.getMessage();
+            return new JSONObject().put("ok", false).put("valid", false).put("http", 0)
+                    .put("message", m == null || m.isEmpty() ? "网络异常" : m);
+        }
+        int http = self.optInt("http");
+        boolean valid = SiteProtocol.validSelf(self, clean(acc.optString("siteUserId", "")));
+        return new JSONObject().put("ok", valid && http == 200).put("valid", valid)
+                .put("http", http).put("message", valid ? "" : self.optString("message", ""))
+                .put("account", key).put("site", site.optString("name"));
+    }
 
     public JSONObject status(String key) throws Exception {
         return status(key, true);
