@@ -56,35 +56,20 @@ public final class OffscreenCheckin {
         final int to = timeoutSec > 0 ? timeoutSec : 100;
         final String trace = Long.toString(System.nanoTime(), 36);
         final Store startStore = new Store(app);
-        /* v1.3.0：系统令牌优先——凡持有 systemToken 的账号（手动/一键/定时任一入口），
-         * 一律先走系统令牌 API 签到，不开 WebView、不走 OAuth/重登。无令牌才落下方原分流。 */
+        /* v1.3.0（用户决策）：系统令牌只用于查询/Key管理，**签到一律走原流程**——
+         * Turnstile 站(SeekAI)服务端强制人机验证，令牌 POST 必报"Turnstile token 为空"。
+         * 因此无论账号是否有 systemToken，签到均不经 systemTokenCheckin；
+         * run()/runScheduled/runBulkCheckin 的签到分流保留：isAnyRouter→重登，其余→WebView CheckinJs。
+         * 诊断日志一条带出令牌长度，便于后续追溯。 */
         JSONObject diagSite = startStore.findSite(siteKey);
         JSONObject diagAcc = startStore.findAccount(accountKey);
-        /* 决定性诊断：把"是否检出系统令牌"直接写进日志（只记布尔+长度，不记令牌值），
-         * 便于确认签到到底走了哪条路——避免"存了却没走令牌"这类问题只能靠猜。 */
         {
             String at = diagAcc == null ? "" : diagAcc.optString("systemToken", "").trim();
             String stt = diagSite == null ? "" : diagSite.optString("systemToken", "").trim();
             startStore.opLog(siteKey, accountKey, "签到分流", "info",
-                    Engine.hasSystemToken(diagSite, diagAcc) ? "检出系统令牌→走令牌API" : "无系统令牌→走原流程",
+                    "签到走原流程(令牌仅用于查询/Key管理)",
                     "acctTokenLen=" + at.length() + "；siteTokenLen=" + stt.length()
                             + "；acc=" + (diagAcc != null) + "；site=" + (diagSite != null), "auto");
-        }
-        if (Engine.hasSystemToken(diagSite, diagAcc)) {
-            new Thread(() -> {
-                JSONObject r;
-                try { r = new Engine(app).systemTokenCheckin(accountKey); }
-                catch (Exception e) {
-                    r = new JSONObject();
-                    try { r.put("ok", false).put("message", "签到失败: " + e.getMessage()); } catch (Exception ignored) {}
-                }
-                final JSONObject fr = r;
-                new Handler(Looper.getMainLooper()).post(() -> cb.onResult(
-                        fr.optBoolean("ok", false), fr.optBoolean("already", false),
-                        fr.optDouble("reward", 0), fr.optBoolean("rewardKnown", false),
-                        fr.optString("message", "")));
-            }, "systoken-checkin").start();
-            return;
         }
         if (SiteProtocol.isAnyRouter(startStore.findSite(siteKey))) {
             /* AnyRouter 签到 ≡ 重登（CF 逃生梯 L1 后台静默）。起工作线程调 Engine.anyRouterRelogin，

@@ -781,9 +781,8 @@ public class MainActivity extends Activity {
         String[] t = list.get(idx);
         final String sk = t[0], ak = t[1], kind = t[2];
         Store store = new Store(this);
-        /* v1.3.0：系统令牌优先——有令牌的账号无论 kind，统一经 OffscreenCheckin.run
-         * （其内部已对 systemToken 短路到 systemTokenCheckin），不进 login 重登/engine.checkin 分支。 */
-        boolean sysTok = Engine.hasSystemToken(store.findSite(sk), store.findAccount(ak));
+        /* v1.3.0（用户决策）：令牌只管查询/Key管理，签到一律走原流程——sysTok 分流移除。
+         * login 型站仍按原逻辑走 reloginCheckin / engine.checkin。 */
         {   /* 进度写进忙碌条，带站点/账号名，卡住时能看出卡在谁身上 */
             JSONObject st = store.findSite(sk);
             JSONObject ac = store.findAccount(ak);
@@ -791,7 +790,7 @@ public class MainActivity extends Activity {
                     + (ac == null ? "" : " · " + ac.optString("alias", ""));
             busyUpdate("一键签到 " + (idx + 1) + "/" + list.size() + "：" + who);
         }
-        if ("newapi".equals(kind) || sysTok) {
+        if ("newapi".equals(kind)) {
             OffscreenCheckin.run(this, sk, ak, 100, (ok, already, reward, rewardKnown, msg) -> {
                 String sum;
                 if (!ok) sum = msg;
@@ -1100,55 +1099,10 @@ public class MainActivity extends Activity {
             return;
         }
 
-        /* v1.3.0：系统令牌前置分流。账号持有 systemToken（或老数据回退站点级）→ 直连系统令牌 API 签到，
-         * 无论 checkinType 为何，不开 WebView、不走 OAuth；无令牌账号走下方原流程一字不动。
-         * AnyRouter 无 systemToken → hasSysToken 为 false，不受影响、恒走 anyRouterRelogin。 */
-        JSONObject accSt = store.findAccount(key);
-        boolean hasSysToken = accSt != null
-                && (!accSt.optString("systemToken", "").isEmpty()
-                    || !site.optString("systemToken", "").isEmpty());
-        if (hasSysToken) {
-            singleBusy = true;
-            if (btn != null) btn.setText("签到中…");
-            busyBegin("正在签到 " + site.optString("name", sk) + "…");
-            LogPopup.autoShow(this);
-            new Thread(() -> {
-                JSONObject r;
-                try {
-                    r = engine.systemTokenCheckin(key);
-                } catch (Exception e) {
-                    r = new JSONObject();
-                    try { r.put("ok", false).put("message", "签到失败: " + e.getMessage()); } catch (Exception ignored) {}
-                }
-                final JSONObject fr = r;
-                h.post(() -> {
-                    singleBusy = false;
-                    busyEnd();
-                    boolean ok = fr.optBoolean("ok", false);
-                    boolean already = fr.optBoolean("already", false);
-                    double reward = fr.optDouble("reward", 0);
-                    boolean rewardKnown = fr.optBoolean("rewardKnown", false);
-                    String msg = fr.optString("message", "");
-                    String sum;
-                    if (!ok) sum = msg.isEmpty() ? "签到失败" : msg;
-                    else if (already) sum = msg.isEmpty() ? "今日已签" : msg;
-                    else sum = rewardKnown && reward > 0 ? ("签到成功 +$" + Ui.usd(reward)) : "签到成功";
-                    store.opLog(sk, key, "签到", ok ? "ok" : "err", sum, "系统令牌 API", "user");
-                    pushLog(store);
-                    if (ok) {
-                        applyCheckinResult(key, fr);
-                    } else {
-                        toast(sum);
-                        applyCheckinResult(key, new JSONObject());   // 刷新三额度核对
-                    }
-                    render();
-                });
-            }).start();
-            return;
-        }
+        /* v1.3.0（用户决策）：令牌只管查询/Key管理，签到一律走原流程。
+         * 原 hasSysToken→systemTokenCheckin 前置分流已移除（Turnstile 站令牌必被挡）。 */
 
-        if (SiteProtocol.isAnyRouter(site) && (accSt == null
-                || (accSt.optString("systemToken", "").isEmpty() && site.optString("systemToken", "").isEmpty()))) {
+        if (SiteProtocol.isAnyRouter(site)) {
             /* v1.3.0：手动签到对 AnyRouter 一律转发重登流程（登出+登入+余额>$15 对照），
              * 不再落到 engine.checkin 的保活分支（那只会“登录保活完成”领不到奖）。 */
             singleBusy = true;

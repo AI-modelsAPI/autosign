@@ -1836,14 +1836,13 @@ public class Engine {
                     continue;
                 }
                 try {
-                    boolean sysTok = hasSystemToken(site, tk);
-                    if (webOnly && !sysTok) {
+                    if (webOnly) {
                         store.appendLog(sKey, key, "cron-skip", "网页手动型站点，需人工操作");
                         store.opLog(sKey, key, "定时签到", "info",
                                 "跳过（该站需网页手动签到）", "", "cron");
-                    } else if (auto || sysTok) {
-                        /* v1.3.0：newapi 站或持令牌账号 → OffscreenCheckin.run（内部对 systemToken
-                         * 短路到 systemTokenCheckin，对 AnyRouter 短路到 anyRouterRelogin）。 */
+                    } else if (auto) {
+                        /* v1.3.0（用户决策）：令牌只管查询/Key管理，签到一律走原流程。
+                         * newapi 站 → OffscreenCheckin.run（内部对 isAnyRouter 短路到重登流程）。 */
                         final CountDownLatch latch = new CountDownLatch(1);
                         final String[] ev = { "cron-checkin-fail" };
                         final String[] dt = { "未返回" };
