@@ -25,11 +25,11 @@ import org.json.JSONObject;
  */
 public class SettingsView extends FrameLayout {
 
-    private static final int PAGE_ROOT = 0, PAGE_SITES = 1, PAGE_CREDS = 2;
+    private static final int PAGE_ROOT = 0, PAGE_SITES = 1, PAGE_CREDS = 2, PAGE_KEYS = 3;
 
     private final MainActivity act;
-    private final LinearLayout rootPage, sitesPage, credsPage;
-    private final LinearLayout rootBody, sitesBody, credsBody;
+    private final LinearLayout rootPage, sitesPage, credsPage, keysPage;
+    private final LinearLayout rootBody, sitesBody, credsBody, keysBody;
     private int page = PAGE_ROOT;
 
     public SettingsView(MainActivity a) {
@@ -62,6 +62,15 @@ public class SettingsView extends FrameLayout {
                 new LinearLayout.LayoutParams(-1, 0, 1f));
         credsPage.setVisibility(GONE);
         addView(credsPage, new LayoutParams(-1, -1));
+
+        keysPage = Ui.col(a);
+        keysBody = Ui.col(a);
+        keysBody.setPadding(Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 24));
+        keysPage.addView(barKeys());
+        keysPage.addView(new ScrollView(a) {{ addView(keysBody); }},
+                new LinearLayout.LayoutParams(-1, 0, 1f));
+        keysPage.setVisibility(GONE);
+        addView(keysPage, new LayoutParams(-1, -1));
     }
 
     /* ================= 顶栏 ================= */
@@ -98,6 +107,14 @@ public class SettingsView extends FrameLayout {
         return bar;
     }
 
+    private View barKeys() {
+        LinearLayout bar = (LinearLayout) bar("密钥管理", true);
+        TextView refresh = Ui.iconBtnText(act, "refresh", "刷新", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        refresh.setOnClickListener(v -> buildKeys());
+        bar.addView(refresh);
+        return bar;
+    }
+
     /* ================= 页面切换 ================= */
 
     private void show(int p) {
@@ -105,11 +122,13 @@ public class SettingsView extends FrameLayout {
         rootPage.setVisibility(p == PAGE_ROOT ? VISIBLE : GONE);
         sitesPage.setVisibility(p == PAGE_SITES ? VISIBLE : GONE);
         credsPage.setVisibility(p == PAGE_CREDS ? VISIBLE : GONE);
+        keysPage.setVisibility(p == PAGE_KEYS ? VISIBLE : GONE);
         refresh();
     }
 
     public void openSites() { show(PAGE_SITES); }
     public void openCredentials() { show(PAGE_CREDS); }
+    public void openKeys() { show(PAGE_KEYS); }
 
     /** 返回键：在子页则回主页并返回 true（拦截）；已在主页返回 false */
     public boolean onBack() {
@@ -121,6 +140,7 @@ public class SettingsView extends FrameLayout {
         UpdateChecker.setListener(() -> post(this::refresh));
         if (page == PAGE_ROOT) buildRoot();
         else if (page == PAGE_SITES) buildSites();
+        else if (page == PAGE_KEYS) buildKeys();
         else buildCreds();
     }
 
@@ -141,6 +161,10 @@ public class SettingsView extends FrameLayout {
         g1.addView(item("server", "站点管理",
                 siteN == 0 ? "未添加站点" : ("已配置 " + siteN + " 个站点"),
                 null, v -> show(PAGE_SITES)));
+        g1.addView(Ui.divider(act, Ui.LINE_SOFT, 16));
+        g1.addView(item("key", "密钥管理",
+                "系统访问令牌与 API Key（按站点·账号）",
+                null, v -> show(PAGE_KEYS)));
         rootBody.addView(g1);
 
         /* --- 网络与自动化 --- */
@@ -629,8 +653,27 @@ public class SettingsView extends FrameLayout {
         EditText[] nOut = new EditText[1], uOut = new EditText[1];
         box.addView(Ui.field(act, "站点名称", "如 JustDoWork", nOut));
         box.addView(Ui.gapH(act, 10));
-        box.addView(Ui.field(act, "API 地址（Base URL）", "https://api.example.com", uOut));
-        uOut[0].setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        box.addView(Ui.tv(act, "API 地址（Base URL）", 11, Ui.SUB, true));
+        LinearLayout urlRow = Ui.row(act);
+        LinearLayout.LayoutParams urlLp = new LinearLayout.LayoutParams(-1, -2);
+        urlLp.topMargin = Ui.dp(act, 5);
+        EditText urlEt = Ui.input(act, "https://api.example.com");
+        urlEt.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        uOut[0] = urlEt;
+        urlRow.addView(urlEt, new LinearLayout.LayoutParams(0, -2, 1f));
+        View urlCopy = Ui.iconBtn(act, "copy", 16, Ui.SUB, 7);
+        urlCopy.setOnClickListener(v -> {
+            String u0 = uOut[0].getText().toString().trim();
+            if (u0.isEmpty()) { act.toast("地址为空"); return; }
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                cm.setText(u0);
+                act.toast("已复制地址");
+            } catch (Exception ignored) {}
+        });
+        urlRow.addView(urlCopy);
+        box.addView(urlRow, urlLp);
         box.addView(Ui.gapH(act, 10));
 
         /* 签到方式单选（三种形态，与 Engine.siteKind 对齐） */
@@ -712,6 +755,292 @@ public class SettingsView extends FrameLayout {
                         buildSites();
                         act.render();
                     } catch (Exception ignored) {}
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    /* ================= 密钥管理页（站点→账号 层级） ================= */
+
+    private void buildKeys() {
+        keysBody.removeAllViews();
+        Store store = new Store(act);
+        JSONArray sites = store.sites();
+
+        if (sites.length() == 0) {
+            keysBody.addView(Ui.tv(act, "还没有站点，请先在站点管理添加", 12, Ui.SUB2));
+            return;
+        }
+
+        for (int i = 0; i < sites.length(); i++) {
+            final JSONObject site = sites.optJSONObject(i);
+            if (site == null) continue;
+
+            LinearLayout card = Ui.col(act);
+            card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+            card.setPadding(Ui.dp(act, 12), Ui.dp(act, 12), Ui.dp(act, 12), Ui.dp(act, 12));
+
+            /* a. 卡头：站点名 + baseUrl（带复制按钮） */
+            card.addView(Ui.tv(act, site.optString("name", site.optString("key")), 15, Ui.TXT, true));
+            LinearLayout urlRow = Ui.row(act);
+            urlRow.setGravity(Gravity.CENTER_VERTICAL);
+            final String cardBase = site.optString("baseUrl", "");
+            TextView urlTv = Ui.tv(act, cardBase, 11, Ui.SUB);
+            urlRow.addView(urlTv, new LinearLayout.LayoutParams(0, -2, 1f));
+            View urlCopy = Ui.iconBtn(act, "copy", 15, Ui.SUB, 4);
+            urlCopy.setOnClickListener(v -> {
+                if (cardBase.isEmpty()) { act.toast("地址为空"); return; }
+                copyText(cardBase, "已复制站点地址");
+            });
+            urlRow.addView(urlCopy);
+            card.addView(urlRow);
+
+            /* b. API Key 区（账号级，遍历每个已授权账号各自独立管理；系统令牌已下沉到各账号区） */
+            card.addView(Ui.gapH(act, 12));
+            card.addView(Ui.divider(act, Ui.LINE_SOFT, 0));
+            card.addView(Ui.gapH(act, 8));
+            card.addView(Ui.tv(act, "API Key（按账号）", 12, Ui.SUB, true));
+
+            JSONArray accs = site.optJSONArray("accounts");
+            int authed = 0;
+            for (int j = 0; accs != null && j < accs.length(); j++) {
+                JSONObject a = accs.optJSONObject(j);
+                if (a == null) continue;
+                if (a.optString("token", "").isEmpty() && a.optString("siteCookie", "").isEmpty()) continue;
+                if (authed > 0) {
+                    card.addView(Ui.gapH(act, 8));
+                    card.addView(Ui.divider(act, Ui.LINE_SOFT, 0));
+                }
+                buildAccountKeySection(card, site, a);
+                authed++;
+            }
+            if (authed == 0) {
+                card.addView(Ui.tv(act, "该站尚无已授权账号，完成授权后可管理 API Key", 11, Ui.SUB2),
+                        lpTop(6));
+            }
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.bottomMargin = Ui.dp(act, 12);
+            keysBody.addView(card, lp);
+        }
+    }
+
+    /* ================= 任务1：API 密钥管理区（搬自 KeyPanel 的完整 CRUD + 多 key 选一测试） ================= */
+
+    /** rawKey 补 sk- 前缀（照 KeyPanel：New API 站点返回的 key 无 sk-）。 */
+    private static String normKey(String rawKey) {
+        if (rawKey == null || rawKey.isEmpty()) return "";
+        return rawKey.startsWith("sk-") ? rawKey : "sk-" + rawKey;
+    }
+
+    private void copyText(String text, String okMsg) {
+        try {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    act.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            cm.setText(text);
+            act.toast(okMsg);
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 按指定账号渲染该账号的 API Key 管理区（获取/刷新列表、新建、每行复制/删除/用此 key 测试模型）。
+     * 从原 buildKeyMgrSection「取站点首个已授权账号」逻辑抽出，参数直接给定 account，
+     * 以支持密钥管理页中多账号各自独立管理。复用 reloadKeyList/keyRow/promptCreateKey/confirmDeleteKey。
+     */
+    private void buildAccountKeySection(LinearLayout box, JSONObject site, JSONObject account) {
+        if (site == null || account == null) return;
+        final String baseUrl = site.optString("baseUrl", "").replaceAll("/+$", "");
+        final String acctKey = account.optString("key", "");
+        final String siteKey = site.optString("key", "");
+        final String alias = account.optString("alias", acctKey);
+        final String siteUserId = account.optString("siteUserId", "");
+
+        TextView who = Ui.tv(act, "账号：" + alias, 12, Ui.TXT2, true);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
+        wlp.topMargin = Ui.dp(act, 6);
+        box.addView(who, wlp);
+
+        /* 系统访问令牌区（账号级，v1.3.0 从站点级下沉；每账号各自一组） */
+        box.addView(Ui.gapH(act, 8));
+        box.addView(Ui.tv(act, "系统访问令牌（可选）", 12, Ui.SUB, true));
+        EditText[] tokOut = new EditText[1], sysUidOut = new EditText[1];
+        box.addView(Ui.gapH(act, 6));
+        box.addView(Ui.field(act, "系统 token（Bearer，可选）", "sk-… 或访问令牌", tokOut));
+        box.addView(Ui.gapH(act, 8));
+        box.addView(Ui.field(act, "系统 token 用户ID（New-Api-User，可选）", "数字 ID", sysUidOut));
+        tokOut[0].setText(account.optString("systemToken", ""));
+        sysUidOut[0].setText(account.optString("systemUserId", ""));
+        box.addView(Ui.gapH(act, 8));
+        TextView saveTok = Ui.iconBtnText(act, "check", "保存令牌", 12, Ui.white(), Ui.BLUE, 14, 8);
+        saveTok.setOnClickListener(v -> {
+            try {
+                JSONObject patch = new JSONObject()
+                        .put("systemToken", tokOut[0].getText().toString().trim())
+                        .put("systemUserId", sysUidOut[0].getText().toString().trim());
+                new Store(act).patchAccount(acctKey, patch);
+                act.toast("已保存系统令牌");
+            } catch (Exception ignored) {}
+        });
+        box.addView(saveTok);
+        box.addView(Ui.tv(act, "填写后该账号的签到/刷新/Key 管理走系统令牌 API，不再走登录流程", 11, Ui.SUB2),
+                lpTop(4));
+
+        /* 操作行：刷新/获取 Key + 新建 Key */
+        box.addView(Ui.gapH(act, 6));
+        LinearLayout opRow = Ui.row(act);
+        opRow.setGravity(Gravity.CENTER_VERTICAL);
+        final LinearLayout listBody = Ui.col(act);
+        final TextView hint = Ui.tv(act, "点「获取 Key」加载该账号的 API Key 列表", 11, Ui.SUB2);
+
+        TextView refreshBtn = Ui.iconBtnText(act, "refresh", "获取/刷新 Key", 12, Ui.BLUE, Ui.BLUE_BG, 12, 8);
+        refreshBtn.setOnClickListener(v -> reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        opRow.addView(refreshBtn);
+        TextView addBtn = Ui.iconBtnText(act, "plus", "+ 新建 Key", 12, Ui.GREEN_D, Ui.GREEN_BG, 12, 8);
+        LinearLayout.LayoutParams albp = new LinearLayout.LayoutParams(-2, -2);
+        albp.leftMargin = Ui.dp(act, 8);
+        addBtn.setOnClickListener(v -> promptCreateKey(acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        opRow.addView(addBtn, albp);
+        box.addView(opRow);
+
+        box.addView(Ui.gapH(act, 6));
+        box.addView(hint);
+        box.addView(listBody);
+    }
+
+    private void reloadKeyList(String acctKey, String siteKey, String baseUrl, String siteUserId,
+                               LinearLayout listBody, TextView hint) {
+        listBody.removeAllViews();
+        hint.setVisibility(View.VISIBLE);
+        hint.setText("正在获取 Key 列表…");
+        new Thread(() -> {
+            String err = "";
+            JSONArray items = new JSONArray();
+            try {
+                items = new Engine(act).tokenList(acctKey).optJSONArray("items");
+                if (items == null) items = new JSONArray();
+            } catch (Exception e) { err = String.valueOf(e.getMessage()); }
+            final JSONArray fItems = items;
+            final String fErr = err;
+            act.runOnUiThread(() -> {
+                if (!fErr.isEmpty()) { hint.setText("获取失败：" + fErr + "（可展开操作日志看诊断）"); return; }
+                if (fItems.length() == 0) { hint.setText("暂无 API Key"); return; }
+                hint.setVisibility(View.GONE);
+                listBody.removeAllViews();
+                long unit = 500000;
+                try { unit = new Store(act).siteMetaLong(siteKey, "quotaPerUnit", 500000); } catch (Exception ignored) {}
+                if (unit <= 0) unit = 500000;
+                for (int i = 0; i < fItems.length(); i++) {
+                    JSONObject t = fItems.optJSONObject(i);
+                    if (t == null) continue;
+                    listBody.addView(keyRow(t, unit, acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+                }
+            });
+        }, "sv-token-list").start();
+    }
+
+    /** 单把 Key 行：名称+状态 | 已用 | 复制 | 删除 | 测试模型；脱敏 key 第二行（照抄 KeyPanel.keyRow）。 */
+    private LinearLayout keyRow(JSONObject t, long unit, String acctKey, String siteKey,
+                                String baseUrl, String siteUserId, LinearLayout listBody, TextView hint) {
+        LinearLayout kbox = Ui.col(act);
+        kbox.setPadding(0, Ui.dp(act, 6), 0, Ui.dp(act, 6));
+        final String name = t.optString("name", "未命名");
+        final String keyStr = normKey(t.optString("key", ""));
+        final long id = t.optLong("id", 0);
+        final int status = t.optInt("status", 1);
+        final boolean enabled = status == 1;
+        double used = t.optDouble("used_quota", 0);
+
+        LinearLayout r1 = Ui.row(act);
+        r1.setGravity(Gravity.CENTER_VERTICAL);
+        TextView nameTv = Ui.tv(act, name, 13, Ui.TXT, true);
+        nameTv.setSingleLine(true);
+        nameTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        r1.addView(nameTv, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView st = Ui.tv(act, enabled ? "● 正常" : "● 已失效", 10, enabled ? Ui.GREEN_D : Ui.RED_D);
+        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(-2, -2);
+        stlp.leftMargin = Ui.dp(act, 6);
+        r1.addView(st, stlp);
+        r1.addView(Ui.tv(act, " 已用 $" + String.format("%.2f", used / unit), 10, Ui.SUB2));
+        View copyBtn = Ui.iconBtn(act, "copy", 16, Ui.BLUE, 3);
+        copyBtn.setOnClickListener(v -> {
+            if (keyStr.isEmpty()) { act.toast("该 Key 无内容"); return; }
+            copyText(keyStr, "已复制 Key 到剪贴板");
+        });
+        r1.addView(copyBtn);
+        View delBtn = Ui.iconBtn(act, "trash", 16, Ui.RED, 3);
+        delBtn.setOnClickListener(v -> confirmDeleteKey(name, id, acctKey, siteKey, baseUrl, siteUserId, listBody, hint));
+        r1.addView(delBtn);
+        kbox.addView(r1);
+
+        /* 脱敏 key 行 */
+        if (!keyStr.isEmpty()) {
+            String masked = keyStr.length() > 8
+                    ? keyStr.substring(0, Math.min(3, keyStr.length())) + "••••••" + keyStr.substring(keyStr.length() - 4)
+                    : keyStr;
+            TextView keyTv = Ui.tv(act, masked, 12, Ui.SUB);
+            keyTv.setTypeface(android.graphics.Typeface.MONOSPACE);
+            keyTv.setBackground(Ui.round(Ui.LINE_SOFT, Ui.dp(act, 4)));
+            keyTv.setPadding(Ui.dp(act, 8), Ui.dp(act, 3), Ui.dp(act, 8), Ui.dp(act, 3));
+            LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(-2, -2);
+            klp.topMargin = Ui.dp(act, 4);
+            kbox.addView(keyTv, klp);
+        }
+
+        if (!enabled) kbox.setAlpha(0.6f);
+        return kbox;
+    }
+
+    private void promptCreateKey(String acctKey, String siteKey, String baseUrl, String siteUserId,
+                                 LinearLayout listBody, TextView hint) {
+        LinearLayout cbox = Ui.col(act);
+        cbox.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        EditText[] nameOut = new EditText[1];
+        cbox.addView(Ui.field(act, "Key 名称（如 Cursor / NextChat）", "我的 Key", nameOut));
+        EditText nameEt = nameOut[0];
+        nameEt.setInputType(InputType.TYPE_CLASS_TEXT);
+        new AlertDialog.Builder(act)
+                .setTitle("新建 API Key")
+                .setView(cbox)
+                .setPositiveButton("创建", (d, w) -> {
+                    String name = nameEt.getText().toString().trim();
+                    if (name.isEmpty()) { act.toast("请输入名称"); return; }
+                    act.toast("正在创建…");
+                    new Thread(() -> {
+                        String err = "";
+                        try { new Engine(act).tokenCreate(acctKey, name); }
+                        catch (Exception e) { err = String.valueOf(e.getMessage()); }
+                        final String fErr = err;
+                        act.runOnUiThread(() -> {
+                            if (!fErr.isEmpty()) { act.toast("创建失败：" + fErr); return; }
+                            act.toast("Key 创建成功");
+                            try { new Store(act).opLog(siteKey, acctKey, "Key 管理", "ok", "新建 API Key", name, "user"); } catch (Exception ignored) {}
+                            reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint);
+                        });
+                    }, "sv-token-create").start();
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void confirmDeleteKey(String name, long id, String acctKey, String siteKey,
+                                  String baseUrl, String siteUserId, LinearLayout listBody, TextView hint) {
+        if (id <= 0) { act.toast("该 Key 无有效 ID，无法删除"); return; }
+        new AlertDialog.Builder(act)
+                .setTitle("删除 API Key")
+                .setMessage("确定删除 Key「" + name + "」吗？\n删除后使用该 Key 的应用将立即失效。")
+                .setPositiveButton("删除", (d, w) -> {
+                    act.toast("正在删除…");
+                    new Thread(() -> {
+                        String err = "";
+                        try { new Engine(act).tokenDelete(acctKey, id); }
+                        catch (Exception e) { err = String.valueOf(e.getMessage()); }
+                        final String fErr = err;
+                        act.runOnUiThread(() -> {
+                            if (!fErr.isEmpty()) { act.toast("删除失败：" + fErr); return; }
+                            act.toast("已删除「" + name + "」");
+                            try { new Store(act).opLog(siteKey, acctKey, "Key 管理", "ok", "删除 API Key", name + " (id=" + id + ")", "user"); } catch (Exception ignored) {}
+                            /* 站点列表接口有短暂延迟，延迟 800ms 再刷（照 KeyPanel.confirmDelete） */
+                            listBody.postDelayed(() -> reloadKeyList(acctKey, siteKey, baseUrl, siteUserId, listBody, hint), 800);
+                        });
+                    }, "sv-token-delete").start();
                 })
                 .setNegativeButton("取消", null).show();
     }

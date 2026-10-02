@@ -56,8 +56,36 @@ public final class OffscreenCheckin {
         final int to = timeoutSec > 0 ? timeoutSec : 100;
         final String trace = Long.toString(System.nanoTime(), 36);
         final Store startStore = new Store(app);
+        /* v1.3.0：系统令牌优先——凡持有 systemToken 的账号（手动/一键/定时任一入口），
+         * 一律先走系统令牌 API 签到，不开 WebView、不走 OAuth/重登。无令牌才落下方原分流。 */
+        if (Engine.hasSystemToken(startStore.findSite(siteKey), startStore.findAccount(accountKey))) {
+            new Thread(() -> {
+                JSONObject r;
+                try { r = new Engine(app).systemTokenCheckin(accountKey); }
+                catch (Exception e) {
+                    r = new JSONObject();
+                    try { r.put("ok", false).put("message", "签到失败: " + e.getMessage()); } catch (Exception ignored) {}
+                }
+                final JSONObject fr = r;
+                new Handler(Looper.getMainLooper()).post(() -> cb.onResult(
+                        fr.optBoolean("ok", false), fr.optBoolean("already", false),
+                        fr.optDouble("reward", 0), fr.optBoolean("rewardKnown", false),
+                        fr.optString("message", "")));
+            }, "systoken-checkin").start();
+            return;
+        }
         if (SiteProtocol.isAnyRouter(startStore.findSite(siteKey))) {
-            AnyRouterCheckin.run(app, siteKey, accountKey, cb);
+            /* AnyRouter 签到 ≡ 重登（CF 逃生梯 L1 后台静默）。起工作线程调 Engine.anyRouterRelogin，
+             * 结果回主线程转成 Callback；needUi 用 message 约定串"需要在应用内重新登录"透传，
+             * 由 MainActivity 据此拉起可见授权(L2)——不改 Callback 接口，减少波及面。 */
+            new Thread(() -> {
+                JSONObject r = new Engine(app).anyRouterRelogin(accountKey);
+                final boolean ok = r.optBoolean("ok", false);
+                final boolean already = r.optBoolean("already", false);
+                final String message = r.optString("message", "");
+                new Handler(Looper.getMainLooper()).post(() ->
+                        cb.onResult(ok, already, 0, false, message));
+            }, "anyrouter-relogin").start();
             return;
         }
         startStore.opLog(siteKey, accountKey, "后台签到V2", "info", "签到链路开始",

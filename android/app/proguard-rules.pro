@@ -7,8 +7,10 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
-# 2. WorkManager Worker：框架通过反射实例化 CheckWorker，类名/构造器不能混淆
--keep class icu.justwoker.justsign.Engine$CheckWorker {
+# 2. WorkManager Worker：框架通过反射实例化 Worker 子类，类名/构造器不能混淆。
+#    统一 keep 所有 ListenableWorker 子类（覆盖 Engine$CheckWorker + AnyRouterWorker + 未来任何 Worker），
+#    否则 R8 strip/rename 后 WorkManager 反射实例化失败 → 定时任务 ClassNotFoundException。
+-keep class * extends androidx.work.ListenableWorker {
     public <init>(...);
 }
 

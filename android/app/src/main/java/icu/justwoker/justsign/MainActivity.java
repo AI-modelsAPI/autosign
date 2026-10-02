@@ -633,11 +633,8 @@ public class MainActivity extends Activity {
         View ovf = Ui.iconBtn(this, "more", 15, Ui.SUB2, 5);
         ovf.setOnClickListener(v -> accountMenu(site, acc));
         r1.addView(ovf);
-        /* v0.6.2：钥匙图标（API Key 入口，UI设计师方案：账号行右端）*/
-        if (authed) {
-            View keyBtn = KeyPanel.build(this, site, acc, box);
-            r1.addView(keyBtn);
-        }
+        /* v0.4.6：账号行钥匙图标入口已移除——API Key 管理搬到「站点编辑弹窗」的
+         * 「API 密钥管理」区（SettingsView.buildKeyMgrSection），不再在账号行重复入口。 */
         box.addView(r1);
 
         /* 行2：可用余额 + 今日签到奖励 */
@@ -696,6 +693,10 @@ public class MainActivity extends Activity {
             r3.addView(Ui.tv(this, todayTxt, 11, todayColor));
             r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
             r3.addView(Ui.tv(this, "累计已用 $" + Ui.usd(st.optDouble("usedUSD", 0)), 11, Ui.SUB));
+            if (st.has("grantedUSD") && !st.isNull("grantedUSD")) {
+                r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
+                r3.addView(Ui.tv(this, "总额 $" + Ui.usd(st.optDouble("grantedUSD", 0)), 11, Ui.SUB));
+            }
         }
         r3.addView(Ui.spring(this));
         TextView logBtn = Ui.textIcon(this, "日志", "chevron", 11, Ui.SUB, true);
@@ -780,6 +781,9 @@ public class MainActivity extends Activity {
         String[] t = list.get(idx);
         final String sk = t[0], ak = t[1], kind = t[2];
         Store store = new Store(this);
+        /* v1.3.0：系统令牌优先——有令牌的账号无论 kind，统一经 OffscreenCheckin.run
+         * （其内部已对 systemToken 短路到 systemTokenCheckin），不进 login 重登/engine.checkin 分支。 */
+        boolean sysTok = Engine.hasSystemToken(store.findSite(sk), store.findAccount(ak));
         {   /* 进度写进忙碌条，带站点/账号名，卡住时能看出卡在谁身上 */
             JSONObject st = store.findSite(sk);
             JSONObject ac = store.findAccount(ak);
@@ -787,7 +791,7 @@ public class MainActivity extends Activity {
                     + (ac == null ? "" : " · " + ac.optString("alias", ""));
             busyUpdate("一键签到 " + (idx + 1) + "/" + list.size() + "：" + who);
         }
-        if ("newapi".equals(kind)) {
+        if ("newapi".equals(kind) || sysTok) {
             OffscreenCheckin.run(this, sk, ak, 100, (ok, already, reward, rewardKnown, msg) -> {
                 String sum;
                 if (!ok) sum = msg;
@@ -1096,7 +1100,54 @@ public class MainActivity extends Activity {
             return;
         }
 
-singleBusy = true;
+        /* v1.3.0：系统令牌前置分流。账号持有 systemToken（或老数据回退站点级）→ 直连系统令牌 API 签到，
+         * 无论 checkinType 为何，不开 WebView、不走 OAuth；无令牌账号走下方原流程一字不动。
+         * AnyRouter 无 systemToken → hasSysToken 为 false，不受影响、恒走 anyRouterRelogin。 */
+        JSONObject accSt = store.findAccount(key);
+        boolean hasSysToken = accSt != null
+                && (!accSt.optString("systemToken", "").isEmpty()
+                    || !site.optString("systemToken", "").isEmpty());
+        if (hasSysToken) {
+            singleBusy = true;
+            if (btn != null) btn.setText("签到中…");
+            busyBegin("正在签到 " + site.optString("name", sk) + "…");
+            LogPopup.autoShow(this);
+            new Thread(() -> {
+                JSONObject r;
+                try {
+                    r = engine.systemTokenCheckin(key);
+                } catch (Exception e) {
+                    r = new JSONObject();
+                    try { r.put("ok", false).put("message", "签到失败: " + e.getMessage()); } catch (Exception ignored) {}
+                }
+                final JSONObject fr = r;
+                h.post(() -> {
+                    singleBusy = false;
+                    busyEnd();
+                    boolean ok = fr.optBoolean("ok", false);
+                    boolean already = fr.optBoolean("already", false);
+                    double reward = fr.optDouble("reward", 0);
+                    boolean rewardKnown = fr.optBoolean("rewardKnown", false);
+                    String msg = fr.optString("message", "");
+                    String sum;
+                    if (!ok) sum = msg.isEmpty() ? "签到失败" : msg;
+                    else if (already) sum = msg.isEmpty() ? "今日已签" : msg;
+                    else sum = rewardKnown && reward > 0 ? ("签到成功 +$" + Ui.usd(reward)) : "签到成功";
+                    store.opLog(sk, key, "签到", ok ? "ok" : "err", sum, "系统令牌 API", "user");
+                    pushLog(store);
+                    if (ok) {
+                        applyCheckinResult(key, fr);
+                    } else {
+                        toast(sum);
+                        applyCheckinResult(key, new JSONObject());   // 刷新三额度核对
+                    }
+                    render();
+                });
+            }).start();
+            return;
+        }
+
+        singleBusy = true;
         if (btn != null) btn.setText("签到中…");
         busyBegin("正在签到 " + site.optString("name", sk) + "…");
         LogPopup.autoShow(this);
@@ -1134,6 +1185,19 @@ singleBusy = true;
                 return;
             }
             final String m = msg == null ? "" : msg;
+            /* CF 逃生梯 L2（可见自动兜底）：AnyRouter 后台静默重登(L1)判定需人机/论坛会话失效时，
+             * anyRouterRelogin 回 needUi 约定串「需要在应用内重新登录」。此处据此自动拉起可见授权
+             * （前台真实 WebView，managed challenge 通常前台无感自动过），复用现有 openAuthActivity +
+             * REQ_AUTH，不新造 UI。授权成功后 onActivityResult 对 AnyRouter 补写签到回执(见该处)。 */
+            if (m.contains("需要在应用内重新登录") && SiteProtocol.isAnyRouter(site)) {
+                JSONObject acc = store.findAccount(key);
+                if (acc != null) {
+                    toast("需要在应用内重新登录，正在打开授权…");
+                    store.opLog(sk, key, "签到", "info", "后台静默重登需人机，转可见授权(L2)", "", "user");
+                    openAuthActivity(sk, key, acc.optString("alias"), acc.optString("credentialId", ""));
+                    return;
+                }
+            }
             /* 弹窗政策（对齐 just 站流程）：刷新和签到一律纯后台，失败绝不弹页。
              * 可见兜底页跑的是同一套 JS，结果必然相同 —— 跳转只会打断用户，
              * 表现为「突然跳出一个页面、等待、最后仍失败」。失败统一：toast 说明
@@ -1683,7 +1747,22 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
                         }
                     } catch (Exception ignored) {}
                 }
-                if (!ak.isEmpty()) refreshOne(ak);
+                if (!ak.isEmpty()) {
+                    /* CF 逃生梯 L2/L3：AnyRouter 经可见 AuthActivity 登录成功 = 领奖。
+                     * 在 refreshOne 之外补写 relogin 回执 + best-effort sign_in（复用
+                     * Engine.anyRouterSignInReceipt），确保可见登录这条也落签到回执，
+                     * 不会判未签重复弹授权页。仅对 AnyRouter 账号执行，不影响其他站。 */
+                    final String fak = ak;
+                    JSONObject accAuth = store.findAccount(fak);
+                    JSONObject siteAuth = store.siteOfAccount(fak);
+                    if (SiteProtocol.isAnyRouter(siteAuth) && accAuth != null) {
+                        new Thread(() -> {
+                            try { new Engine(getApplicationContext()).anyRouterSignInReceipt(fak); }
+                            catch (Exception ignored) {}
+                        }, "anyrouter-auth-receipt").start();
+                    }
+                    refreshOne(ak);
+                }
             } else {
                 String err = data == null ? "" : data.getStringExtra("error");
                 store.opLog("", "", "授权", "err", err == null || err.isEmpty() ? "授权未完成" : err, "", "user");
