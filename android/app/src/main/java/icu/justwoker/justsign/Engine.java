@@ -81,7 +81,13 @@ public class Engine {
         JSONObject r = attempt(url, token, cookie, siteUserId, method, buildClient(useProxy, proxy), jsonBody);
         // A transport failure may have happened AFTER a write reached the server.
         // Never replay writes (including side-effecting GETs), nor evade a 429 by switching exits.
-        if (r == null && useProxy && ReadFallback.allowed(method, path))
+        // v1.3.0（用户实证 SeekAI 令牌签到挂在 127.0.0.1:10808）：代理未连通时，签到/刷新类
+        // 幂等请求(POST /api/user/checkin、GET/POST /api/user/sign_in)也需直连回退——
+        // 原白名单只含只读 GET，令牌签到 POST 不在内，代理一挂就报"网络请求失败"。
+        // 回退判据：ReadFallback.allowed（安全 GET） 或 幂等签到端点(白名单+sign_in/checkin 精确匹配)。
+        boolean checkinLike = ("/api/user/checkin".equals(path) || "/api/user/sign_in".equals(path))
+                && (jsonBody == null || "{}".equals(jsonBody) || jsonBody.isEmpty());
+        if (r == null && useProxy && (ReadFallback.allowed(method, path) || checkinLike))
             r = attempt(url, token, cookie, siteUserId, method, plain, jsonBody);
         if (r == null) throw new Exception("网络请求失败（代理与直连均不可达）"
                 + (lastError.isEmpty() ? "" : ": " + lastError));
@@ -218,10 +224,16 @@ public class Engine {
         }
         /* 只读兜底救不回「已失效的会话」（WAF 归一化 503 / 401 / 403）时，对 linuxdo 站复用论坛会话
          * 静默重建站点会话，成功后重试一次（禁止再次静默避免循环）。仅响应型会话失效信号触发，
-         * 传输层异常（网络断）不触发——WebView 走同一出口也救不了网络问题。 */
+         * 传输层异常（网络断）不触发——WebView 走同一出口也救不了网络问题。
+         * v1.3.0 修复（用户实证「any站签到时保活没修好」）：静默重授权=保活，会把失效会话重建。
+         * 对「登录/重登才发奖」的站（AnyRouter / needsReloginCheckin），今日未签时绝不保活——
+         * 否则会话被永久续着，登出重登领奖的前提被破坏（永远登不出、领不到奖）。
+         * 今日已签后才允许保活（维持会话供查询）。 */
         if (allowReauth && sessionLikelyDead(response, failure)) {
             JSONObject acc = store.findAccount(accountKey);
-            if (acc != null && "linuxdo".equals(SiteProtocol.provider(site, acc))) {
+            boolean rewardSite = SiteProtocol.isAnyRouter(site) || Engine.needsReloginCheckin(site);
+            boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(acc);
+            if (keepAliveOk && acc != null && "linuxdo".equals(SiteProtocol.provider(site, acc))) {
                 int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
                 if (rc == OffscreenReauth.REAUTH_OK) {
                     resetTokenCache();
@@ -950,14 +962,15 @@ public class Engine {
 
         /*
          * v1.1.15 静默重授权自愈（仅 linuxdo 站，一轮刷新最多一次）：
-         * 真机实证——旧会话失效后，原生被 WAF 挡成 503、离屏只读也救不回已过期的会话，
-         * 但用户手动「重新授权」在同节点 ~2s 成功（关键是账号专属分区里 connect.linux.do
-         * 论坛会话仍活着，SPA 复用它直通确认页）。此处把那条路搬到离屏：self 不合法且像
-         * 「会话失效/被拦」（401 或 WAF 归一化的 503）时，尝试 OffscreenReauth 复用论坛会话
-         * 重建站点会话，成功即用新 Cookie 重跑一次 status。论坛会话也失效/需人机验证时
-         * OffscreenReauth 返回 needUi，这里不再重试、按原错误返回，行为不比现状差。
+         * ……（见下）
+         * v1.3.0 修复（用户实证）：静默重授权是「保活」——它会把失效会话重建。
+         * 但对「登录/重登才发奖」的站（AnyRouter / needsReloginCheckin），若今日尚未签到就保活，
+         * 旧会话被永久续着，永远走不到「登出→重登领奖」那一步（用户：没签也保活，永远登不出）。
+         * 因此：仅当「今日已签」后才允许保活式静默重授权；今日未签的发奖站不保活，留给重登流程登出。
          */
-        if (allowSilentReauth
+        boolean rewardSite = SiteProtocol.isAnyRouter(site) || Engine.needsReloginCheckin(site);
+        boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(tk);
+        if (allowSilentReauth && keepAliveOk
                 && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
                 && "linuxdo".equals(SiteProtocol.provider(site, tk))
                 && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503

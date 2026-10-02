@@ -840,6 +840,13 @@ public class Store {
                 a.put(e);
                 while (a.length() > OPLOG_MAX) a.remove(0);
                 sp.edit().putString("opLogs", a.toString()).commit();
+                /* v1.3.0 诊断：同时镜像到 logcat（TAG=JUSTSIGN_OPLOG），
+                 * 便于用 adb/Shizuku logcat 读取运行日志（SharedPreferences 私有目录读不到）。
+                 * 只记已脱敏的 summary/detail，不含令牌/cookie 原文。 */
+                android.util.Log.i("JUSTSIGN_OPLOG", "[" + (siteKey == null ? "" : siteKey) + "/"
+                        + (accountKey == null ? "" : accountKey) + "] [" + action + "] " + level
+                        + " | " + summary + " | " + (detail == null ? "" : detail)
+                        + " | src=" + source);
             } catch (Exception ignored) {}
         }
     }

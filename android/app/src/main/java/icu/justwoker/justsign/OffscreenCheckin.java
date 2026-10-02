@@ -58,7 +58,19 @@ public final class OffscreenCheckin {
         final Store startStore = new Store(app);
         /* v1.3.0：系统令牌优先——凡持有 systemToken 的账号（手动/一键/定时任一入口），
          * 一律先走系统令牌 API 签到，不开 WebView、不走 OAuth/重登。无令牌才落下方原分流。 */
-        if (Engine.hasSystemToken(startStore.findSite(siteKey), startStore.findAccount(accountKey))) {
+        JSONObject diagSite = startStore.findSite(siteKey);
+        JSONObject diagAcc = startStore.findAccount(accountKey);
+        /* 决定性诊断：把"是否检出系统令牌"直接写进日志（只记布尔+长度，不记令牌值），
+         * 便于确认签到到底走了哪条路——避免"存了却没走令牌"这类问题只能靠猜。 */
+        {
+            String at = diagAcc == null ? "" : diagAcc.optString("systemToken", "").trim();
+            String stt = diagSite == null ? "" : diagSite.optString("systemToken", "").trim();
+            startStore.opLog(siteKey, accountKey, "签到分流", "info",
+                    Engine.hasSystemToken(diagSite, diagAcc) ? "检出系统令牌→走令牌API" : "无系统令牌→走原流程",
+                    "acctTokenLen=" + at.length() + "；siteTokenLen=" + stt.length()
+                            + "；acc=" + (diagAcc != null) + "；site=" + (diagSite != null), "auto");
+        }
+        if (Engine.hasSystemToken(diagSite, diagAcc)) {
             new Thread(() -> {
                 JSONObject r;
                 try { r = new Engine(app).systemTokenCheckin(accountKey); }

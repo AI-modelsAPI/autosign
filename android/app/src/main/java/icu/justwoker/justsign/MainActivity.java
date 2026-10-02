@@ -1147,6 +1147,50 @@ public class MainActivity extends Activity {
             return;
         }
 
+        if (SiteProtocol.isAnyRouter(site) && (accSt == null
+                || (accSt.optString("systemToken", "").isEmpty() && site.optString("systemToken", "").isEmpty()))) {
+            /* v1.3.0：手动签到对 AnyRouter 一律转发重登流程（登出+登入+余额>$15 对照），
+             * 不再落到 engine.checkin 的保活分支（那只会“登录保活完成”领不到奖）。 */
+            singleBusy = true;
+            if (btn != null) btn.setText("签到中…");
+            busyBegin("正在签到 " + site.optString("name", sk) + "…");
+            LogPopup.autoShow(this);
+            new Thread(() -> {
+                JSONObject r;
+                try { r = engine.anyRouterRelogin(key); }
+                catch (Exception e) {
+                    r = new JSONObject();
+                    try { r.put("ok", false).put("message", "签到失败: " + e.getMessage()); } catch (Exception ignored) {}
+                }
+                final JSONObject fr = r;
+                h.post(() -> {
+                    singleBusy = false; busyEnd();
+                    boolean ok = fr.optBoolean("ok", false);
+                    boolean already = fr.optBoolean("already", false);
+                    double reward = fr.optDouble("reward", 0);
+                    boolean rewardKnown = fr.optBoolean("rewardKnown", false);
+                    String msg = fr.optString("message", "");
+                    String sum;
+                    if (!ok) sum = msg.isEmpty() ? "签到失败" : msg;
+                    else if (already) sum = msg.isEmpty() ? "今日已签" : msg;
+                    else sum = rewardKnown && reward > 0 ? ("签到成功 +$" + Ui.usd(reward)) : "签到成功";
+                    store.opLog(sk, key, "签到", ok ? "ok" : "err", sum, "重登流程", "user");
+                    pushLog(store);
+                    if (ok) {
+                        JSONObject rr = new JSONObject();
+                        try { rr.put("ok", true).put("already", already).put("reward", reward)
+                                .put("rewardKnown", rewardKnown).put("message", msg); } catch (Exception ignored) {}
+                        applyCheckinResult(key, rr);
+                    } else {
+                        toast(sum);
+                        applyCheckinResult(key, new JSONObject());
+                    }
+                    render();
+                });
+            }).start();
+            return;
+        }
+
         singleBusy = true;
         if (btn != null) btn.setText("签到中…");
         busyBegin("正在签到 " + site.optString("name", sk) + "…");
