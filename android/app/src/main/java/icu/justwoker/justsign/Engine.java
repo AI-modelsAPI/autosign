@@ -248,13 +248,17 @@ public class Engine {
         String cookie = acc == null ? "" : clean(acc.optString("siteCookie", ""));
         String siteUserId = acc == null ? "" : clean(acc.optString("siteUserId", ""));
 
-        /* 功能1+2：站点级「系统 token」分流。用户在站点编辑里填了 systemToken，
-         * 则该站所有业务请求直接用它当 Bearer（systemUserId 非空时作 New-Api-User），
-         * 旁路 refresh-cookie 续期链与 401 再换 token。systemToken 为空时下面原逻辑一字不动。 */
-        String sysToken = site == null ? "" : clean(site.optString("systemToken", ""));
+        /* 功能1+2：「系统 token」分流（v1.3.0 迁账号级）。用户在账号的系统令牌区填了 systemToken，
+         * 则该账号所有业务请求直接用它当 Bearer（systemUserId 非空时作 New-Api-User），
+         * 旁路 refresh-cookie 续期链与 401 再换 token。
+         * 老数据兼容：账号未填时回退读站点级 site.systemToken（site 只读，不再写）。
+         * systemToken 为空时下面原逻辑一字不动。 */
+        String sysToken = acc == null ? "" : clean(acc.optString("systemToken", ""));
+        if (sysToken.isEmpty()) sysToken = site == null ? "" : clean(site.optString("systemToken", ""));
         if (!sysToken.isEmpty()) {
             token = sysToken;
-            String sysUid = site == null ? "" : clean(site.optString("systemUserId", ""));
+            String sysUid = acc == null ? "" : clean(acc.optString("systemUserId", ""));
+            if (sysUid.isEmpty()) sysUid = site == null ? "" : clean(site.optString("systemUserId", ""));
             if (!sysUid.isEmpty()) siteUserId = sysUid;   // 否则沿用账号 siteUserId
             return call(site, token, cookie, siteUserId, method, path, jsonBody);
         }
@@ -546,31 +550,6 @@ public class Engine {
         return buildClient(proxy != null && proxy.optBoolean("enabled"), proxy);
     }
 
-    /**
-     * 诊断类请求执行（模型获取/测试用）：优先走配置的代理，代理不通时自动回退直连（plain）。
-     * 修复：原来直接 buildClientFromConfig().newCall() 单次执行——代理开启但未连通时，
-     * OkHttp 抛「failed to connect to /127.0.0.1:10808」，toast 原样显示该内网地址，
-     * 误导用户以为站点 URL 写错。这些端点（/api/user/models、/v1/chat/completions）都是
-     * 幂等/只读的连通性探测，直连回退安全。timeoutSec 同时作读/连超时。
-     */
-    private Response execDiag(Request req, int timeoutSec) throws Exception {
-        JSONObject proxy = store.config().optJSONObject("proxy");
-        boolean useProxy = proxy != null && proxy.optBoolean("enabled");
-        OkHttpClient base = buildClient(useProxy, proxy).newBuilder()
-                .readTimeout(timeoutSec, TimeUnit.SECONDS)
-                .connectTimeout(timeoutSec, TimeUnit.SECONDS).build();
-        try {
-            return base.newCall(req).execute();
-        } catch (Exception e) {
-            if (!useProxy) throw e;   // 本就直连，无回退可做
-            /* 代理不可达 → 直连重试一次。保留原异常信息到 lastError 便于诊断。 */
-            lastError = "proxy-failed:" + e.getClass().getSimpleName();
-            OkHttpClient direct = plain.newBuilder()
-                    .readTimeout(timeoutSec, TimeUnit.SECONDS)
-                    .connectTimeout(timeoutSec, TimeUnit.SECONDS).build();
-            return direct.newCall(req).execute();
-        }
-    }
     private static String clean(String value) {
         return value == null || "null".equals(value) ? "" : value;
     }
@@ -1167,109 +1146,6 @@ public class Engine {
      */
     /* ================= 功能5：获取模型 + 模型测试 ================= */
 
-    /**
-     * 功能5：拉取站点可用模型名列表。GET baseUrl + /api/user/models。
-     * bearer 可空（匿名站可不带 Authorization），newApiUser 可空（有则带 New-Api-User）。
-     * 独立 OkHttp（复用 buildClientFromConfig，带代理）；信封多形态容错：
-     * data 直接是数组 / data.data 是数组 / data.items / data.records；元素为字符串或
-     * {id|name} 对象。返回模型名 JSONArray（可能为空）。
-     */
-    public org.json.JSONArray fetchModels(String baseUrl, String bearer, String newApiUser) throws Exception {
-        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
-        if (base.isEmpty() || !base.startsWith("http")) throw new Exception("API 地址无效");
-        Request.Builder rb = new Request.Builder().url(base + "/api/user/models")
-                .header("User-Agent", UA)
-                .header("Accept", "application/json, text/plain, */*")
-                .get();
-        String bb = clean(bearer == null ? "" : bearer);
-        if (!bb.isEmpty()) rb.header("Authorization", "Bearer " + bb);
-        String uid = clean(newApiUser == null ? "" : newApiUser);
-        if (!uid.isEmpty()) rb.header("New-Api-User", uid);
-        Response resp = null;
-        try {
-            resp = execDiag(rb.build(), 15);
-            int http = resp.code();
-            String body = resp.body() == null ? "" : resp.body().string();
-            if (http != 200) throw new Exception("站点返回 HTTP " + http);
-            JSONObject json;
-            try { json = new JSONObject(body); } catch (Exception e) { json = new JSONObject(); }
-            /* 定位模型数组：data 直数组 / data.data / data.items / data.records / 顶层 data=array */
-            org.json.JSONArray arr = null;
-            Object dataObj = json.opt("data");
-            if (dataObj instanceof org.json.JSONArray) {
-                arr = (org.json.JSONArray) dataObj;
-            } else if (dataObj instanceof JSONObject) {
-                JSONObject d = (JSONObject) dataObj;
-                if (d.opt("data") instanceof org.json.JSONArray) arr = d.optJSONArray("data");
-                else if (d.opt("items") instanceof org.json.JSONArray) arr = d.optJSONArray("items");
-                else if (d.opt("records") instanceof org.json.JSONArray) arr = d.optJSONArray("records");
-            }
-            if (arr == null && json.opt("items") instanceof org.json.JSONArray) arr = json.optJSONArray("items");
-            if (arr == null) throw new Exception("响应无模型列表字段");
-            org.json.JSONArray names = new org.json.JSONArray();
-            for (int i = 0; i < arr.length(); i++) {
-                Object el = arr.opt(i);
-                String name = "";
-                if (el instanceof String) name = (String) el;
-                else if (el instanceof JSONObject) {
-                    JSONObject o = (JSONObject) el;
-                    name = o.optString("id", o.optString("model", o.optString("name", "")));
-                }
-                if (name != null && !name.trim().isEmpty()) names.put(name.trim());
-            }
-            return names;
-        } finally {
-            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
-        }
-    }
-
-    /**
-     * 功能5：对单个模型跑连通性测试。POST baseUrl + /v1/chat/completions（OpenAI 兼容端点）。
-     * 请求头仅 Authorization: Bearer <apiKey>——绝不带 Cookie / New-Api-User，避免污染会话。
-     * body {"model":...,"messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}。
-     * 独立 OkHttp（复用 buildClientFromConfig，带代理），15s 读超时。
-     * 返回 {ok, http, message}：2xx 且无 error 即 ok=true；否则 message 取 error.message 或 HTTP 码。
-     */
-    public JSONObject testModel(String baseUrl, String apiKey, String model) throws Exception {
-        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
-        if (base.isEmpty() || !base.startsWith("http")) throw new Exception("API 地址无效");
-        String key = clean(apiKey == null ? "" : apiKey);
-        if (key.isEmpty()) throw new Exception("API Key 为空");
-        String m = model == null ? "" : model.trim();
-        if (m.isEmpty()) throw new Exception("模型名为空");
-        String payload = new JSONObject()
-                .put("model", m)
-                .put("messages", new org.json.JSONArray()
-                        .put(new JSONObject().put("role", "user").put("content", "hi")))
-                .put("max_tokens", 1)
-                .put("stream", false)
-                .toString();
-        /* 独立 15s 客户端，带代理不通→直连回退（execDiag）；避免 toast 只报 socks 127.0.0.1:xxxx 连接失败 */
-        Request req = new Request.Builder().url(base + "/v1/chat/completions")
-                .header("User-Agent", UA)
-                .header("Accept", "application/json, text/plain, */*")
-                .header("Authorization", "Bearer " + key)   // 仅此一个鉴权头，无 Cookie / New-Api-User
-                .post(RequestBody.create(payload, MediaType.parse("application/json")))
-                .build();
-        Response resp = null;
-        try {
-            resp = execDiag(req, 15);
-            int http = resp.code();
-            String body = resp.body() == null ? "" : resp.body().string();
-            JSONObject json;
-            try { json = new JSONObject(body); } catch (Exception e) { json = new JSONObject(); }
-            String errMsg = "";
-            Object errObj = json.opt("error");
-            if (errObj instanceof JSONObject) errMsg = ((JSONObject) errObj).optString("message", "");
-            else if (errObj instanceof String) errMsg = (String) errObj;
-            boolean ok = http >= 200 && http < 300 && errMsg.isEmpty();
-            return new JSONObject().put("ok", ok).put("http", http)
-                    .put("message", ok ? "可用" : (errMsg.isEmpty() ? ("HTTP " + http) : errMsg));
-        } finally {
-            if (resp != null) try { resp.close(); } catch (Exception ignored) {}
-        }
-    }
-
     public JSONObject tokenList(String key) throws Exception {
         JSONObject acc = store.findAccount(key);
         if (acc == null) throw new Exception("账号不存在");
@@ -1407,6 +1283,57 @@ public class Engine {
                 .put("checkedDate", today);
     }
 
+    /**
+     * v1.3.0：系统令牌直连签到。POST /api/user/checkin（Bearer 由 callWithAuthNative 分流自动带）。
+     * 仅在账号持有 systemToken（或老数据回退站点级）时调用，有令牌不回退 WebView，失败如实报错。
+     * 返回 {ok, already, reward, rewardKnown, message}。
+     */
+    /** 账号是否持有系统令牌（账号级优先，老数据回退站点级）——有则签到/查询/一键/定时一律先走系统令牌 API。 */
+    public static boolean hasSystemToken(JSONObject site, JSONObject acc) {
+        if (acc != null && !acc.optString("systemToken", "").trim().isEmpty()) return true;
+        return site != null && !site.optString("systemToken", "").trim().isEmpty();
+    }
+
+    public JSONObject systemTokenCheckin(String accountKey) throws Exception {
+        JSONObject acc = store.findAccount(accountKey);
+        JSONObject site = store.siteOfAccount(accountKey);
+        if (acc == null || site == null) throw new Exception("账号或站点不存在");
+        /* 校验令牌：账号优先、站点回退（与 callWithAuthNative 分流读取口径一致） */
+        String sysToken = clean(acc.optString("systemToken", ""));
+        if (sysToken.isEmpty()) sysToken = clean(site.optString("systemToken", ""));
+        if (sysToken.isEmpty()) {
+            return new JSONObject().put("ok", false).put("already", false)
+                    .put("rewardKnown", false).put("message", "无系统令牌");
+        }
+        synchronized (opLock(accountKey)) {
+            JSONObject r = callWithAuth(site, accountKey, "POST", "/api/user/checkin", "{}");
+            int http = r.optInt("http");
+            JSONObject d = dd(r);
+            String msg = d == null ? "" : d.optString("message", "");
+            boolean success = d != null && d.optBoolean("success", false);
+            String lower = msg == null ? "" : msg.toLowerCase(java.util.Locale.US);
+            boolean already = lower.contains("今日已签") || lower.contains("已签到")
+                    || lower.contains("already checked") || lower.contains("already");
+            if (http == 200 && (success || already)) {
+                /* 成功/已签：尽量带出今日奖励金额（拿不到则 rewardKnown=false）落 lastCheckin */
+                double reward = 0;
+                boolean rewardKnown = false;
+                try {
+                    long unit = store.siteMetaLong(site.optString("key", ""), "quotaPerUnit", QUOTA_PER_UNIT_DEFAULT);
+                    JSONObject cs = checkinStatus(accountKey, unit);
+                    if (cs != null) { reward = cs.optDouble("rewardUSD", 0); rewardKnown = cs.optBoolean("rewardKnown", false); }
+                } catch (Exception ignored) {}
+                markChecked(accountKey, reward, rewardKnown);
+                return new JSONObject().put("ok", true).put("already", already)
+                        .put("reward", reward).put("rewardKnown", rewardKnown)
+                        .put("message", already ? (msg.isEmpty() ? "今日已签到" : msg)
+                                : (rewardKnown && reward > 0 ? "签到成功" : (msg.isEmpty() ? "签到成功" : msg)));
+            }
+            return new JSONObject().put("ok", false).put("already", false).put("rewardKnown", false)
+                    .put("message", !msg.isEmpty() ? msg : httpHint(http));
+        }
+    }
+
     public JSONObject checkin(String key) throws Exception {
         synchronized (opLock(key)) { return checkinLocked(key); }
     }
@@ -1518,16 +1445,56 @@ public class Engine {
                 return out.put("ok", true).put("already", true).put("needUi", false)
                         .put("message", "本周期已签到(金额未知)");
             }
+            final String sKey = site.optString("key", "");
+
+            /* 真实到账判据（用户实证）：AnyRouter 必须「登出→重登」才发奖，奖励直接到账；
+             * sign_in 响应不可靠。成功 = 登入对照(REAUTH_OK) + 余额增量 > $15
+             * （阈值取 15 而非 25：签到时可能正在用服务消耗余额）。登出对照记入日志。 */
+            double before = anyRouterBalance(accountKey, false);   // 签到前余额（缓存优先）
+
+            /* 1. 登出对照：真实服务端注销确认（CONFIRMED/ABSENT 为确认登出）。 */
+            int lo = logoutSession(accountKey);
+            boolean loggedOut = lo == ReauthManager.CONFIRMED || lo == ReauthManager.ABSENT;
+            store.opLog(sKey, accountKey, "AnyRouter重登", "info",
+                    loggedOut ? "登出已确认" : "登出未确认(" + ReauthManager.describe(lo) + ")",
+                    "code=" + lo + "；oauth=false", "auto");
+
+            /* 2. 登入对照：OffscreenReauth 复用论坛会话重建站点会话（身份 id 校验 + 抓新 cookie）。 */
             int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
-            if (rc == OffscreenReauth.REAUTH_OK) {
-                /* 重登成功=已领奖。补发 sign_in + 写 relogin 回执（抽成 anyRouterSignInReceipt 复用）。 */
-                anyRouterSignInReceipt(accountKey);
-                return out.put("ok", true).put("already", false).put("needUi", false)
-                        .put("message", "重登成功，已领取(金额未知)");
+            if (rc != OffscreenReauth.REAUTH_OK) {
+                /* 论坛会话也失效或需人机 → 可见授权(L2)。登出已执行，不写回执。 */
+                return out.put("ok", false).put("already", false).put("needUi", true)
+                        .put("message", "需要在应用内重新登录");
             }
-            /* REAUTH_NEEDS_UI / REAUTH_SKIP：论坛会话也失效或需人机，须可见授权(L2)。 */
-            return out.put("ok", false).put("already", false).put("needUi", true)
-                    .put("message", "需要在应用内重新登录");
+
+            /* 3. 补发 sign_in（best-effort，不作判据）。 */
+            anyRouterPostSignIn(accountKey);
+
+            /* 4. 签到后余额（强制 fresh 读），对比增量。 */
+            double after = anyRouterBalance(accountKey, true);
+            double delta = (before >= 0 && after >= 0) ? (after - before) : -999;
+            boolean credited = delta > 15;
+
+            store.opLog(sKey, accountKey, "AnyRouter重登", credited ? "ok" : "warn",
+                    credited ? ("重登到账 +$" + Ui.usd(Ui.round2(delta)))
+                             : "重登完成但未检测到≥$15 到账",
+                    "before=" + before + "；after=" + after + "；delta=" + delta
+                            + "；loggedOut=" + loggedOut + "；oauth=false", "user");
+
+            if (credited) {
+                /* 确认到账才写回执（避免把未到账误标为今日已签）。 */
+                anyRouterWriteReceipt(accountKey);
+                return out.put("ok", true).put("already", false).put("needUi", false)
+                        .put("reward", Ui.round2(delta)).put("rewardKnown", true)
+                        .put("message", "重登成功，+$" + Ui.usd(Ui.round2(delta)) + " 已到账"
+                                + (loggedOut ? "" : "（登出未确认）"));
+            }
+            /* 未检测到到账：不写回执，提示刷新核对。 */
+            String why = (before < 0 || after < 0)
+                    ? "余额读取失败，无法确认到账"
+                    : ("余额增量 $" + Ui.usd(Ui.round2(delta < -900 ? 0 : delta)) + " 未达 $15，可能今日已领或正被消耗");
+            return out.put("ok", false).put("already", false).put("needUi", false)
+                    .put("message", "已重登（登出" + (loggedOut ? "确认" : "未确认") + "），" + why + "，请刷新核对");
         } catch (Exception e) {
             try {
                 return out.put("ok", false).put("already", false).put("needUi", true)
@@ -1536,41 +1503,59 @@ public class Engine {
         }
     }
 
-    /**
-     * AnyRouter 登录成功后的「领奖落账」子逻辑（best-effort 原生 sign_in + 写 relogin 回执）。
-     * 供两条路径复用：anyRouterRelogin（L1 离屏静默重登成功后）、
-     * MainActivity 可见授权成功后（L2/L3，确保可见登录这条也=领奖、落签到回执，不重复弹）。
-     * siteCookie 已由重登/授权流程更新，这里勿覆盖。失败不致命（仅记日志）。
-     */
-    public void anyRouterSignInReceipt(String accountKey) {
+    /** AnyRouter 当前可用余额(USD)。fresh=false 时优先用卡片缓存 lastStatus，避免多余请求；取不到或 fresh 时拉一次 status。读不到返回 -1。 */
+    private double anyRouterBalance(String accountKey, boolean fresh) {
+        if (!fresh) {
+            JSONObject acc = store.findAccount(accountKey);
+            JSONObject ls = acc == null ? null : acc.optJSONObject("lastStatus");
+            if (ls != null && ls.optBoolean("ok")) {
+                double v = ls.optDouble("availableUSD", -1);
+                if (v >= 0) return v;
+            }
+        }
+        try {
+            JSONObject st = status(accountKey);
+            if (st != null && st.optBoolean("ok")) return st.optDouble("availableUSD", -1);
+        } catch (Exception ignored) {}
+        return -1;
+    }
+
+    /** best-effort 原生 POST /api/user/sign_in（带 Cookie+New-Api-User）；仅日志，不作成功判据。 */
+    private boolean anyRouterPostSignIn(String accountKey) {
         try {
             JSONObject site = store.siteOfAccount(accountKey);
-            JSONObject acc2 = store.findAccount(accountKey);
-            if (!SiteProtocol.isAnyRouter(site) || acc2 == null) return;
-            String siteKey = site.optString("key", "");
+            JSONObject acc = store.findAccount(accountKey);
+            if (site == null || acc == null) return false;
+            JSONObject r = call(site, null, acc.optString("siteCookie", ""),
+                    acc.optString("siteUserId", ""), "POST", "/api/user/sign_in", "{}");
+            JSONObject d = dd(r);
+            boolean ok = r.optInt("http") == 200 && d.optBoolean("success", true);
+            store.opLog(site.optString("key"), accountKey, "AnyRouter重登", "info",
+                    ok ? "sign_in 已发送" : "sign_in 未确认", "http=" + r.optInt("http"), "auto");
+            return ok;
+        } catch (Exception e) { return false; }
+    }
+
+    /** 写 AnyRouter 当周期签到回执（lastCheckin{source:relogin}+lastLogin）；siteCookie 由重登流程更新，勿覆盖。 */
+    private void anyRouterWriteReceipt(String accountKey) {
+        try {
             long now = System.currentTimeMillis();
-            try {
-                JSONObject r = call(site, null, acc2.optString("siteCookie", ""),
-                        acc2.optString("siteUserId", ""), "POST", "/api/user/sign_in", "{}");
-                JSONObject d = dd(r);
-                boolean success = r.optInt("http") == 200 && d.optBoolean("success", true);
-                String sm = d.optString("message", r.optString("message", ""));
-                store.opLog(siteKey, accountKey, "AnyRouter重登", "info",
-                        success ? "重登后 sign_in 已发送" : "重登后 sign_in 未确认",
-                        "http=" + r.optInt("http") + "；" + sm, "auto");
-            } catch (Exception ignored) {
-                store.opLog(siteKey, accountKey, "AnyRouter重登", "info",
-                        "重登成功；补发 sign_in 失败（不致命）", "oauth=false", "auto");
-            }
-            try {
-                JSONObject lc = new JSONObject()
-                        .put("date", SiteProtocol.rewardDate(now))
-                        .put("time", now)
-                        .put("source", "relogin");
-                store.patchAccount(accountKey, new JSONObject()
-                        .put("lastCheckin", lc).put("lastLogin", now));
-            } catch (Exception ignored) {}
+            JSONObject lc = new JSONObject()
+                    .put("date", SiteProtocol.rewardDate(now))
+                    .put("time", now)
+                    .put("source", "relogin");
+            store.patchAccount(accountKey, new JSONObject().put("lastCheckin", lc).put("lastLogin", now));
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * AnyRouter 可见授权成功后的「领奖落账」子逻辑（best-effort sign_in + 写回执）。
+     * 供 MainActivity 可见授权成功(L2/L3)路径复用——可见登录即视为已签。
+     * （L1 后台重登主路径不走这里，而是在 anyRouterRelogin 内按余额增量判据决定是否写回执。）
+     */
+    public void anyRouterSignInReceipt(String accountKey) {
+        anyRouterPostSignIn(accountKey);
+        anyRouterWriteReceipt(accountKey);
     }
 
     private double todayUsage(JSONObject site, String accountKey, long unit) {
@@ -1838,11 +1823,14 @@ public class Engine {
                     continue;
                 }
                 try {
-                    if (webOnly) {
+                    boolean sysTok = hasSystemToken(site, tk);
+                    if (webOnly && !sysTok) {
                         store.appendLog(sKey, key, "cron-skip", "网页手动型站点，需人工操作");
                         store.opLog(sKey, key, "定时签到", "info",
                                 "跳过（该站需网页手动签到）", "", "cron");
-                    } else if (auto) {
+                    } else if (auto || sysTok) {
+                        /* v1.3.0：newapi 站或持令牌账号 → OffscreenCheckin.run（内部对 systemToken
+                         * 短路到 systemTokenCheckin，对 AnyRouter 短路到 anyRouterRelogin）。 */
                         final CountDownLatch latch = new CountDownLatch(1);
                         final String[] ev = { "cron-checkin-fail" };
                         final String[] dt = { "未返回" };

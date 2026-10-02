@@ -779,35 +779,22 @@ public class SettingsView extends FrameLayout {
             card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
             card.setPadding(Ui.dp(act, 12), Ui.dp(act, 12), Ui.dp(act, 12), Ui.dp(act, 12));
 
-            /* a. 卡头：站点名 + baseUrl */
+            /* a. 卡头：站点名 + baseUrl（带复制按钮） */
             card.addView(Ui.tv(act, site.optString("name", site.optString("key")), 15, Ui.TXT, true));
-            card.addView(Ui.tv(act, site.optString("baseUrl", ""), 11, Ui.SUB));
-
-            /* b. 系统访问令牌区（站点级） */
-            card.addView(Ui.gapH(act, 12));
-            card.addView(Ui.tv(act, "系统访问令牌", 12, Ui.SUB, true));
-            EditText[] tokOut = new EditText[1], sysUidOut = new EditText[1];
-            card.addView(Ui.gapH(act, 6));
-            card.addView(Ui.field(act, "系统 token（Bearer，可选）", "sk-… 或访问令牌", tokOut));
-            card.addView(Ui.gapH(act, 8));
-            card.addView(Ui.field(act, "系统 token 用户ID（New-Api-User，可选）", "数字 ID", sysUidOut));
-            tokOut[0].setText(site.optString("systemToken", ""));
-            sysUidOut[0].setText(site.optString("systemUserId", ""));
-            card.addView(Ui.gapH(act, 8));
-            TextView saveTok = Ui.iconBtnText(act, "check", "保存令牌", 12, Ui.white(), Ui.BLUE, 14, 8);
-            saveTok.setOnClickListener(v -> {
-                try {
-                    site.put("systemToken", tokOut[0].getText().toString().trim());
-                    site.put("systemUserId", sysUidOut[0].getText().toString().trim());
-                    new Store(act).upsertSite(site);
-                    act.toast("已保存系统令牌");
-                } catch (Exception ignored) {}
+            LinearLayout urlRow = Ui.row(act);
+            urlRow.setGravity(Gravity.CENTER_VERTICAL);
+            final String cardBase = site.optString("baseUrl", "");
+            TextView urlTv = Ui.tv(act, cardBase, 11, Ui.SUB);
+            urlRow.addView(urlTv, new LinearLayout.LayoutParams(0, -2, 1f));
+            View urlCopy = Ui.iconBtn(act, "copy", 15, Ui.SUB, 4);
+            urlCopy.setOnClickListener(v -> {
+                if (cardBase.isEmpty()) { act.toast("地址为空"); return; }
+                copyText(cardBase, "已复制站点地址");
             });
-            card.addView(saveTok);
-            card.addView(Ui.tv(act, "留空走原登录流程；填写后该站签到/查询用它作 Bearer", 11, Ui.SUB2),
-                    lpTop(4));
+            urlRow.addView(urlCopy);
+            card.addView(urlRow);
 
-            /* c. API Key 区（账号级，遍历每个已授权账号各自独立管理） */
+            /* b. API Key 区（账号级，遍历每个已授权账号各自独立管理；系统令牌已下沉到各账号区） */
             card.addView(Ui.gapH(act, 12));
             card.addView(Ui.divider(act, Ui.LINE_SOFT, 0));
             card.addView(Ui.gapH(act, 8));
@@ -857,7 +844,7 @@ public class SettingsView extends FrameLayout {
     /**
      * 按指定账号渲染该账号的 API Key 管理区（获取/刷新列表、新建、每行复制/删除/用此 key 测试模型）。
      * 从原 buildKeyMgrSection「取站点首个已授权账号」逻辑抽出，参数直接给定 account，
-     * 以支持密钥管理页中多账号各自独立管理。复用 reloadKeyList/keyRow/testWithKey/promptCreateKey/confirmDeleteKey。
+     * 以支持密钥管理页中多账号各自独立管理。复用 reloadKeyList/keyRow/promptCreateKey/confirmDeleteKey。
      */
     private void buildAccountKeySection(LinearLayout box, JSONObject site, JSONObject account) {
         if (site == null || account == null) return;
@@ -871,6 +858,31 @@ public class SettingsView extends FrameLayout {
         LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
         wlp.topMargin = Ui.dp(act, 6);
         box.addView(who, wlp);
+
+        /* 系统访问令牌区（账号级，v1.3.0 从站点级下沉；每账号各自一组） */
+        box.addView(Ui.gapH(act, 8));
+        box.addView(Ui.tv(act, "系统访问令牌（可选）", 12, Ui.SUB, true));
+        EditText[] tokOut = new EditText[1], sysUidOut = new EditText[1];
+        box.addView(Ui.gapH(act, 6));
+        box.addView(Ui.field(act, "系统 token（Bearer，可选）", "sk-… 或访问令牌", tokOut));
+        box.addView(Ui.gapH(act, 8));
+        box.addView(Ui.field(act, "系统 token 用户ID（New-Api-User，可选）", "数字 ID", sysUidOut));
+        tokOut[0].setText(account.optString("systemToken", ""));
+        sysUidOut[0].setText(account.optString("systemUserId", ""));
+        box.addView(Ui.gapH(act, 8));
+        TextView saveTok = Ui.iconBtnText(act, "check", "保存令牌", 12, Ui.white(), Ui.BLUE, 14, 8);
+        saveTok.setOnClickListener(v -> {
+            try {
+                JSONObject patch = new JSONObject()
+                        .put("systemToken", tokOut[0].getText().toString().trim())
+                        .put("systemUserId", sysUidOut[0].getText().toString().trim());
+                new Store(act).patchAccount(acctKey, patch);
+                act.toast("已保存系统令牌");
+            } catch (Exception ignored) {}
+        });
+        box.addView(saveTok);
+        box.addView(Ui.tv(act, "填写后该账号的签到/刷新/Key 管理走系统令牌 API，不再走登录流程", 11, Ui.SUB2),
+                lpTop(4));
 
         /* 操作行：刷新/获取 Key + 新建 Key */
         box.addView(Ui.gapH(act, 6));
@@ -973,65 +985,8 @@ public class SettingsView extends FrameLayout {
             kbox.addView(keyTv, klp);
         }
 
-        /* 测试模型行：用这把 key 作 Bearer 拉模型 → 选一个 → testModel */
-        TextView testBtn = Ui.iconBtnText(act, "bolt", "用此 Key 获取模型并测试", 11, Ui.BLUE, Ui.BLUE_BG, 10, 6);
-        LinearLayout.LayoutParams tbp = new LinearLayout.LayoutParams(-2, -2);
-        tbp.topMargin = Ui.dp(act, 4);
-        testBtn.setEnabled(!keyStr.isEmpty());
-        if (keyStr.isEmpty()) testBtn.setAlpha(0.5f);
-        testBtn.setOnClickListener(v -> testWithKey(baseUrl, keyStr, siteUserId, name));
-        kbox.addView(testBtn, tbp);
-
         if (!enabled) kbox.setAlpha(0.6f);
         return kbox;
-    }
-
-    /** 用指定 key 作 Bearer 拉模型，弹列表，点选后 testModel（多 key 选一测试的核心）。 */
-    private void testWithKey(String baseUrl, String keyStr, String siteUserId, String keyName) {
-        final String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
-        if (base.isEmpty() || !base.startsWith("http")) { act.toast("站点地址无效"); return; }
-        if (keyStr == null || keyStr.isEmpty()) { act.toast("该 Key 无内容"); return; }
-        act.toast("正在用「" + keyName + "」获取模型…");
-        new Thread(() -> {
-            String err = "";
-            org.json.JSONArray models = null;
-            /* /api/user/models：用这把用户 key 作 Bearer；部分站点另需 New-Api-User → 传 targetAcc.siteUserId */
-            try { models = new Engine(act).fetchModels(base, keyStr, siteUserId); }
-            catch (Exception e) { err = String.valueOf(e.getMessage()); }
-            final String fErr = err;
-            final org.json.JSONArray fModels = models;
-            act.runOnUiThread(() -> {
-                if (!fErr.isEmpty()) { act.toast("获取模型失败：" + fErr); return; }
-                if (fModels == null || fModels.length() == 0) { act.toast("该 Key 未返回任何模型"); return; }
-                final String[] names = new String[fModels.length()];
-                for (int i = 0; i < fModels.length(); i++) names[i] = fModels.optString(i, "");
-                new AlertDialog.Builder(act)
-                        .setTitle("选择模型测试（" + keyName + "，共 " + names.length + " 个）")
-                        .setItems(names, (dd, which) -> {
-                            final String model = names[which];
-                            act.toast("测试中：" + model + " …");
-                            new Thread(() -> {
-                                String terr = "";
-                                JSONObject res = null;
-                                try { res = new Engine(act).testModel(base, keyStr, model); }
-                                catch (Exception e) { terr = String.valueOf(e.getMessage()); }
-                                final String fTerr = terr;
-                                final JSONObject fRes = res;
-                                act.runOnUiThread(() -> {
-                                    if (!fTerr.isEmpty()) { act.toast("❌ 测试失败：" + fTerr); return; }
-                                    if (fRes != null && fRes.optBoolean("ok", false)) {
-                                        act.toast("✅ 可用：" + model);
-                                    } else {
-                                        int h = fRes == null ? 0 : fRes.optInt("http", 0);
-                                        String msg = fRes == null ? "" : fRes.optString("message", "");
-                                        act.toast("❌ HTTP " + h + "：" + msg);
-                                    }
-                                });
-                            }, "sv-model-test").start();
-                        })
-                        .setNegativeButton("关闭", null).show();
-            });
-        }, "sv-model-fetch").start();
     }
 
     private void promptCreateKey(String acctKey, String siteKey, String baseUrl, String siteUserId,
