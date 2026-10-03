@@ -60,6 +60,9 @@ public final class Ui {
 
     /* ================= 尺寸 ================= */
 
+    /** 弹窗内容统一左右留白；表单容器、自绘列表都用它，避免各弹窗 16/20/24 三种内边距混用。 */
+    public static final int DIALOG_PAD = 20;
+
     public static int dp(Context c, float v) {
         return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
                 c.getResources().getDisplayMetrics()));
@@ -87,33 +90,6 @@ public final class Ui {
         g.setColor(color);
         g.setCornerRadii(new float[]{0, 0, rPx, rPx, rPx, rPx, 0, 0});
         return g;
-    }
-
-    public static void styleDialog(android.app.AlertDialog dialog) {
-        if (dialog == null || dialog.getWindow() == null) return;
-        android.view.Window window = dialog.getWindow();
-        window.setBackgroundDrawableResource(R.drawable.dialog_background);
-        android.view.View decor = window.getDecorView();
-        decor.setPadding(dp(dialog.getContext(), 6), dp(dialog.getContext(), 4),
-                dp(dialog.getContext(), 6), dp(dialog.getContext(), 4));
-        int titleId = dialog.getContext().getResources().getIdentifier("alertTitle", "id", "android");
-        TextView title = dialog.findViewById(titleId);
-        if (title != null) { title.setTextColor(TXT); title.setTextSize(17); }
-        TextView message = dialog.findViewById(android.R.id.message);
-        if (message != null) {
-            message.setTextColor(TXT2);
-            message.setLineSpacing(dp(dialog.getContext(), 3), 1f);
-        }
-        for (int which : new int[]{android.app.AlertDialog.BUTTON_POSITIVE,
-                android.app.AlertDialog.BUTTON_NEGATIVE, android.app.AlertDialog.BUTTON_NEUTRAL}) {
-            android.widget.Button b = dialog.getButton(which);
-            if (b != null) {
-                b.setTextColor(BLUE);
-                b.setBackground(round(BLUE_BG, dp(dialog.getContext(), 8)));
-                b.setPadding(dp(dialog.getContext(), 12), dp(dialog.getContext(), 6),
-                        dp(dialog.getContext(), 12), dp(dialog.getContext(), 6));
-            }
-        }
     }
 
     /* ================= 文本 ================= */

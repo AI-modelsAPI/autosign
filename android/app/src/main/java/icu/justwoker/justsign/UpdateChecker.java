@@ -155,10 +155,9 @@ public final class UpdateChecker {
         } catch (Exception e) { activity.toast("无法打开系统安装器"); }
     }
     private static void showFound(MainActivity activity, String version) {
-        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("发现新版本 v" + version)
+        new AlertDialog.Builder(activity).setTitle("发现新版本 v" + version)
                 .setMessage("设置页已出现新版本按钮。你可以现在下载，也可以稍后处理。")
-                .setPositiveButton("下载并安装", (d, w) -> download(activity)).setNegativeButton("稍后", null).create();
-        dialog.setOnShowListener(x -> Ui.styleDialog(dialog)); dialog.show();
+                .setPositiveButton("下载并安装", (d, w) -> download(activity)).setNegativeButton("稍后", null).show();
     }
     private static void notifyChanged() { Runnable value = listener; if (value != null) value.run(); }
     private static String localVersion(Context context) {

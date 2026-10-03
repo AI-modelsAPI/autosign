@@ -285,7 +285,6 @@ public class MainActivity extends Activity {
         scroll.addView(list);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("各站点资产")
                 .setView(scroll).setPositiveButton("关闭", null).create();
-        dialog.setOnShowListener(d -> Ui.styleDialog(dialog));
         dialog.show();
     }
 
@@ -572,7 +571,7 @@ public class MainActivity extends Activity {
         ident.addView(Ui.tv(this, acc.optString("alias", key), 13, Ui.TXT2, true));
         String prov = acc.optString("authProvider", "");
         if (prov.isEmpty()) prov = Catalog.providerOf(site);
-        String tag = "linuxdo".equals(prov) ? "Linux DO" : "GitHub";
+        String tag = SiteProtocol.providerLabel(prov);
         int tagColor = "linuxdo".equals(prov) ? 0xFFB45309 : Ui.BLUE;
         int tagBg = "linuxdo".equals(prov) ? 0xFFFEF3C7 : Ui.BLUE_BG;
         ident.addView(Ui.gapW(this, 6));
@@ -1431,36 +1430,79 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
     /* ================= 账号 / 凭据 ================= */
 
     /**
-     * v1.1.16：统一账号选择 UI。不再先弹「选登录方式」再弹「选账号」——
-     * 直接把站点可用的每个 provider × 每条支持凭据展开成一个扁平列表，一次列出所有登录身份，
-     * 每项自带 [Linux DO]/[GitHub] 徽标；用户选谁就按该项的 provider 走对应授权流程。
+     * 统一账号选择 UI：站点可用的每个 provider × 每条支持凭据展开成扁平列表，一次列出所有登录身份，
+     * 每项自带 [Linux DO]/[GitHub] 徽标；选谁就按该项的 provider 走对应授权流程。
+     * v1.3.2：列表项改用与设置页一致的两行卡片（徽标 + 账号名 + 副标题），不再把徽标塞进字符串。
      */
     private void promptAddAccount(JSONObject site) {
         if (site == null) return;
         Store store = new Store(this);
         JSONArray creds = store.credentials();
         java.util.List<String[]> options = SiteProtocol.accountOptions(site, creds); // [credId, provider]
-        java.util.ArrayList<String> labels = new java.util.ArrayList<>();
-        for (String[] opt : options) {
+
+        LinearLayout list = Ui.col(this);
+        list.setPadding(Ui.dp(this, Ui.DIALOG_PAD - 6), Ui.dp(this, 4),
+                Ui.dp(this, Ui.DIALOG_PAD - 6), Ui.dp(this, 4));
+        final AlertDialog[] holder = new AlertDialog[1];
+        for (int i = 0; i < options.size(); i++) {
+            String[] opt = options.get(i);
             JSONObject c = store.findCredential(opt[0]);
-            String provider = opt[1];
-            String provLabel = "linuxdo".equals(provider) ? "Linux DO" : "GitHub";
-            String who = SiteProtocol.credentialUser(c, provider);
-            String alias = c == null ? who : c.optString("alias", who);
-            labels.add("[" + provLabel + "] " + alias
-                    + (who.isEmpty() ? "" : (" (" + who + ")"))
-                    + (c != null && store.credHasTwofa(c.optString("id")) ? " · 2FA" : ""));
+            list.addView(accountRow(store, c, opt[1], () -> {
+                if (holder[0] != null) holder[0].dismiss();
+                createAccountFromCredential(site, opt[0], opt[1]);
+            }));
+            list.addView(Ui.divider(this, Ui.LINE_SOFT, 60));
         }
-        labels.add("＋ 录入新账号（设置）…");
-        final java.util.List<String[]> opts = options;
-        new AlertDialog.Builder(this)
+        /* 末项：去设置里录入新账号。文案与设置页「录入账号」对齐，好找、不再自造第三种说法。 */
+        TextView add = Ui.iconText(this, "plus", "录入账号…", 14, Ui.BLUE, true);
+        add.setPadding(Ui.dp(this, 16), Ui.dp(this, 15), Ui.dp(this, 16), Ui.dp(this, 15));
+        add.setOnClickListener(v -> {
+            if (holder[0] != null) holder[0].dismiss();
+            showPage(1);
+            settings.openCredentials();
+        });
+        list.addView(add);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("添加账号 · " + site.optString("name"))
-                .setItems(labels.toArray(new String[0]), (d, w) -> {
-                    if (w == opts.size()) { showPage(1); settings.openCredentials(); return; }
-                    String[] chosen = opts.get(w);
-                    createAccountFromCredential(site, chosen[0], chosen[1]);
-                })
-                .setNegativeButton("取消", null).show();
+                .setView(Ui.scroll(this, list))
+                .setNegativeButton("取消", null)
+                .create();
+        holder[0] = dialog;
+        dialog.show();
+    }
+
+    /** 账号选择列表项：身份徽标 + 账号名（主）+ 站点账号/2FA（副）。 */
+    private View accountRow(Store store, JSONObject c, String provider, Runnable onPick) {
+        LinearLayout row = Ui.row(this);
+        row.setPadding(Ui.dp(this, 16), Ui.dp(this, 11), Ui.dp(this, 16), Ui.dp(this, 11));
+        boolean linuxdo = "linuxdo".equals(provider);
+        row.addView(Ui.pill(this, SiteProtocol.providerLabel(provider), 11,
+                linuxdo ? Ui.BLUE_DEEP : Ui.TXT2, linuxdo ? Ui.BLUE_BG : Ui.LINE_SOFT));
+
+        String who = SiteProtocol.credentialUser(c, provider);
+        String alias = c == null || c.optString("alias", "").isEmpty() ? who : c.optString("alias", who);
+        LinearLayout texts = Ui.col(this);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        tlp.leftMargin = Ui.dp(this, 10);
+        texts.setLayoutParams(tlp);
+        texts.addView(Ui.tv(this, alias, 15, Ui.TXT, true));
+        if (!who.isEmpty() && !who.equals(alias)) texts.addView(Ui.tv(this, who, 12, Ui.SUB));
+        if (c != null && store.credHasTwofa(c.optString("id"))) {
+            TextView tfa = Ui.tv(this, "2FA", 11, Ui.ORANGE, true);
+            tfa.setCompoundDrawablesWithIntrinsicBounds(Icons.d(this, "shield", 13, Ui.ORANGE), null, null, null);
+            tfa.setCompoundDrawablePadding(Ui.dp(this, 3));
+            LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(-2, -2);
+            flp.topMargin = Ui.dp(this, 2);
+            texts.addView(tfa, flp);
+        }
+        row.addView(texts);
+        row.addView(Ui.icon(this, "chevron", 16, Ui.SUB2));
+        row.setBackgroundColor(Ui.CARD);
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setOnClickListener(v -> onPick.run());
+        return row;
     }
 
     private void createAccountFromCredential(JSONObject site, String credId, String provider) {
@@ -1512,7 +1554,7 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
             ids.add(c.optString("id"));
         }
         if (ids.isEmpty()) { toast("没有对应登录方式的凭据，请先在设置里录入"); showPage(1); settings.openCredentials(); return; }
-        new AlertDialog.Builder(this).setTitle("绑定 " + ("linuxdo".equals(provider) ? "Linux DO" : "GitHub") + " 凭据")
+        new AlertDialog.Builder(this).setTitle("绑定 " + SiteProtocol.providerLabel(provider) + " 凭据")
                 .setItems(labels.toArray(new String[0]), (d, w) -> {
                     try {
                         store.patchAccount(acc.optString("key"), new JSONObject().put("credentialId", ids.get(w)).put("authProvider", provider));
@@ -1585,7 +1627,6 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                                     toast("该账号已有授权流程进行中，请稍候");
                                 }
                             }).create();
-                    d.setOnShowListener(x -> Ui.styleDialog(d));
                     d.show();
                 } else if (fDefinitive) {
                     /* 会话受限站：旧会话明确失效后必须先确认注销，再建新会话。 */
@@ -1604,7 +1645,6 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
                                     + "若站点有会话数上限，可能触发限制。\n\n是否继续？")
                             .setPositiveButton("继续重新授权", (x, y) -> reauthorizeWithLogout(site, acc, sk0, ak0))
                             .setNegativeButton("取消", null).create();
-                    d.setOnShowListener(x -> Ui.styleDialog(d));
                     d.show();
                 }
             });

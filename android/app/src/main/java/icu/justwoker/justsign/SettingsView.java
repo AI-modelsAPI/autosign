@@ -380,7 +380,7 @@ public class SettingsView extends FrameLayout {
         if (px == null) px = new JSONObject();
 
         LinearLayout box = Ui.col(act);
-        box.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        box.setPadding(Ui.dp(act, Ui.DIALOG_PAD), Ui.dp(act, 8), Ui.dp(act, Ui.DIALOG_PAD), 0);
         EditText[] hOut = new EditText[1], pOut = new EditText[1];
         box.addView(Ui.field(act, "地址（留空 = 直连，不走代理）", "127.0.0.1", hOut));
         box.addView(Ui.gapH(act, 10));
@@ -649,7 +649,7 @@ public class SettingsView extends FrameLayout {
     private void editSiteDialog(JSONObject site) {
         boolean isNew = site == null;
         LinearLayout box = Ui.col(act);
-        box.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        box.setPadding(Ui.dp(act, Ui.DIALOG_PAD), Ui.dp(act, 8), Ui.dp(act, Ui.DIALOG_PAD), 0);
         EditText[] nOut = new EditText[1], uOut = new EditText[1];
         box.addView(Ui.field(act, "站点名称", "如 JustDoWork", nOut));
         box.addView(Ui.gapH(act, 10));
@@ -992,7 +992,7 @@ public class SettingsView extends FrameLayout {
     private void promptCreateKey(String acctKey, String siteKey, String baseUrl, String siteUserId,
                                  LinearLayout listBody, TextView hint) {
         LinearLayout cbox = Ui.col(act);
-        cbox.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        cbox.setPadding(Ui.dp(act, Ui.DIALOG_PAD), Ui.dp(act, 8), Ui.dp(act, Ui.DIALOG_PAD), 0);
         EditText[] nameOut = new EditText[1];
         cbox.addView(Ui.field(act, "Key 名称（如 Cursor / NextChat）", "我的 Key", nameOut));
         EditText nameEt = nameOut[0];
@@ -1142,7 +1142,7 @@ public class SettingsView extends FrameLayout {
         final String id = isNew ? "" : c.optString("id");
 
         LinearLayout box = Ui.col(act);
-        box.setPadding(Ui.dp(act, 20), Ui.dp(act, 10), Ui.dp(act, 20), 0);
+        box.setPadding(Ui.dp(act, Ui.DIALOG_PAD), Ui.dp(act, 8), Ui.dp(act, Ui.DIALOG_PAD), 0);
         EditText[] alias = new EditText[1], ghUser = new EditText[1], siteAcc = new EditText[1];
         box.addView(Ui.field(act, "别名（用于区分，如 主号 / 小号）", "主号", alias));
         box.addView(Ui.gapH(act, 10));

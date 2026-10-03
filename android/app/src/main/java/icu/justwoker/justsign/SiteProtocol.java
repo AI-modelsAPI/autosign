@@ -66,35 +66,21 @@ public final class SiteProtocol {
     }
 
     /**
-     * 站点可用的 OAuth provider 列表（决定「添加账号」能列出哪些登录身份）。
-     * v1.1.16：改为数据驱动——站点可用 meta/顶层字段 `oauthProviders`（逗号分隔，如 "github,linuxdo"）
-     * 显式声明它同时支持的多种登录方式，顺序即列表展示顺序（首个为主）。
-     * 未声明时：AnyRouter 保持内置双 provider（历史行为），其余站点回落单 provider(oauthProvider)。
-     * 这样 AgentRouter 等实测同时开启 github_oauth + linuxdo_oauth 的站点，只需声明 oauthProviders
-     * 即可在统一账号选择器里同时列出 GitHub 与 Linux DO 身份，无需再逐站硬编码 host。
+     * 「添加账号」可选身份列表：GitHub + Linux DO 全部列出，与站点自身声明无关。
+     * v1.3.2：不再按 oauthProviders 裁剪——站点是否真开着某一路 OAuth 由站点在授权时自行判定，
+     * 列表的职责只是把账号选出来。此前只有 AgentRouter/AnyRouter 声明了双 provider，
+     * 于是 SeekAI、KKtoken 等站点的 L 站账号在「添加账号」里根本不出现。
+     * 顺序：站点主 provider 在前（沿用 oauthProvider，新账号推荐），另一个随后。
      */
     public static String[] providers(JSONObject site) {
-        String[] declared = declaredProviders(site);
-        if (declared.length > 0) return declared;
-        return isAnyRouter(site) ? new String[]{"linuxdo", "github"}
-                : new String[]{provider(site, null)};
+        String main = provider(site, null);
+        return "linuxdo".equals(main) ? new String[]{"linuxdo", "github"}
+                : new String[]{"github", "linuxdo"};
     }
 
-    /** 读取站点显式声明的 oauthProviders（顶层或 meta 内均可），过滤为合法且去重、保序。 */
-    private static String[] declaredProviders(JSONObject site) {
-        if (site == null) return new String[0];
-        String raw = site.optString("oauthProviders", "").trim();
-        if (raw.isEmpty()) {
-            JSONObject meta = site.optJSONObject("meta");
-            if (meta != null) raw = meta.optString("oauthProviders", "").trim();
-        }
-        if (raw.isEmpty()) return new String[0];
-        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
-        for (String p : raw.split(",")) {
-            String v = p.trim().toLowerCase(Locale.US);
-            if (v.equals("linuxdo") || v.equals("github")) set.add(v);
-        }
-        return set.toArray(new String[0]);
+    /** 账号列表里该 provider 的中文名（与设置页一致，避免同一身份两种叫法）。 */
+    public static String providerLabel(String provider) {
+        return "linuxdo".equals(provider) ? "Linux DO" : "GitHub";
     }
 
     /**
