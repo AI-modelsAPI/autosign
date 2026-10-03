@@ -3,7 +3,9 @@ package icu.justwoker.justsign;
 import android.app.AlertDialog;
 import android.app.TimePickerDialog;
 import android.text.InputType;
+import android.view.DragEvent;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -30,6 +32,7 @@ public class SettingsView extends FrameLayout {
     private final MainActivity act;
     private final LinearLayout rootPage, sitesPage, credsPage, keysPage;
     private final LinearLayout rootBody, sitesBody, credsBody, keysBody;
+    private final ScrollView sitesScroll;
     private int page = PAGE_ROOT;
 
     public SettingsView(MainActivity a) {
@@ -49,8 +52,9 @@ public class SettingsView extends FrameLayout {
         sitesBody = Ui.col(a);
         sitesBody.setPadding(Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 24));
         sitesPage.addView(barSites());
-        sitesPage.addView(new ScrollView(a) {{ addView(sitesBody); }},
-                new LinearLayout.LayoutParams(-1, 0, 1f));
+        sitesScroll = new ScrollView(a);
+        sitesScroll.addView(sitesBody);
+        sitesPage.addView(sitesScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         sitesPage.setVisibility(GONE);
         addView(sitesPage, new LayoutParams(-1, -1));
 
@@ -496,9 +500,35 @@ public class SettingsView extends FrameLayout {
         for (int i = 0; i < sites.length(); i++) {
             final JSONObject s = sites.optJSONObject(i);
             if (s == null) continue;
+            final int pos = i;
+
+            // 整体卡片采用垂直布局：上方正中间为专属拖动手柄，下方为主内容行
+            LinearLayout card = Ui.col(act);
+            card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+
+            // ---- 卡片顶部正中央手柄条 ----
+            LinearLayout handleBar = Ui.row(act);
+            handleBar.setGravity(Gravity.CENTER);
+            handleBar.setPadding(0, Ui.dp(act, 7), 0, Ui.dp(act, 2));
+
+            // 优雅的药丸胶囊状把手（如原生抽屉/卡片把手），提供宽裕的触摸反馈区
+            LinearLayout handlePill = Ui.row(act);
+            handlePill.setGravity(Gravity.CENTER);
+            handlePill.setBackground(Ui.ripple(Ui.CARD_SUB, Ui.alpha(Ui.BLUE, 0x1F), Ui.dp(act, 10)));
+            handlePill.setPadding(Ui.dp(act, 18), Ui.dp(act, 5), Ui.dp(act, 18), Ui.dp(act, 5));
+            handlePill.setOnClickListener(v -> act.toast("长按把手即可拖动排序"));
+
+            View barLine = new View(act);
+            barLine.setBackground(Ui.round(Ui.SUB2, Ui.dp(act, 3)));
+            handlePill.addView(barLine, new LinearLayout.LayoutParams(Ui.dp(act, 36), Ui.dp(act, 4)));
+            handleBar.addView(handlePill);
+            card.addView(handleBar);
+
+            // ---- 卡片主内容行 ----
             LinearLayout row = Ui.row(act);
-            row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-            row.setPadding(Ui.dp(act, 12), Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 10));
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(act, 14), Ui.dp(act, 6), Ui.dp(act, 8), Ui.dp(act, 12));
+
             LinearLayout info = Ui.col(act);
             LinearLayout titleRow = Ui.row(act);
             titleRow.addView(Ui.tv(act, s.optString("name", s.optString("key")), 14, Ui.TXT, true));
@@ -514,65 +544,7 @@ public class SettingsView extends FrameLayout {
                     + Engine.kindLabel(s)
                     + "  ·  " + an + " 个账号", 11, Ui.SUB));
             row.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
-            LinearLayout order = Ui.col(act);
-            TextView up = Ui.btn(act, "↑", 15, i == 0 ? Ui.SUB2 : Ui.BLUE, Ui.BLUE_BG, 9, 4);
-            TextView down = Ui.btn(act, "↓", 15, i == sites.length() - 1 ? Ui.SUB2 : Ui.BLUE, Ui.BLUE_BG, 9, 4);
-            TextView handle = Ui.btn(act, "≡ 拖动", 11, Ui.TXT2, Ui.CARD_SUB, 8, 5);
-            final int pos = i;
-            up.setEnabled(pos > 0);
-            down.setEnabled(pos < sites.length() - 1);
-            up.setOnClickListener(v -> {
-                new Store(act).moveSite(s.optString("key"), -1);
-                buildSites();
-                act.render();
-            });
-            down.setOnClickListener(v -> {
-                new Store(act).moveSite(s.optString("key"), 1);
-                buildSites();
-                act.render();
-            });
-            handle.setOnLongClickListener(v -> {
-                android.content.ClipData data = android.content.ClipData.newPlainText("siteKey", s.optString("key"));
-                v.startDragAndDrop(data, new View.DragShadowBuilder(row), s.optString("key"), 0);
-                row.animate().alpha(0.45f).scaleX(0.98f).scaleY(0.98f).setDuration(120).start();
-                return true;
-            });
-            row.setOnDragListener((v, event) -> {
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENTERED) {
-                    row.animate().translationY(-Ui.dp(act, 6)).scaleX(1.02f).scaleY(1.02f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.BLUE_BG, Ui.dp(act, 10), Ui.dp(act, 2), Ui.BLUE));
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_EXITED) {
-                    row.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DROP) {
-                    Object state = event.getLocalState();
-                    row.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(act, 10), Ui.dp(act, 2), Ui.GREEN));
-                    if (state != null) {
-                        new Store(act).moveSiteTo(String.valueOf(state), pos);
-                        row.postDelayed(() -> {
-                            buildSites();
-                            act.render();
-                        }, 180);
-                    }
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENDED) {
-                    row.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(120).start();
-                    row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-                    return true;
-                }
-                return event.getAction() == android.view.DragEvent.ACTION_DRAG_STARTED
-                        || event.getAction() == android.view.DragEvent.ACTION_DRAG_LOCATION;
-            });
-            order.addView(handle);
-            order.addView(up);
-            order.addView(down);
-            row.addView(order);
+
             View vis = Ui.iconBtn(act, hidden ? "eye_off" : "eye", 16, hidden ? Ui.ORANGE : Ui.SUB, 7);
             vis.setOnClickListener(v -> {
                 try {
@@ -599,9 +571,78 @@ public class SettingsView extends FrameLayout {
                     }).setNegativeButton("取消", null).show());
             row.addView(edit);
             row.addView(del);
+            card.addView(row);
+
+            // ---- 桌面图标级拖拽交互（长按拿起、浮空微弹、自动滚屏、平滑放置） ----
+            handlePill.setOnLongClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                android.content.ClipData data = android.content.ClipData.newPlainText("siteKey", s.optString("key"));
+                v.startDragAndDrop(data, new View.DragShadowBuilder(card), s.optString("key"), 0);
+
+                // 像桌面提起图标一样，原位卡片变半透明微缩放占位
+                card.animate().alpha(0.35f).scaleX(0.96f).scaleY(0.96f).setDuration(150).start();
+                return true;
+            });
+
+            card.setOnDragListener((v, event) -> {
+                int action = event.getAction();
+                if (action == DragEvent.ACTION_DRAG_STARTED) {
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                    // 当手指拖动靠近上下屏幕边缘时，自动顺畅平滑滚动 ScrollView
+                    if (sitesScroll != null) {
+                        int[] sLoc = new int[2];
+                        int[] vLoc = new int[2];
+                        sitesScroll.getLocationOnScreen(sLoc);
+                        v.getLocationOnScreen(vLoc);
+                        float relY = (vLoc[1] + event.getY()) - sLoc[1];
+                        int scrollH = sitesScroll.getHeight();
+                        int edge = Ui.dp(act, 65);
+                        if (relY < edge && sitesScroll.getScrollY() > 0) {
+                            sitesScroll.smoothScrollBy(0, -Ui.dp(act, 10));
+                        } else if (relY > scrollH - edge) {
+                            sitesScroll.smoothScrollBy(0, Ui.dp(act, 10));
+                        }
+                    }
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_ENTERED) {
+                    // 悬浮悬停时目标位弹性上浮展开高亮
+                    card.animate().translationY(-Ui.dp(act, 4)).scaleX(1.02f).scaleY(1.02f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.BLUE_BG, Ui.dp(act, 12), Ui.dp(act, 2), Ui.BLUE));
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_EXITED) {
+                    card.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DROP) {
+                    Object state = event.getLocalState();
+                    card.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(act, 12), Ui.dp(act, 2), Ui.GREEN));
+                    card.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    if (state != null) {
+                        new Store(act).moveSiteTo(String.valueOf(state), pos);
+                        card.postDelayed(() -> {
+                            buildSites();
+                            act.render();
+                        }, 160);
+                    }
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_ENDED) {
+                    card.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(150).start();
+                    card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+                    return true;
+                }
+                return false;
+            });
+
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.bottomMargin = Ui.dp(act, 8);
-            sitesBody.addView(row, lp);
+            lp.bottomMargin = Ui.dp(act, 10);
+            sitesBody.addView(card, lp);
         }
     }
 
