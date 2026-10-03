@@ -1,20 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-        弹窗统一规格（v1.3.2）
-        此前 22 个 AlertDialog 各写各的：标题 20sp（框架默认）、列表项 16sp、正文 18sp，
-        且只有 5 个弹窗挂过 Ui.styleDialog，按钮样式两种样子。
-        现在字号/颜色/行距全部收在主题里——主题一次覆盖所有弹窗，包括 setItems 列表项、
-        setMultiChoiceItems 复选项这些框架自绘、代码碰不到的 View。代码里不再有任何
-        针对单个弹窗的字号设置。
-        字号：标题 17 / 正文 15 / 列表项 15 / 按钮 14（框架默认 20 / 18 / 16 / 14）。
+        AutoSign 现代视觉主题系统（v1.4.0 UI Redesign）
+        设计基准：
+        - 系统级沉浸感：背景统一为 Slate-50 (#F8FAFC)，状态栏自然融合
+        - 弹窗系统 Theme.JustSign.Dialog：统一规范 17sp 标题 / 15sp 正文 / 15sp 列表 / 14sp 操作按钮
+        - 边距统一：20dp 呼吸感留白
     -->
     <style name="Theme.JustSign" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@android:color/white</item>
-        <item name="android:colorAccent">#2563EB</item>
-        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:windowBackground">#F8FAFC</item>
+        <item name="android:colorAccent">#3B82F6</item>
+        <item name="android:statusBarColor">#F8FAFC</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:dialogTheme">@style/Theme.JustSign.Dialog</item>
         <item name="android:alertDialogTheme">@style/Theme.JustSign.Dialog</item>
@@ -24,40 +23,40 @@
         <item name="android:windowBackground">@drawable/dialog_background</item>
         <item name="android:windowMinWidthMajor">88%</item>
         <item name="android:windowMinWidthMinor">88%</item>
-        <item name="android:colorAccent">#2563EB</item>
-        <!-- 标题（框架靠 windowTitleStyle，不给 App 别的口子） -->
+        <item name="android:colorAccent">#3B82F6</item>
+        <!-- 标题 -->
         <item name="android:windowTitleStyle">@style/Widget.JustSign.DialogTitle</item>
         <!-- 正文 setMessage -->
         <item name="android:textAppearanceMedium">@style/TextAppearance.JustSign.DialogBody</item>
-        <!-- setItems / setSingleChoiceItems / setMultiChoiceItems -->
+        <!-- 列表项：setItems / setSingleChoiceItems / setMultiChoiceItems -->
         <item name="android:textAppearanceListItem">@style/TextAppearance.JustSign.DialogItem</item>
         <item name="android:textAppearanceListItemSmall">@style/TextAppearance.JustSign.DialogItem</item>
-        <item name="android:textColorAlertDialogListItem">#FF111827</item>
+        <item name="android:textColorAlertDialogListItem">#FF0F172A</item>
         <item name="android:listPreferredItemPaddingStart">20dp</item>
         <item name="android:listPreferredItemPaddingEnd">20dp</item>
-        <!-- 按钮栏：三个位置都指到同一样式，避免正/负/中立各来一套 -->
+        <!-- 按钮 -->
         <item name="android:buttonBarPositiveButtonStyle">@style/Widget.JustSign.DialogButton</item>
         <item name="android:buttonBarNegativeButtonStyle">@style/Widget.JustSign.DialogButton</item>
         <item name="android:buttonBarNeutralButtonStyle">@style/Widget.JustSign.DialogButton</item>
     </style>
 
-    <!-- parent="" 显式断开按点号推导的隐式父样式（DialogWindowTitle 是框架私有样式，引用不到） -->
     <style name="Widget.JustSign.DialogTitle" parent="">
         <item name="android:textSize">17sp</item>
-        <item name="android:textColor">#FF111827</item>
+        <item name="android:textColor">#FF0F172A</item>
+        <item name="android:textStyle">bold</item>
         <item name="android:maxLines">2</item>
         <item name="android:ellipsize">end</item>
     </style>
 
     <style name="TextAppearance.JustSign.DialogBody" parent="android:style/TextAppearance.Material.Medium">
         <item name="android:textSize">15sp</item>
-        <item name="android:textColor">#FF1F2937</item>
+        <item name="android:textColor">#FF334155</item>
         <item name="android:lineSpacingExtra">4dp</item>
     </style>
 
     <style name="TextAppearance.JustSign.DialogItem" parent="android:style/TextAppearance.Material.Medium">
         <item name="android:textSize">15sp</item>
-        <item name="android:textColor">#FF111827</item>
+        <item name="android:textColor">#FF0F172A</item>
     </style>
 
     <style name="TextAppearance.JustSign.DialogButton" parent="android:style/TextAppearance.Material.Button">

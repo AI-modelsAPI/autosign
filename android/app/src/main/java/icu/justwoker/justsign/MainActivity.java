@@ -189,21 +189,21 @@ public class MainActivity extends Activity {
     private View buildTopBar() {
         LinearLayout bar = Ui.row(this);
         bar.setBackgroundColor(Ui.CARD);
-        bar.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 16), 0);
+        bar.setPadding(Ui.dp(this, 18), Ui.dp(this, 10), Ui.dp(this, 18), Ui.dp(this, 10));
 
         LinearLayout brand = Ui.row(this);
         brand.setGravity(Gravity.CENTER_VERTICAL);
         android.widget.ImageView appIcon = new android.widget.ImageView(this);
         appIcon.setImageResource(icu.justwoker.justsign.R.mipmap.ic_launcher);
-        brand.addView(appIcon, new LinearLayout.LayoutParams(Ui.dp(this, 30), Ui.dp(this, 30)));
+        brand.addView(appIcon, new LinearLayout.LayoutParams(Ui.dp(this, 32), Ui.dp(this, 32)));
         LinearLayout brandText = Ui.col(this);
         LinearLayout.LayoutParams btp = new LinearLayout.LayoutParams(-2, -2);
-        btp.leftMargin = Ui.dp(this, 8);
+        btp.leftMargin = Ui.dp(this, 10);
         brand.addView(brandText, btp);
-        brandText.addView(Ui.tv(this, "AutoSign", 16, Ui.TXT, true));
-        topSummary = Ui.tv(this, "", 10, Ui.SUB);
+        brandText.addView(Ui.tv(this, "AutoSign", 17, Ui.TXT, true));
+        topSummary = Ui.tv(this, "", 11, Ui.SUB);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
-        slp.topMargin = Ui.dp(this, 1);
+        slp.topMargin = Ui.dp(this, 2);
         brandText.addView(topSummary, slp);
         bar.addView(brand);
         bar.addView(Ui.spring(this));
@@ -212,10 +212,10 @@ public class MainActivity extends Activity {
         pillGroup.setGravity(Gravity.CENTER_VERTICAL);
 
         LinearLayout boardPill = Ui.row(this);
-        boardPill.setBackground(Ui.roundStroke(Ui.CARD_SUB, Ui.dp(this, 7),
+        boardPill.setBackground(Ui.rippleStroke(Ui.CARD_SUB, Ui.BLUE_BG, Ui.dp(this, 14),
                 Math.max(1, Ui.dp(this, 1)), Ui.LINE));
-        boardPill.setPadding(Ui.dp(this, 8), Ui.dp(this, 3), Ui.dp(this, 8), Ui.dp(this, 3));
-        boardPill.addView(Ui.tv(this, "看板", 10, Ui.SUB));
+        boardPill.setPadding(Ui.dp(this, 10), Ui.dp(this, 5), Ui.dp(this, 10), Ui.dp(this, 5));
+        boardPill.addView(Ui.tv(this, "看板", 11, Ui.SUB));
         topBoardTotal = Ui.tv(this, "$0.00", 12, Ui.BLUE, true);
         LinearLayout.LayoutParams blp0 = new LinearLayout.LayoutParams(-2, -2);
         blp0.leftMargin = Ui.dp(this, 4);
@@ -224,14 +224,14 @@ public class MainActivity extends Activity {
         boardPill.setOnClickListener(v -> showAssetBreakdown());
         pillGroup.addView(boardPill);
 
-        pillGroup.addView(Ui.gapW(this, 6));
+        pillGroup.addView(Ui.gapW(this, 8));
 
         LinearLayout pill = Ui.row(this);
-        pill.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(this, 7),
-                Math.max(1, Ui.dp(this, 1)), 0xFFDCFCE7));
-        pill.setPadding(Ui.dp(this, 8), Ui.dp(this, 3), Ui.dp(this, 8), Ui.dp(this, 3));
-        pill.addView(Ui.tv(this, "总资产", 10, 0xFF15803D));
-        topTotal = Ui.tv(this, "$0.00", 12, 0xFF15803D, true);
+        pill.setBackground(Ui.rippleStroke(Ui.GREEN_BG, Ui.GREEN_BG2, Ui.dp(this, 14),
+                Math.max(1, Ui.dp(this, 1)), 0xFFBBF7D0));
+        pill.setPadding(Ui.dp(this, 10), Ui.dp(this, 5), Ui.dp(this, 10), Ui.dp(this, 5));
+        pill.addView(Ui.tv(this, "总资产", 11, Ui.GREEN_D));
+        topTotal = Ui.tv(this, "$0.00", 12, Ui.GREEN_D, true);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.leftMargin = Ui.dp(this, 4);
         pill.addView(topTotal, tlp);
@@ -245,7 +245,7 @@ public class MainActivity extends Activity {
 
     private void showAssetBreakdown() {
         LinearLayout list = Ui.col(this);
-        list.setPadding(Ui.dp(this, 12), Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6));
+        list.setPadding(Ui.dp(this, 14), Ui.dp(this, 8), Ui.dp(this, 14), Ui.dp(this, 8));
         JSONArray sites = new Store(this).sites();
         int rows = 0;
         for (int i = 0; i < sites.length(); i++) {
@@ -262,8 +262,8 @@ public class MainActivity extends Activity {
             }
             LinearLayout row = Ui.row(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(this, 10), Math.max(1, Ui.dp(this, 1)), Ui.LINE));
-            row.setPadding(Ui.dp(this, 12), Ui.dp(this, 11), Ui.dp(this, 12), Ui.dp(this, 11));
+            row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(this, 12), Math.max(1, Ui.dp(this, 1)), Ui.LINE));
+            row.setPadding(Ui.dp(this, 14), Ui.dp(this, 12), Ui.dp(this, 14), Ui.dp(this, 12));
             LinearLayout text = Ui.col(this);
             LinearLayout nameRow = Ui.row(this);
             nameRow.addView(Ui.tv(this, s.optString("name"), 14, Ui.TXT, true));
@@ -291,17 +291,16 @@ public class MainActivity extends Activity {
     /* ================= 底部 Tab ================= */
 
     /**
-     * 底部 4 个按钮（v0.2.2 重做）：
-     *   - 图标与文案在同一行（横向），文案 12sp 加粗（原来 10sp 太小）
-     *   - 每个按钮有独立的圆角背景 + 彼此留 6dp 间距，视觉上是 4 个独立按钮，
-     *     不再是一整条上写了四个词
-     *   - 页面型（看板/设置）：选中蓝底蓝字，未选中透明底灰字
-     *   - 动作型（签到/刷新）：签到=实心蓝主按钮，刷新=浅蓝次按钮，永不获得持久高亮
+     * 现代触感底栏（v1.4.0 UI Redesign）：
+     *   - 采用精致高定 Dock 布局：统一 58dp 高度，圆弧边缘；
+     *   - 页面型（看板/设置）：微色块温和选中气泡 + 原生触摸水波纹；
+     *   - 动作型（签到/刷新）：签到采用高辨识度纯色胶囊（White on Blue），刷新采用轻巧柔和次级胶囊；
+     *   - 全员支持 Material Ripple 反馈。
      */
     private View buildTabBar() {
         tabBar = Ui.row(this);
         tabBar.setBackgroundColor(Ui.CARD);
-        tabBar.setPadding(Ui.dp(this, 8), Ui.dp(this, 7), Ui.dp(this, 8), Ui.dp(this, 7));
+        tabBar.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 10), Ui.dp(this, 8));
 
         LinearLayout t0 = tabItem("board", "看板");
         tabBoardIcon = (TextView) t0.getChildAt(0);
@@ -324,9 +323,9 @@ public class MainActivity extends Activity {
         t3.setOnClickListener(v -> showPage(1));
 
         tabBar.addView(t0, tabLp(0));
-        tabBar.addView(t1, tabLp(6));
-        tabBar.addView(t2, tabLp(6));
-        tabBar.addView(t3, tabLp(6));
+        tabBar.addView(t1, tabLp(8));
+        tabBar.addView(t2, tabLp(8));
+        tabBar.addView(t3, tabLp(8));
 
         /* 动作按钮的固定配色（不随页面切换变化） */
         styleTab(t1, tabCheckIcon, tabCheckText, "bolt", Ui.white(), Ui.BLUE);
@@ -347,7 +346,7 @@ public class MainActivity extends Activity {
         box.setClickable(true);
         box.setFocusable(true);
         TextView ic = Ui.tv(this, "", 1, Ui.SUB2, false);
-        ic.setCompoundDrawablesWithIntrinsicBounds(Icons.d(this, icon, 17, Ui.SUB2), null, null, null);
+        ic.setCompoundDrawablesWithIntrinsicBounds(Icons.d(this, icon, 18, Ui.SUB2), null, null, null);
         box.addView(ic);
         TextView t = Ui.tv(this, label, 12, Ui.SUB2, true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -356,14 +355,21 @@ public class MainActivity extends Activity {
         return box;
     }
 
-    /** 给整个 Tab 上色：文字色 fg，圆角背景 bg（bg 传 0 = 透明） */
+    /** 给整个 Tab 上色：文字色 fg，圆角背景 bg（bg 传 0 = 透明，带 Ripple） */
     private void styleTab(View box, TextView icon, TextView text, String iconName, int fg, int bg) {
         if (box != null) {
-            box.setBackground(bg == 0 ? null : Ui.round(bg, Ui.dp(this, 8)));
+            int r = Ui.dp(this, 10);
+            if (bg == 0) {
+                box.setBackground(Ui.ripple(0, Ui.BLUE_BG, r));
+            } else if (bg == Ui.BLUE) {
+                box.setBackground(Ui.ripple(Ui.BLUE, 0x33FFFFFF, r));
+            } else {
+                box.setBackground(Ui.ripple(bg, Ui.BLUE_BG, r));
+            }
         }
         if (icon != null) {
             icon.setCompoundDrawablesWithIntrinsicBounds(
-                    Icons.d(this, iconName, 17, fg), null, null, null);
+                    Icons.d(this, iconName, 18, fg), null, null, null);
         }
         if (text != null) text.setTextColor(fg);
     }
@@ -405,12 +411,12 @@ public class MainActivity extends Activity {
         e2.topMargin = Ui.dp(this, 4);
         emptyView.addView(ed, e2);
         TextView go = Ui.textIcon(this, "去添加站点", "chevron", 13, Ui.BLUE, true);
-        go.setBackground(Ui.round(Ui.BLUE_BG, Ui.dp(this, 8)));
-        go.setPadding(Ui.dp(this, 16), Ui.dp(this, 8), Ui.dp(this, 16), Ui.dp(this, 8));
+        go.setBackground(Ui.ripple(Ui.BLUE_BG, 0x223B82F6, Ui.dp(this, 12)));
+        go.setPadding(Ui.dp(this, 18), Ui.dp(this, 10), Ui.dp(this, 18), Ui.dp(this, 10));
         go.setClickable(true);
         go.setOnClickListener(v -> { showPage(1); settings.openSites(); });
         LinearLayout.LayoutParams e3 = new LinearLayout.LayoutParams(-2, -2);
-        e3.topMargin = Ui.dp(this, 16);
+        e3.topMargin = Ui.dp(this, 18);
         emptyView.addView(go, e3);
         emptyView.setVisibility(View.GONE);
         content.addView(emptyView, new FrameLayout.LayoutParams(-1, -1));
@@ -452,19 +458,16 @@ public class MainActivity extends Activity {
     private View siteCard(JSONObject site) {
         final String siteKey = site.optString("key");
         LinearLayout card = Ui.col(this);
-        card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(this, 12), Math.max(1, Ui.dp(this, 1)), Ui.LINE));
-        card.setPadding(Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14));
+        card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(this, 16), Math.max(1, Ui.dp(this, 1)), Ui.LINE));
+        card.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 14));
 
         /* 站头 */
         LinearLayout head = Ui.row(this);
         LinearLayout info = Ui.col(this);
-        /* 站点名：蓝色 + 紧跟名称的右箭头，一眼可见是链接。
-         * 注意宽度必须 WRAP_CONTENT —— info 是纵向容器，默认 MATCH_PARENT 会把
-         * drawableEnd 箭头推到卡片最右侧，与站名分离。 */
-        TextView name = Ui.textIcon(this, site.optString("name", siteKey), "chevron", 15, Ui.BLUE, true);
+        /* 站点名：深色 + 紧跟名称的微小右箭头指示链接 */
+        TextView name = Ui.textIcon(this, site.optString("name", siteKey), "chevron", 15, Ui.TXT, true);
         name.setClickable(true);
         name.setOnClickListener(v -> {
-            /* v0.4.9：优先邀请链接（affUrl）——用户通过站名注册可获得邀请额度 */
             String link = site.optString("affUrl", "");
             if (link == null || link.isEmpty())
                 link = site.optString("homeUrl", site.optString("baseUrl", ""));
@@ -474,13 +477,13 @@ public class MainActivity extends Activity {
         });
         info.addView(name, new LinearLayout.LayoutParams(-2, -2));
         String host = site.optString("baseUrl", "").replaceFirst("^https?://", "");
-        TextView meta = Ui.tv(this, host + " · " + Engine.kindLabel(site), 11, Ui.SUB2);
+        TextView meta = Ui.tv(this, host + " · " + Engine.kindLabel(site), 11, Ui.SUB);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-2, -2);
-        mlp.topMargin = Ui.dp(this, 2);
+        mlp.topMargin = Ui.dp(this, 3);
         info.addView(meta, mlp);
         head.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        /* 多账号才显示聚合进度（单账号交给账号行，避免重复） */
+        /* 多账号聚合进度 */
         JSONArray accs = site.optJSONArray("accounts");
         int total = accs == null ? 0 : accs.length();
         if (total > 1) {
@@ -491,40 +494,35 @@ public class MainActivity extends Activity {
             }
             boolean all = done == total;
             head.addView(Ui.pill(this, done + "/" + total + " 已签", 10,
-                    all ? Ui.GREEN : Ui.ORANGE, all ? Ui.GREEN_BG2 : Ui.AMBER_BG));
+                    all ? Ui.GREEN_D : 0xFFB45309, all ? Ui.GREEN_BG : Ui.AMBER_BG));
             head.addView(Ui.gapW(this, 6));
         }
-        TextView add = Ui.iconText(this, "plus", "账号", 11, Ui.BLUE, true);
-        add.setPadding(Ui.dp(this, 6), Ui.dp(this, 5), Ui.dp(this, 6), Ui.dp(this, 5));
-        add.setClickable(true);
+        TextView add = Ui.iconBtnText(this, "plus", "账号", 11, Ui.BLUE, Ui.BLUE_BG, 8, 4);
         add.setOnClickListener(v -> promptAddAccount(site));
         View more = Ui.iconBtn(this, "more", 15, Ui.SUB, 6);
         more.setOnClickListener(v -> siteMenu(site));
         head.addView(add);
+        head.addView(Ui.gapW(this, 4));
         head.addView(more);
         card.addView(head);
 
         /* 账号列表 */
         if (total == 0) {
             TextView t = Ui.tv(this, "该站点下还没有账号，点上方「＋账号」添加", 12, Ui.SUB2);
+            t.setPadding(0, Ui.dp(this, 6), 0, Ui.dp(this, 2));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.topMargin = Ui.dp(this, 12);
+            lp.topMargin = Ui.dp(this, 10);
             card.addView(t, lp);
         } else {
             for (int i = 0; i < total; i++) {
                 JSONObject a = accs.optJSONObject(i);
                 if (a == null) continue;
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-                lp.topMargin = Ui.dp(this, i == 0 ? 10 : 8);
-                /* 每个账号各自包一层 SwipeCard：右滑只刷这一个账号，
-                 * 左滑只删这一个账号，互不影响。 */
+                lp.topMargin = Ui.dp(this, i == 0 ? 12 : 10);
                 SwipeCard sc = new SwipeCard(this);
                 sc.setCard(accountItem(site, a));
                 final JSONObject fa = a;
                 final String fak = a.optString("key");
-                /* v1.0.6：用弱引用回传完成信号。refreshOne 结束时会 render() 重建整个列表，
-                 * 此实例可能已被丢弃；弱引用避免无谓持有，同时保证「未被重建」的情况下
-                 * 能正确复位「正在刷新…」提示（旧实现完全没有完成回调 → 永久转圈）。 */
                 final java.lang.ref.WeakReference<SwipeCard> ref = new java.lang.ref.WeakReference<>(sc);
                 sc.setListener(new SwipeCard.Listener() {
                     @Override public void onRefresh() {
@@ -551,9 +549,6 @@ public class MainActivity extends Activity {
     private View accountItem(JSONObject site, JSONObject acc) {
         final String key = acc.optString("key");
         final String siteKey = site.optString("key");
-        /* v1.0.4：卡片胶囊改用统一判据 Engine.acctState()，与顶栏摘要/一键签到队列同源。
-         * 旧口径 authed 只对 siteCookie 做 "null" 归空、漏了 token，可能与 acctState 分歧。
-         * ST_NEED_AUTH→待授权/去授权；ST_CHECKED→已签；ST_WEB→去网页；ST_PENDING→签到/已授权。 */
         final int state = Engine.acctState(site, acc);
         final boolean authed = state != Engine.ST_NEED_AUTH;
         final boolean checked = state == Engine.ST_CHECKED;
@@ -561,39 +556,40 @@ public class MainActivity extends Activity {
         boolean stOk = st != null && st.optBoolean("ok");
 
         LinearLayout box = Ui.col(this);
-        box.setBackground(Ui.roundStroke(Ui.CARD_SUB, Ui.dp(this, 8),
+        box.setBackground(Ui.roundStroke(Ui.CARD_SUB, Ui.dp(this, 12),
                 Math.max(1, Ui.dp(this, 1)), Ui.LINE_SOFT));
-        box.setPadding(Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10));
+        box.setPadding(Ui.dp(this, 14), Ui.dp(this, 12), Ui.dp(this, 14), Ui.dp(this, 12));
 
-        /* 行1：身份 + 主胶囊 + ⋯ */
+        /* 行1：身份 + 徽标 + 动作按钮 + ⋯ */
         LinearLayout r1 = Ui.row(this);
         LinearLayout ident = Ui.row(this);
-        ident.addView(Ui.tv(this, acc.optString("alias", key), 13, Ui.TXT2, true));
+        ident.addView(Ui.tv(this, acc.optString("alias", key), 14, Ui.TXT, true));
         String prov = acc.optString("authProvider", "");
         if (prov.isEmpty()) prov = Catalog.providerOf(site);
         String tag = SiteProtocol.providerLabel(prov);
-        int tagColor = "linuxdo".equals(prov) ? 0xFFB45309 : Ui.BLUE;
-        int tagBg = "linuxdo".equals(prov) ? 0xFFFEF3C7 : Ui.BLUE_BG;
+        boolean isLdo = "linuxdo".equals(prov);
+        int tagColor = isLdo ? 0xFFB45309 : Ui.INDIGO;
+        int tagBg = isLdo ? 0xFFFEF3C7 : Ui.INDIGO_BG;
         ident.addView(Ui.gapW(this, 6));
         ident.addView(Ui.pill(this, tag, 9, tagColor, tagBg));
 
         String gh = acc.optString("githubAccount", "");
         if (!gh.isEmpty()) {
+            ident.addView(Ui.gapW(this, 4));
             ident.addView(Ui.tv(this, "@" + gh, 11, Ui.SUB));
         }
-        /* 状态 chip：只有异常/未授权才显示（正常是常态，不打扰） */
         if (!authed) {
             ident.addView(Ui.gapW(this, 6));
             ident.addView(Ui.pill(this, "待授权", 10, Ui.ORANGE, Ui.AMBER_BG));
         } else if (st != null && !stOk) {
             ident.addView(Ui.gapW(this, 6));
-            ident.addView(Ui.pill(this, "异常", 10, Ui.RED, Ui.RED_BG));
+            ident.addView(Ui.pill(this, "异常", 10, Ui.RED_D, Ui.RED_BG));
         }
         r1.addView(ident, new LinearLayout.LayoutParams(0, -2, 1f));
 
         TextView main;
         if (!authed) {
-            main = Ui.btn(this, "去授权", 11, Ui.RED, Ui.RED_BG, 10, 4);
+            main = Ui.btn(this, "去授权", 11, Ui.RED_D, Ui.RED_BG, 10, 4);
             main.setOnClickListener(v -> startAuth(site, acc));
         } else if (checked) {
             main = Ui.iconPill(this, "check", "已签", 11, Ui.GREEN_D, Ui.GREEN_BG);
@@ -602,7 +598,7 @@ public class MainActivity extends Activity {
                 JSONObject lc = acc.optJSONObject("lastCheckin");
                 boolean known = lc != null && lc.has("reward");
                 double rw = lc == null ? 0 : lc.optDouble("reward", 0);
-                if (!known) toast("今日已签到（本站未返回奖励金额）");
+                if (!known) toast("今日已签到（本站未返回奖励���额）");
                 else if (rw > 0) toast("今日签到奖励 +$" + Ui.usd(rw));
                 else toast("今日已签到 · 本站签到不发奖励");
             });
@@ -610,8 +606,6 @@ public class MainActivity extends Activity {
             main = Ui.btn(this, "去网页", 11, Ui.BLUE, Ui.BLUE_BG, 12, 4);
             main.setOnClickListener(v -> doCheckin(key, main));
         } else if ("login".equals(Engine.siteKind(site))) {
-            /* v1.0.3：login 型待签账号显示「签到」——重登型站（AgentRouter/JustDoWork）
-             * 走登出→重登触发发奖；其他 login 型站走刷新取奖励。不再显示无效的「已授权」。 */
             if (Engine.needsReloginCheckin(site)) {
                 main = Ui.btn(this, "签到", 11, Ui.white(), Ui.BLUE, 12, 4);
                 main.setOnClickListener(v -> {
@@ -631,20 +625,18 @@ public class MainActivity extends Activity {
         r1.addView(main);
         View ovf = Ui.iconBtn(this, "more", 15, Ui.SUB2, 5);
         ovf.setOnClickListener(v -> accountMenu(site, acc));
+        r1.addView(Ui.gapW(this, 2));
         r1.addView(ovf);
-        /* v0.4.6：账号行钥匙图标入口已移除——API Key 管理搬到「站点编辑弹窗」的
-         * 「API 密钥管理」区（SettingsView.buildKeyMgrSection），不再在账号行重复入口。 */
         box.addView(r1);
 
         /* 行2：可用余额 + 今日签到奖励 */
         LinearLayout r2 = Ui.row(this);
         if (stOk) {
             r2.addView(Ui.tv(this, "可用余额", 11, Ui.SUB));
-            TextView bal = Ui.tv(this, "$" + Ui.usd(st.optDouble("availableUSD", 0)), 22, Ui.GREEN, true);
+            TextView bal = Ui.tv(this, "$" + Ui.usd(st.optDouble("availableUSD", 0)), 22, Ui.GREEN_D, true);
             LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-2, -2);
             blp.leftMargin = Ui.dp(this, 6);
             r2.addView(bal, blp);
-            /* 今日签到奖励：只在服务端给出确切数额时才显示金额 */
             double reward = 0;
             boolean rewardKnown = false;
             JSONObject lc = acc.optJSONObject("lastCheckin");
@@ -663,7 +655,6 @@ public class MainActivity extends Activity {
                 rlp.leftMargin = Ui.dp(this, 8);
                 r2.addView(rw, rlp);
             } else if (checked && rewardKnown) {
-                /* 已签但本站不发奖励 —— 明确告知，避免用户以为漏显示 */
                 TextView rw = Ui.pill(this, "本站无签到奖励", 10, Ui.SUB, Ui.LINE_SOFT);
                 LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-2, -2);
                 rlp.leftMargin = Ui.dp(this, 8);
@@ -690,16 +681,17 @@ public class MainActivity extends Activity {
                 todayColor = Ui.SUB2;
             }
             r3.addView(Ui.tv(this, todayTxt, 11, todayColor));
-            r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
+            r3.addView(Ui.tv(this, "  ·  ", 11, Ui.LINE));
             r3.addView(Ui.tv(this, "累计已用 $" + Ui.usd(st.optDouble("usedUSD", 0)), 11, Ui.SUB));
             if (st.has("grantedUSD") && !st.isNull("grantedUSD")) {
-                r3.addView(Ui.tv(this, "  ·  ", 11, 0xFFD1D5DB));
+                r3.addView(Ui.tv(this, "  ·  ", 11, Ui.LINE));
                 r3.addView(Ui.tv(this, "总额 $" + Ui.usd(st.optDouble("grantedUSD", 0)), 11, Ui.SUB));
             }
         }
         r3.addView(Ui.spring(this));
         TextView logBtn = Ui.textIcon(this, "日志", "chevron", 11, Ui.SUB, true);
-        logBtn.setPadding(Ui.dp(this, 6), Ui.dp(this, 5), Ui.dp(this, 4), Ui.dp(this, 5));
+        logBtn.setBackground(Ui.ripple(0, Ui.BLUE_BG, Ui.dp(this, 6)));
+        logBtn.setPadding(Ui.dp(this, 6), Ui.dp(this, 3), Ui.dp(this, 4), Ui.dp(this, 3));
         logBtn.setClickable(true);
         logBtn.setOnClickListener(v -> LogPopup.show(this));
         r3.addView(logBtn);
@@ -712,10 +704,10 @@ public class MainActivity extends Activity {
             String msg = st.optString("message", "");
             if (!msg.isEmpty()) {
                 TextView warn = Ui.iconText(this, "info", msg, 11, Ui.RED_D, false);
-                warn.setBackground(Ui.round(Ui.RED_BG2, Ui.dp(this, 4)));
-                warn.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+                warn.setBackground(Ui.round(Ui.RED_BG, Ui.dp(this, 6)));
+                warn.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
                 LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
-                wlp.topMargin = Ui.dp(this, 6);
+                wlp.topMargin = Ui.dp(this, 8);
                 box.addView(warn, wlp);
             }
         }
@@ -1455,7 +1447,9 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
         }
         /* 末项：去设置里录入新账号。文案与设置页「录入账号」对齐，好找、不再自造第三种说法。 */
         TextView add = Ui.iconText(this, "plus", "录入账号…", 14, Ui.BLUE, true);
-        add.setPadding(Ui.dp(this, 16), Ui.dp(this, 15), Ui.dp(this, 16), Ui.dp(this, 15));
+        add.setBackground(Ui.ripple(0, Ui.BLUE_BG, 0));
+        add.setPadding(Ui.dp(this, 18), Ui.dp(this, 15), Ui.dp(this, 18), Ui.dp(this, 15));
+        add.setClickable(true);
         add.setOnClickListener(v -> {
             if (holder[0] != null) holder[0].dismiss();
             showPage(1);
@@ -1475,16 +1469,16 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
     /** 账号选择列表项：身份徽标 + 账号名（主）+ 站点账号/2FA（副）。 */
     private View accountRow(Store store, JSONObject c, String provider, Runnable onPick) {
         LinearLayout row = Ui.row(this);
-        row.setPadding(Ui.dp(this, 16), Ui.dp(this, 11), Ui.dp(this, 16), Ui.dp(this, 11));
+        row.setPadding(Ui.dp(this, 18), Ui.dp(this, 13), Ui.dp(this, 18), Ui.dp(this, 13));
         boolean linuxdo = "linuxdo".equals(provider);
         row.addView(Ui.pill(this, SiteProtocol.providerLabel(provider), 11,
-                linuxdo ? Ui.BLUE_DEEP : Ui.TXT2, linuxdo ? Ui.BLUE_BG : Ui.LINE_SOFT));
+                linuxdo ? 0xFFB45309 : Ui.INDIGO, linuxdo ? 0xFFFEF3C7 : Ui.INDIGO_BG));
 
         String who = SiteProtocol.credentialUser(c, provider);
         String alias = c == null || c.optString("alias", "").isEmpty() ? who : c.optString("alias", who);
         LinearLayout texts = Ui.col(this);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1f);
-        tlp.leftMargin = Ui.dp(this, 10);
+        tlp.leftMargin = Ui.dp(this, 12);
         texts.setLayoutParams(tlp);
         texts.addView(Ui.tv(this, alias, 15, Ui.TXT, true));
         if (!who.isEmpty() && !who.equals(alias)) texts.addView(Ui.tv(this, who, 12, Ui.SUB));
@@ -1498,7 +1492,7 @@ if (w == 0) { LogPopup.autoShow(this); refreshOne(key); }
         }
         row.addView(texts);
         row.addView(Ui.icon(this, "chevron", 16, Ui.SUB2));
-        row.setBackgroundColor(Ui.CARD);
+        row.setBackground(Ui.ripple(Ui.CARD, Ui.BLUE_BG, 0));
         row.setClickable(true);
         row.setFocusable(true);
         row.setOnClickListener(v -> onPick.run());

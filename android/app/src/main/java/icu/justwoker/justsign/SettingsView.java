@@ -78,22 +78,22 @@ public class SettingsView extends FrameLayout {
     private View bar(String title, boolean back) {
         LinearLayout bar = Ui.row(act);
         bar.setBackgroundColor(Ui.CARD);
-        bar.setPadding(Ui.dp(act, 12), 0, Ui.dp(act, 16), 0);
-        bar.setLayoutParams(new LinearLayout.LayoutParams(-1, Ui.dp(act, 52)));
+        bar.setPadding(Ui.dp(act, 14), 0, Ui.dp(act, 18), 0);
+        bar.setLayoutParams(new LinearLayout.LayoutParams(-1, Ui.dp(act, 56)));
         if (back) {
             View b = Ui.iconBtn(act, "back", 19, Ui.TXT2, 6);
             b.setOnClickListener(v -> show(PAGE_ROOT));
             bar.addView(b);
-            bar.addView(Ui.gapW(act, 4));
+            bar.addView(Ui.gapW(act, 6));
         }
-        bar.addView(Ui.tv(act, title, 16, Ui.TXT, true));
+        bar.addView(Ui.tv(act, title, 17, Ui.TXT, true));
         bar.addView(Ui.spring(act));
         return bar;
     }
 
     private View barSites() {
         LinearLayout bar = (LinearLayout) bar("站点管理", true);
-        TextView add = Ui.iconBtnText(act, "plus", "手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         add.setOnClickListener(v -> editSiteDialog(null));
         bar.addView(add);
         return bar;
@@ -101,7 +101,7 @@ public class SettingsView extends FrameLayout {
 
     private View barCreds() {
         LinearLayout bar = (LinearLayout) bar("账号凭据库", true);
-        TextView add = Ui.iconBtnText(act, "plus", "录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         add.setOnClickListener(v -> editCredDialog(null));
         bar.addView(add);
         return bar;
@@ -109,7 +109,7 @@ public class SettingsView extends FrameLayout {
 
     private View barKeys() {
         LinearLayout bar = (LinearLayout) bar("密钥管理", true);
-        TextView refresh = Ui.iconBtnText(act, "refresh", "刷新", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView refresh = Ui.iconBtnText(act, "refresh", "刷新", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         refresh.setOnClickListener(v -> buildKeys());
         bar.addView(refresh);
         return bar;
@@ -1249,9 +1249,9 @@ public class SettingsView extends FrameLayout {
 
     private LinearLayout group(String title) {
         LinearLayout g = Ui.col(act);
-        g.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+        g.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 16), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
         TextView t = Ui.tv(act, title, 11, Ui.SUB, true);
-        t.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 4));
+        t.setPadding(Ui.dp(act, 18), Ui.dp(act, 14), Ui.dp(act, 18), Ui.dp(act, 4));
         g.addView(t);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.bottomMargin = Ui.dp(act, 16);
@@ -1259,19 +1259,28 @@ public class SettingsView extends FrameLayout {
         return g;
     }
 
-    /** 条目：图标+标题+副标题 | 右侧值文本或箭头 */
+    /** 条目：图标+标题+副标题 | 右侧值文本或箭头，支持 Ripple 涟漪 */
     private LinearLayout item(String iconName, String title, String sub, String value, OnClickListener onClick) {
         LinearLayout row = Ui.row(act);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 12));
-        android.widget.ImageView lead = Ui.icon(act, iconName, 18, Ui.TXT2);
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 18), Ui.dp(act, 18));
-        ilp.rightMargin = Ui.dp(act, 10);
-        row.addView(lead, ilp);
+        row.setPadding(Ui.dp(act, 18), Ui.dp(act, 14), Ui.dp(act, 18), Ui.dp(act, 14));
+        if (onClick != null) {
+            row.setBackground(Ui.ripple(0, Ui.BLUE_BG, 0));
+        }
+
+        LinearLayout iconBox = Ui.row(act);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(Ui.round(Ui.CARD_SUB, Ui.dp(act, 8)));
+        android.widget.ImageView lead = Ui.icon(act, iconName, 17, Ui.TXT2);
+        iconBox.addView(lead);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 32), Ui.dp(act, 32));
+        ilp.rightMargin = Ui.dp(act, 12);
+        row.addView(iconBox, ilp);
+
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.tv(act, title, 14, Ui.TXT2, false));
+        left.addView(Ui.tv(act, title, 14, Ui.TXT, false));
         if (sub != null && !sub.isEmpty()) {
-            TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
+            TextView s = Ui.tv(act, sub, 11, Ui.SUB);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
             left.addView(s, slp);
@@ -1287,14 +1296,24 @@ public class SettingsView extends FrameLayout {
 
     private LinearLayout switchItem(String iconName, String title, String sub, boolean init, BoolSink sink) {
         LinearLayout row = Ui.row(act);
-        row.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 16), Ui.dp(act, 10));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(act, 18), Ui.dp(act, 12), Ui.dp(act, 18), Ui.dp(act, 12));
+
+        LinearLayout iconBox = Ui.row(act);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(Ui.round(Ui.CARD_SUB, Ui.dp(act, 8)));
+        android.widget.ImageView lead = Ui.icon(act, iconName, 17, Ui.TXT2);
+        iconBox.addView(lead);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 32), Ui.dp(act, 32));
+        ilp.rightMargin = Ui.dp(act, 12);
+        row.addView(iconBox, ilp);
+
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.iconText(act, iconName, title, 14, Ui.TXT2, false));
+        left.addView(Ui.tv(act, title, 14, Ui.TXT, false));
         if (sub != null && !sub.isEmpty()) {
-            TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
+            TextView s = Ui.tv(act, sub, 11, Ui.SUB);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
-            slp.leftMargin = Ui.dp(act, 22);
             left.addView(s, slp);
         }
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));

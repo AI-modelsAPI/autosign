@@ -57,13 +57,13 @@ public class SwipeCard extends FrameLayout {
         backPx = Ui.dp(c, 28);              // 归位阈值同步放低
         actionWidthPx = Ui.dp(c, 80);       // 删除板宽度不变（停靠位）
         touchSlop = ViewConfiguration.get(c).getScaledTouchSlop();
-        int r = Ui.dp(c, 12);
+        int r = Ui.dp(c, 14);
 
         /* ---- 底层左：右滑刷新提示 ---- */
         LinearLayout lb = Ui.row(c);
-        lb.setBackground(Ui.round(Ui.GREEN_BG2, r));
-        lb.setPadding(Ui.dp(c, 16), 0, 0, 0);
-        TextView lt = Ui.iconText(c, "refresh", "刷新数据", 13, Ui.GREEN, true);
+        lb.setBackground(Ui.round(Ui.GREEN_BG, r));
+        lb.setPadding(Ui.dp(c, 18), 0, 0, 0);
+        TextView lt = Ui.iconText(c, "refresh", "释放刷新", 13, Ui.GREEN, true);
         lb.addView(lt);
         leftBoard = lb;
         addView(leftBoard, new LayoutParams(-1, -1));
@@ -75,7 +75,7 @@ public class SwipeCard extends FrameLayout {
         del.setGravity(android.view.Gravity.CENTER);
         del.setBackground(Ui.roundRight(Ui.RED, r));
         del.setClickable(true);
-        del.addView(Ui.icon(c, "trash", 19, Ui.white()));
+        del.addView(Ui.icon(c, "trash", 20, Ui.white()));
         del.addView(Ui.tv(c, "删除", 11, Ui.white(), true), lpTop(c, 3));
         del.setOnClickListener(v -> { if (listener != null) listener.onDelete(); });
         rbWrap.addView(del, new LinearLayout.LayoutParams(actionWidthPx, -1));
