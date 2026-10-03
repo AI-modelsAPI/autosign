@@ -108,11 +108,11 @@ public class CheckinActivity extends Activity {
         });
         root.addView(wv, new FrameLayout.LayoutParams(-1, -1)); // 底层：真实渲染，人机验证需要
 
-        /* 顶层进度遮罩（白色不透明盖住 WebView，但 WebView 仍真实运行） */
+        /* 顶层进度遮罩（柔和背景遮盖 WebView，但 WebView 仍真实运行） */
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
-        box.setBackgroundColor(Color.WHITE);
+        box.setBackgroundColor(Ui.BG);
         box.addView(new ProgressBar(this), new LinearLayout.LayoutParams(-2, -2));
         tip = new TextView(this);
         tip.setText("准备签到环境…");

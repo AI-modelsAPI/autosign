@@ -652,10 +652,13 @@ public class AuthActivity extends Activity {
         errorLayer.addView(backTip, blp2);
         root.addView(errorLayer, new FrameLayout.LayoutParams(-1, -1));
 
-        tip = Ui.tv(this, "  " + providerName() + " 授权中 · 已登录将自动完成  ", 12, Color.WHITE);
-        tip.setBackgroundColor(0xE6111827);
-        tip.setPadding(Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10), Ui.dp(this, 10));
-        root.addView(tip, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        tip = Ui.tv(this, providerName() + " 授权中 · 已登录将自动完成", 12, Color.WHITE);
+        tip.setGravity(Gravity.CENTER);
+        tip.setBackground(Ui.round(0xEE0F172A, Ui.dp(this, 20)));
+        tip.setPadding(Ui.dp(this, 16), Ui.dp(this, 10), Ui.dp(this, 16), Ui.dp(this, 10));
+        FrameLayout.LayoutParams tflp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        tflp.bottomMargin = Ui.dp(this, 24);
+        root.addView(tip, tflp);
 
         setContentView(root);
         startAuthFlow();

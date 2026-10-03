@@ -53,11 +53,11 @@ public final class LogPopup {
         int screenH = a.getResources().getDisplayMetrics().heightPixels;
         int w = Math.min(wMax, (int) (screenW * 0.88f));
         int hh = (int) (screenH * 0.60f);
-        int r = Ui.dp(a, 14);
+        int r = Ui.dp(a, 18);
 
         /* Body 先建好：Header 的清空按钮 lambda 会引用它（final 字段必须先赋值） */
         body = Ui.col(a);
-        body.setPadding(Ui.dp(a, 12), Ui.dp(a, 8), Ui.dp(a, 12), Ui.dp(a, 8));
+        body.setPadding(Ui.dp(a, 14), Ui.dp(a, 10), Ui.dp(a, 14), Ui.dp(a, 10));
         scroller = new ScrollView(a);
         scroller.addView(body);
 
@@ -70,26 +70,27 @@ public final class LogPopup {
         /* ---- 窗口 ---- */
         LinearLayout win = Ui.col(a);
         win.setBackground(Ui.roundStroke(Ui.LOG_BG, r, Math.max(1, Ui.dp(a, 1)), Ui.LOG_LINE));
-        win.setElevation(Ui.dp(a, 16));
+        win.setElevation(Ui.dp(a, 20));
         win.setClickable(true);   // 吃掉点击，避免穿透到遮罩
 
         /* Header */
         LinearLayout header = Ui.row(a);
-        header.setPadding(Ui.dp(a, 14), Ui.dp(a, 10), Ui.dp(a, 14), Ui.dp(a, 10));
+        header.setPadding(Ui.dp(a, 16), Ui.dp(a, 12), Ui.dp(a, 16), Ui.dp(a, 12));
         header.addView(Ui.iconText(a, "log", "实时执行日志", 13, Ui.LOG_TXT, true));
         header.addView(Ui.spring(a));
         TextView clear = Ui.iconText(a, "trash", "清空", 11, Ui.LOG_INFO, true);
-        clear.setPadding(Ui.dp(a, 6), Ui.dp(a, 5), Ui.dp(a, 6), Ui.dp(a, 5));
+        clear.setBackground(Ui.round(0x22FFFFFF, Ui.dp(a, 6)));
+        clear.setPadding(Ui.dp(a, 8), Ui.dp(a, 4), Ui.dp(a, 8), Ui.dp(a, 4));
         clear.setClickable(true);
         clear.setOnClickListener(v -> {
             new Store(act).clearOpLogs();
             body.removeAllViews();
             body.addView(emptyLine("日志已清空"));
         });
-        View close = Ui.iconBtn(a, "cross", 15, Ui.LOG_INFO, 5);
+        View close = Ui.iconBtn(a, "cross", 15, Ui.LOG_INFO, 6);
         close.setOnClickListener(v -> dismiss());
         header.addView(clear);
-        header.addView(Ui.gapW(a, 6));
+        header.addView(Ui.gapW(a, 8));
         header.addView(close);
         win.addView(header, new LinearLayout.LayoutParams(-1, -2));
         win.addView(hairline(a));

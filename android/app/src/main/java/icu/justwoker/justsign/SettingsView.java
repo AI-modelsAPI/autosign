@@ -3,7 +3,9 @@ package icu.justwoker.justsign;
 import android.app.AlertDialog;
 import android.app.TimePickerDialog;
 import android.text.InputType;
+import android.view.DragEvent;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -30,6 +32,7 @@ public class SettingsView extends FrameLayout {
     private final MainActivity act;
     private final LinearLayout rootPage, sitesPage, credsPage, keysPage;
     private final LinearLayout rootBody, sitesBody, credsBody, keysBody;
+    private final ScrollView sitesScroll;
     private int page = PAGE_ROOT;
 
     public SettingsView(MainActivity a) {
@@ -49,8 +52,9 @@ public class SettingsView extends FrameLayout {
         sitesBody = Ui.col(a);
         sitesBody.setPadding(Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 12), Ui.dp(a, 24));
         sitesPage.addView(barSites());
-        sitesPage.addView(new ScrollView(a) {{ addView(sitesBody); }},
-                new LinearLayout.LayoutParams(-1, 0, 1f));
+        sitesScroll = new ScrollView(a);
+        sitesScroll.addView(sitesBody);
+        sitesPage.addView(sitesScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         sitesPage.setVisibility(GONE);
         addView(sitesPage, new LayoutParams(-1, -1));
 
@@ -78,22 +82,22 @@ public class SettingsView extends FrameLayout {
     private View bar(String title, boolean back) {
         LinearLayout bar = Ui.row(act);
         bar.setBackgroundColor(Ui.CARD);
-        bar.setPadding(Ui.dp(act, 12), 0, Ui.dp(act, 16), 0);
-        bar.setLayoutParams(new LinearLayout.LayoutParams(-1, Ui.dp(act, 52)));
+        bar.setPadding(Ui.dp(act, 14), 0, Ui.dp(act, 18), 0);
+        bar.setLayoutParams(new LinearLayout.LayoutParams(-1, Ui.dp(act, 56)));
         if (back) {
             View b = Ui.iconBtn(act, "back", 19, Ui.TXT2, 6);
             b.setOnClickListener(v -> show(PAGE_ROOT));
             bar.addView(b);
-            bar.addView(Ui.gapW(act, 4));
+            bar.addView(Ui.gapW(act, 6));
         }
-        bar.addView(Ui.tv(act, title, 16, Ui.TXT, true));
+        bar.addView(Ui.tv(act, title, 17, Ui.TXT, true));
         bar.addView(Ui.spring(act));
         return bar;
     }
 
     private View barSites() {
         LinearLayout bar = (LinearLayout) bar("站点管理", true);
-        TextView add = Ui.iconBtnText(act, "plus", "手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "手动添加", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         add.setOnClickListener(v -> editSiteDialog(null));
         bar.addView(add);
         return bar;
@@ -101,7 +105,7 @@ public class SettingsView extends FrameLayout {
 
     private View barCreds() {
         LinearLayout bar = (LinearLayout) bar("账号凭据库", true);
-        TextView add = Ui.iconBtnText(act, "plus", "录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView add = Ui.iconBtnText(act, "plus", "录入账号", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         add.setOnClickListener(v -> editCredDialog(null));
         bar.addView(add);
         return bar;
@@ -109,7 +113,7 @@ public class SettingsView extends FrameLayout {
 
     private View barKeys() {
         LinearLayout bar = (LinearLayout) bar("密钥管理", true);
-        TextView refresh = Ui.iconBtnText(act, "refresh", "刷新", 12, Ui.BLUE, Ui.BLUE_BG, 10, 6);
+        TextView refresh = Ui.iconBtnText(act, "refresh", "刷新", 12, Ui.BLUE, Ui.BLUE_BG, 10, 5);
         refresh.setOnClickListener(v -> buildKeys());
         bar.addView(refresh);
         return bar;
@@ -496,9 +500,35 @@ public class SettingsView extends FrameLayout {
         for (int i = 0; i < sites.length(); i++) {
             final JSONObject s = sites.optJSONObject(i);
             if (s == null) continue;
+            final int pos = i;
+
+            // 整体卡片采用垂直布局：上方正中间为专属拖动手柄，下方为主内容行
+            LinearLayout card = Ui.col(act);
+            card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+
+            // ---- 卡片顶部正中央手柄条 ----
+            LinearLayout handleBar = Ui.row(act);
+            handleBar.setGravity(Gravity.CENTER);
+            handleBar.setPadding(0, Ui.dp(act, 7), 0, Ui.dp(act, 2));
+
+            // 优雅的药丸胶囊状把手（如原生抽屉/卡片把手），提供宽裕的触摸反馈区
+            LinearLayout handlePill = Ui.row(act);
+            handlePill.setGravity(Gravity.CENTER);
+            handlePill.setBackground(Ui.ripple(Ui.CARD_SUB, Ui.alpha(Ui.BLUE, 0x1F), Ui.dp(act, 10)));
+            handlePill.setPadding(Ui.dp(act, 18), Ui.dp(act, 5), Ui.dp(act, 18), Ui.dp(act, 5));
+            handlePill.setOnClickListener(v -> act.toast("长按把手即可拖动排序"));
+
+            View barLine = new View(act);
+            barLine.setBackground(Ui.round(Ui.SUB2, Ui.dp(act, 3)));
+            handlePill.addView(barLine, new LinearLayout.LayoutParams(Ui.dp(act, 36), Ui.dp(act, 4)));
+            handleBar.addView(handlePill);
+            card.addView(handleBar);
+
+            // ---- 卡片主内容行 ----
             LinearLayout row = Ui.row(act);
-            row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-            row.setPadding(Ui.dp(act, 12), Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 10));
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(act, 14), Ui.dp(act, 6), Ui.dp(act, 8), Ui.dp(act, 12));
+
             LinearLayout info = Ui.col(act);
             LinearLayout titleRow = Ui.row(act);
             titleRow.addView(Ui.tv(act, s.optString("name", s.optString("key")), 14, Ui.TXT, true));
@@ -514,65 +544,7 @@ public class SettingsView extends FrameLayout {
                     + Engine.kindLabel(s)
                     + "  ·  " + an + " 个账号", 11, Ui.SUB));
             row.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
-            LinearLayout order = Ui.col(act);
-            TextView up = Ui.btn(act, "↑", 15, i == 0 ? Ui.SUB2 : Ui.BLUE, Ui.BLUE_BG, 9, 4);
-            TextView down = Ui.btn(act, "↓", 15, i == sites.length() - 1 ? Ui.SUB2 : Ui.BLUE, Ui.BLUE_BG, 9, 4);
-            TextView handle = Ui.btn(act, "≡ 拖动", 11, Ui.TXT2, Ui.CARD_SUB, 8, 5);
-            final int pos = i;
-            up.setEnabled(pos > 0);
-            down.setEnabled(pos < sites.length() - 1);
-            up.setOnClickListener(v -> {
-                new Store(act).moveSite(s.optString("key"), -1);
-                buildSites();
-                act.render();
-            });
-            down.setOnClickListener(v -> {
-                new Store(act).moveSite(s.optString("key"), 1);
-                buildSites();
-                act.render();
-            });
-            handle.setOnLongClickListener(v -> {
-                android.content.ClipData data = android.content.ClipData.newPlainText("siteKey", s.optString("key"));
-                v.startDragAndDrop(data, new View.DragShadowBuilder(row), s.optString("key"), 0);
-                row.animate().alpha(0.45f).scaleX(0.98f).scaleY(0.98f).setDuration(120).start();
-                return true;
-            });
-            row.setOnDragListener((v, event) -> {
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENTERED) {
-                    row.animate().translationY(-Ui.dp(act, 6)).scaleX(1.02f).scaleY(1.02f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.BLUE_BG, Ui.dp(act, 10), Ui.dp(act, 2), Ui.BLUE));
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_EXITED) {
-                    row.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DROP) {
-                    Object state = event.getLocalState();
-                    row.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(100).start();
-                    row.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(act, 10), Ui.dp(act, 2), Ui.GREEN));
-                    if (state != null) {
-                        new Store(act).moveSiteTo(String.valueOf(state), pos);
-                        row.postDelayed(() -> {
-                            buildSites();
-                            act.render();
-                        }, 180);
-                    }
-                    return true;
-                }
-                if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENDED) {
-                    row.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(120).start();
-                    row.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 8), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
-                    return true;
-                }
-                return event.getAction() == android.view.DragEvent.ACTION_DRAG_STARTED
-                        || event.getAction() == android.view.DragEvent.ACTION_DRAG_LOCATION;
-            });
-            order.addView(handle);
-            order.addView(up);
-            order.addView(down);
-            row.addView(order);
+
             View vis = Ui.iconBtn(act, hidden ? "eye_off" : "eye", 16, hidden ? Ui.ORANGE : Ui.SUB, 7);
             vis.setOnClickListener(v -> {
                 try {
@@ -599,9 +571,78 @@ public class SettingsView extends FrameLayout {
                     }).setNegativeButton("取消", null).show());
             row.addView(edit);
             row.addView(del);
+            card.addView(row);
+
+            // ---- 桌面图标级拖拽交互（长按拿起、浮空微弹、自动滚屏、平滑放置） ----
+            handlePill.setOnLongClickListener(v -> {
+                v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                android.content.ClipData data = android.content.ClipData.newPlainText("siteKey", s.optString("key"));
+                v.startDragAndDrop(data, new View.DragShadowBuilder(card), s.optString("key"), 0);
+
+                // 像桌面提起图标一样，原位卡片变半透明微缩放占位
+                card.animate().alpha(0.35f).scaleX(0.96f).scaleY(0.96f).setDuration(150).start();
+                return true;
+            });
+
+            card.setOnDragListener((v, event) -> {
+                int action = event.getAction();
+                if (action == DragEvent.ACTION_DRAG_STARTED) {
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_LOCATION) {
+                    // 当手指拖动靠近上下屏幕边缘时，自动顺畅平滑滚动 ScrollView
+                    if (sitesScroll != null) {
+                        int[] sLoc = new int[2];
+                        int[] vLoc = new int[2];
+                        sitesScroll.getLocationOnScreen(sLoc);
+                        v.getLocationOnScreen(vLoc);
+                        float relY = (vLoc[1] + event.getY()) - sLoc[1];
+                        int scrollH = sitesScroll.getHeight();
+                        int edge = Ui.dp(act, 65);
+                        if (relY < edge && sitesScroll.getScrollY() > 0) {
+                            sitesScroll.smoothScrollBy(0, -Ui.dp(act, 10));
+                        } else if (relY > scrollH - edge) {
+                            sitesScroll.smoothScrollBy(0, Ui.dp(act, 10));
+                        }
+                    }
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_ENTERED) {
+                    // 悬浮悬停时目标位弹性上浮展开高亮
+                    card.animate().translationY(-Ui.dp(act, 4)).scaleX(1.02f).scaleY(1.02f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.BLUE_BG, Ui.dp(act, 12), Ui.dp(act, 2), Ui.BLUE));
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_EXITED) {
+                    card.animate().translationY(0).scaleX(1f).scaleY(1f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DROP) {
+                    Object state = event.getLocalState();
+                    card.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(120).start();
+                    card.setBackground(Ui.roundStroke(Ui.GREEN_BG2, Ui.dp(act, 12), Ui.dp(act, 2), Ui.GREEN));
+                    card.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                    if (state != null) {
+                        new Store(act).moveSiteTo(String.valueOf(state), pos);
+                        card.postDelayed(() -> {
+                            buildSites();
+                            act.render();
+                        }, 160);
+                    }
+                    return true;
+                }
+                if (action == DragEvent.ACTION_DRAG_ENDED) {
+                    card.animate().translationY(0).alpha(1f).scaleX(1f).scaleY(1f).setDuration(150).start();
+                    card.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+                    return true;
+                }
+                return false;
+            });
+
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.bottomMargin = Ui.dp(act, 8);
-            sitesBody.addView(row, lp);
+            lp.bottomMargin = Ui.dp(act, 10);
+            sitesBody.addView(card, lp);
         }
     }
 
@@ -1249,9 +1290,9 @@ public class SettingsView extends FrameLayout {
 
     private LinearLayout group(String title) {
         LinearLayout g = Ui.col(act);
-        g.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 12), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
+        g.setBackground(Ui.roundStroke(Ui.CARD, Ui.dp(act, 16), Math.max(1, Ui.dp(act, 1)), Ui.LINE));
         TextView t = Ui.tv(act, title, 11, Ui.SUB, true);
-        t.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 4));
+        t.setPadding(Ui.dp(act, 18), Ui.dp(act, 14), Ui.dp(act, 18), Ui.dp(act, 4));
         g.addView(t);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.bottomMargin = Ui.dp(act, 16);
@@ -1259,19 +1300,28 @@ public class SettingsView extends FrameLayout {
         return g;
     }
 
-    /** 条目：图标+标题+副标题 | 右侧值文本或箭头 */
+    /** 条目：图标+标题+副标题 | 右侧值文本或箭头，支持 Ripple 涟漪 */
     private LinearLayout item(String iconName, String title, String sub, String value, OnClickListener onClick) {
         LinearLayout row = Ui.row(act);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(Ui.dp(act, 16), Ui.dp(act, 12), Ui.dp(act, 16), Ui.dp(act, 12));
-        android.widget.ImageView lead = Ui.icon(act, iconName, 18, Ui.TXT2);
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 18), Ui.dp(act, 18));
-        ilp.rightMargin = Ui.dp(act, 10);
-        row.addView(lead, ilp);
+        row.setPadding(Ui.dp(act, 18), Ui.dp(act, 14), Ui.dp(act, 18), Ui.dp(act, 14));
+        if (onClick != null) {
+            row.setBackground(Ui.ripple(0, Ui.BLUE_BG, 0));
+        }
+
+        LinearLayout iconBox = Ui.row(act);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(Ui.round(Ui.CARD_SUB, Ui.dp(act, 8)));
+        android.widget.ImageView lead = Ui.icon(act, iconName, 17, Ui.TXT2);
+        iconBox.addView(lead);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 32), Ui.dp(act, 32));
+        ilp.rightMargin = Ui.dp(act, 12);
+        row.addView(iconBox, ilp);
+
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.tv(act, title, 14, Ui.TXT2, false));
+        left.addView(Ui.tv(act, title, 14, Ui.TXT, false));
         if (sub != null && !sub.isEmpty()) {
-            TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
+            TextView s = Ui.tv(act, sub, 11, Ui.SUB);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
             left.addView(s, slp);
@@ -1287,14 +1337,24 @@ public class SettingsView extends FrameLayout {
 
     private LinearLayout switchItem(String iconName, String title, String sub, boolean init, BoolSink sink) {
         LinearLayout row = Ui.row(act);
-        row.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 16), Ui.dp(act, 10));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(act, 18), Ui.dp(act, 12), Ui.dp(act, 18), Ui.dp(act, 12));
+
+        LinearLayout iconBox = Ui.row(act);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(Ui.round(Ui.CARD_SUB, Ui.dp(act, 8)));
+        android.widget.ImageView lead = Ui.icon(act, iconName, 17, Ui.TXT2);
+        iconBox.addView(lead);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(Ui.dp(act, 32), Ui.dp(act, 32));
+        ilp.rightMargin = Ui.dp(act, 12);
+        row.addView(iconBox, ilp);
+
         LinearLayout left = Ui.col(act);
-        left.addView(Ui.iconText(act, iconName, title, 14, Ui.TXT2, false));
+        left.addView(Ui.tv(act, title, 14, Ui.TXT, false));
         if (sub != null && !sub.isEmpty()) {
-            TextView s = Ui.tv(act, sub, 11, Ui.SUB2);
+            TextView s = Ui.tv(act, sub, 11, Ui.SUB);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
             slp.topMargin = Ui.dp(act, 2);
-            slp.leftMargin = Ui.dp(act, 22);
             left.addView(s, slp);
         }
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1f));
