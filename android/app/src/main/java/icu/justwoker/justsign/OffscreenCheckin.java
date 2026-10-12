@@ -144,7 +144,8 @@ public final class OffscreenCheckin {
         private volatile boolean fired = false;
         /** JS 报「人机验证可能需要交互」→ 后台跑不通，通知调用方转可见兜底 */
         private volatile boolean needUi = false;
-
+        /** v1.3.2（P0-1）：本 WebView 绑定的「站点×账号」专属分区（降级=Default 时为 null）。 */
+        private androidx.webkit.Profile mProfile;
         Runner(Context ctx, String siteKey, String accountKey, int timeoutSec, Callback cb) {
             this.ctx = ctx; this.siteKey = siteKey; this.accountKey = accountKey;
             this.timeoutSec = timeoutSec; this.cb = cb;
@@ -164,13 +165,25 @@ public final class OffscreenCheckin {
                 if (accountKey == null || accountKey.isEmpty()) { finish(false, false, 0, false, "账号缺失"); return; }
 
                 wv = new WebView(ctx); /* 离屏：不 attach 窗口，无 UI，JS 全速运行 */
+                /* v1.3.2（P0-1）：必须绑定「站点×账号」专属 Profile —— 与授权/静默重授权/
+                 * 只读兜底同一个分区。此前这里用 Default 分区：账号授权后站点会话写在自己
+                 * 的命名分区里，离屏签到根本看不到它 → 会话型站恒判「授权已过期」；反过来
+                 * 若 Default 分区残留别的账号的 host Cookie，签到请求会以错误身份通过
+                 * （Engine.attempt 注释已写明服务端「先查 session 再回退 Authorization」）。
+                 * 绑定必须在 getSettings()/loadUrl 之前调用。 */
+                mProfile = WebViewProfileUtil.bindProfile(wv,
+                        WebViewProfileUtil.profileNameFor(siteKey, accountKey));
                 WebSettings s = wv.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
                 s.setUserAgentString(UA);
-                /* 第三方 Cookie（Turnstile 需要 challenges.cloudflare.com 的 cookie） */
-                try { android.webkit.CookieManager.getInstance()
-                        .setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
+                /* 第三方 Cookie（Turnstile 需要 challenges.cloudflare.com 的 cookie）。
+                 * 注意：必须开在「本 WebView 绑定的分区」上，不是全局 Default 分区。 */
+                try {
+                    android.webkit.CookieManager pcm = WebViewProfileUtil.cookieManagerFor(mProfile);
+                    pcm.setAcceptCookie(true);
+                    pcm.setAcceptThirdPartyCookies(wv, true);
+                } catch (Exception ignored) {}
                 wv.addJavascriptInterface(new Bridge(), "JustSign");
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return false; }
@@ -268,6 +281,11 @@ public final class OffscreenCheckin {
             if (done) return;
             done = true;
             main.removeCallbacks(timeoutTask);
+
+            /* v1.3.2（P0-1）：落盘本账号分区 —— 站点在签到过程中可能轮换会话 Cookie
+             * （New API 的 new_api_refresh 会随响应轮换），不刷盘这些更新会丢。
+             * 与 AuthActivity.onPause / SilentAuth 同款：刷的必须是本 Profile，不是 Default 分区。 */
+            WebViewProfileUtil.flush(mProfile);
 
             final WebView w = wv; wv = null;
             /* destroy 必须与创建线程一致（主线程） */

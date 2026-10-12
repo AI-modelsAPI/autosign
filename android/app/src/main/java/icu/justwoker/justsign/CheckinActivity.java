@@ -52,6 +52,8 @@ public class CheckinActivity extends Activity {
     private volatile boolean fired = false, finished = false;
     private volatile boolean unmasked = false;
     private Runnable watchdog;
+    /** v1.3.2（P0-1）：本 WebView 绑定的「站点×账号」专属分区（降级=Default 时为 null）。 */
+    private androidx.webkit.Profile mProfile;
 
     /* 账号快照：注入前读一次 */
     private String snapToken = "", snapSiteKey = "";
@@ -78,11 +80,21 @@ public class CheckinActivity extends Activity {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
         wv = new WebView(this);
+        /* v1.3.2（P0-1）：与后台离屏签到同款 —— 必须绑定「站点×账号」专属 Profile。
+         * 可见兜底跑的是同一套 CheckinJs，若它在 Default 分区，就看不到该账号授权时
+         * 写在命名分区里的站点会话（会话型站恒判「授权已过期」），且 Default 分区里
+         * 别的账号的 host Cookie 会让请求以错误身份通过。绑定必须在 getSettings() 之前。 */
+        mProfile = WebViewProfileUtil.bindProfile(wv,
+                WebViewProfileUtil.profileNameFor(siteKey, accountKey));
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setUserAgentString(Engine.UA_OFFSCREEN);
-        try { CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true); } catch (Exception ignored) {}
+        try {
+            CookieManager pcm = WebViewProfileUtil.cookieManagerFor(mProfile);
+            pcm.setAcceptCookie(true);
+            pcm.setAcceptThirdPartyCookies(wv, true);
+        } catch (Exception ignored) {}
         wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
@@ -192,6 +204,9 @@ public class CheckinActivity extends Activity {
     @Override protected void onDestroy() {
         finished = true;
         if (h != null) h.removeCallbacksAndMessages(null);
+        /* v1.3.2（P0-1）：落盘本账号分区（签到过程中站点可能轮换会话 Cookie）。
+         * 刷的必须是本 Profile，不是 Default 分区。 */
+        WebViewProfileUtil.flush(mProfile);
         if (wv != null) {
             try {
                 wv.stopLoading();

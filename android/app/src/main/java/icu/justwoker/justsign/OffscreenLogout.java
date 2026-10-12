@@ -70,7 +70,7 @@ public final class OffscreenLogout {
         final AtomicReference<String> diag = new AtomicReference<>("timeout");
         final CountDownLatch latch = new CountDownLatch(1);
         new Handler(Looper.getMainLooper()).post(() ->
-                new Runner(app, store, base, cookie, siteUserId, to, (code, note) -> {
+                new Runner(app, store, siteKey, accountKey, base, cookie, siteUserId, to, (code, note) -> {
                     result.set(code);
                     diag.set(note);
                     latch.countDown();
@@ -114,18 +114,24 @@ public final class OffscreenLogout {
     private static final class Runner {
         private final Context ctx;
         private final Store store;
+        private final String siteKey, accountKey;
         private final String base, cookie, siteUserId;
         private final int timeoutSec;
         private final Done done;
         private final Handler main = new Handler(Looper.getMainLooper());
         private WebView wv;
+        /** v1.3.2（P0-1）：本 WebView 绑定的「站点×账号」专属分区（降级=Default 时为 null）。 */
+        private androidx.webkit.Profile mProfile;
         private boolean finished = false;
         private final Runnable watchdog;
 
-        Runner(Context ctx, Store store, String base, String cookie, String siteUserId,
+        Runner(Context ctx, Store store, String siteKey, String accountKey,
+               String base, String cookie, String siteUserId,
                int timeoutSec, Done done) {
             this.ctx = ctx;
             this.store = store;
+            this.siteKey = siteKey == null ? "" : siteKey;
+            this.accountKey = accountKey == null ? "" : accountKey;
             this.base = base;
             this.cookie = cookie == null ? "" : cookie;
             this.siteUserId = siteUserId == null ? "" : siteUserId;
@@ -136,15 +142,27 @@ public final class OffscreenLogout {
 
         void start() {
             try {
-                injectCookies();
                 wv = new WebView(ctx); /* 离屏：不 attach 任何窗口 */
+                /* v1.3.2（P0-1）：必须绑定「站点×账号」专属 Profile —— 这是登出链路原本
+                 * 最危险的一处：旧实现把业务 Cookie 注入全局 Default 分区
+                 * （CookieManager.getInstance().setCookie），等于把 A 账号的站点会话
+                 * 灌进所有后续跑在 Default 分区的 WebView；而服务端「先查 session 再回退
+                 * Authorization」（见 Engine.attempt 注释），于是别的账号的请求会以 A 的身份
+                 * 通过 —— 典型串号。现改为：注入并登出都在本账号分区内完成，与授权/签到一致。
+                 * 绑定必须在 getSettings()/loadUrl 之前调用。 */
+                mProfile = WebViewProfileUtil.bindProfile(wv,
+                        WebViewProfileUtil.profileNameFor(this.siteKey, this.accountKey));
+                injectCookies();
                 WebSettings s = wv.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
                 s.setUserAgentString(UA);
                 s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-                CookieManager.getInstance().setAcceptCookie(true);
-                CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true);
+                try {
+                    CookieManager pcm = WebViewProfileUtil.cookieManagerFor(mProfile);
+                    pcm.setAcceptCookie(true);
+                    pcm.setAcceptThirdPartyCookies(wv, true);
+                } catch (Exception ignored) {}
                 wv.addJavascriptInterface(new Bridge(), "JsBridge");
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public void onPageFinished(WebView v, String url) {
@@ -161,10 +179,11 @@ public final class OffscreenLogout {
             }
         }
 
-        /** 把业务侧 Cookie 注入 WebView，使 fetch 复用同一个服务端会话。 */
+        /** 把业务侧 Cookie 注入「本账号分区」的 WebView，使 fetch 复用同一个服务端会话。
+         *  v1.3.2（P0-1）：旧实现写全局 Default 分区，会把本账号会话泄漏给其他账号。 */
         private void injectCookies() {
             if (cookie.isEmpty()) return;
-            CookieManager cm = CookieManager.getInstance();
+            CookieManager cm = WebViewProfileUtil.cookieManagerFor(mProfile);
             cm.setAcceptCookie(true);
             for (String pair : cookie.split(";")) {
                 String p = pair.trim();
@@ -260,6 +279,11 @@ public final class OffscreenLogout {
             if (finished) return;
             finished = true;
             main.removeCallbacks(watchdog);
+            /* v1.3.2（P0-1）：落盘本账号分区，并清掉本分区内的会话 Cookie ——
+             * 登出后站点可能已下发失效指令，但我们注入过的会话 Cookie 仍留在分区里；
+             * 不清会让「已登出」的账号在本分区里残留可用会话（下次授权前先登出又被复用）。 */
+            WebViewProfileUtil.flush(mProfile);
+            WebViewProfileUtil.clearCookiesForUrl(mProfile, base);
             final WebView w = wv;
             wv = null;
             main.post(() -> {

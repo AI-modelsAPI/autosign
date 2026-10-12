@@ -223,6 +223,8 @@ public class AuthActivity extends Activity {
     /** true = 该站的 /api/oauth/state 只认 GET（AgentRouter 型）；由 404 探测得出并记入站点 meta */
     private boolean stateUseGet = false;
     private boolean credHasOtp = false;
+    /** v1.3.2：本 Activity 是否持有授权事务锁（仅它抢到的才由它释放，防误放别人的锁）。 */
+    private volatile boolean holdsAuthLock = false;
     /* 本次授权绑定的「站点×账号」Profile（降级=Default 时为 null） */
     private androidx.webkit.Profile mProfile;
 
@@ -441,6 +443,17 @@ public class AuthActivity extends Activity {
         accountKey = getIntent().getStringExtra("accountKey");
         alias = getIntent().getStringExtra("alias");
         credentialId = getIntent().getStringExtra("credentialId");
+        /* v1.3.2（P1-3）：可见授权是最长的一段流程（分钟级）。此前锁只在重登/重新授权
+         * 入口短暂持有，进入本页前已被释放 → 用户从「签到重登」与「重新授权」两个入口
+         * 各点一次，即可并行开两条授权链路、并行建两个站点会话（AUTH_SESSION_LIMIT）。
+         * 现由本页全程持锁：抢不到说明同账号已有流程在跑，直接退出并如实告知。
+         * 只在「本页确实抢到了」时（holdsAuthLock）才在 onDestroy 释放，避免误放别人的锁。 */
+        if (!ReauthManager.acquire(siteKey, accountKey)) {
+            setResult(RESULT_CANCELED, new Intent().putExtra("error", "该账号已有会话流程进行中，请稍候再试"));
+            finish();
+            return;
+        }
+        holdsAuthLock = true;
 
         Store store = new Store(this);
         JSONObject site = store.findSite(siteKey);
@@ -1885,8 +1898,12 @@ if (exchanging) return r.sameHost;
         /* v0.6.7：页面销毁兜底释放在途标记——用户取消/返回/异常退出后，
          * 该账号不会被永久锁死，下次授权可正常抢占交换权。 */
         SilentAuth.releaseExchange(accountKey);
-        /* v1.0.4：同步释放授权事务锁，防止下次授权被误判"流程进行中"。 */
-        ReauthManager.release(siteKey, accountKey);
+        /* v1.3.2（P1-3）：只释放本页自己抢到的锁——抢不到锁时本页没持锁，
+         * 无条件 release 会把「正在跑的那条流程」的锁误放掉，等于白加锁。 */
+        if (holdsAuthLock) {
+            holdsAuthLock = false;
+            ReauthManager.release(siteKey, accountKey);
+        }
         h.removeCallbacksAndMessages(null);
         if (wv != null) {
             try {

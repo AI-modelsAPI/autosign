@@ -54,9 +54,15 @@ AutoSign 优先使用站点公开业务接口，不解析额度页面、不伪�
 - 不提供批量注册、验证码绕过、账号共享或未授权访问功能。
 
 ## 本地构建
-要求 JDK 17、Gradle 8.7 和 Android SDK 34：
+要求 JDK 17、Gradle 8.7 和 Android SDK 34（compileSdk 34 / targetSdk 34 / minSdk 24）。
+
+仓库**不提交 Gradle Wrapper**（CI 由 `gradle/actions/setup-gradle` 自行生成），因此本机需先装好
+Gradle 8.7，并把 `JAVA_HOME`、`ANDROID_SDK_ROOT` 指对；`gradle` 不在 PATH 时用绝对路径调用：
 
 ```bash
+export JAVA_HOME=/path/to/jdk-17
+export ANDROID_SDK_ROOT=/path/to/android-sdk
+
 cd android
 gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon
 ```
@@ -68,7 +74,14 @@ gradle -Pandroid.aapt2FromMavenOverride=/usr/bin/aapt2 \
   testDebugUnitTest assembleDebug assembleRelease --no-daemon
 ```
 
+纯脚本回归（不需要 JDK，只要有 Node 18+）：
+
+```bash
+for f in tools/test_*.mjs; do node "$f"; done
+```
+
 目录：`android/` 为应用源码，`tools/` 为辅助测试脚本，`.github/workflows/android-apk.yml` 为 Android CI。
+
 
 ## 使用边界与免责声明
 使用者必须遵守所在地法律、GitHub 条款及各站点服务条款，只操作本人所有或已获明确授权的账号。站点可能随时调整接口、风控、奖励或封禁政策；因使用本软件产生的账号限制、额度变化、数据丢失或其他损失由使用者自行承担。

@@ -725,7 +725,7 @@ public class MainActivity extends Activity {
     /* ================= 全局动作 ================= */
 
     private void bulkCheckin() {
-        if (bulkBusy) { toast("任务进行中…"); return; }
+        if (bulkBusy || singleBusy) { toast("任务进行中…"); return; }
         java.util.ArrayList<String[]> targets = new java.util.ArrayList<>(); // {siteKey, accKey, type}
         Store store = new Store(this);
         JSONArray sites = store.sites();
@@ -982,7 +982,8 @@ public class MainActivity extends Activity {
                     store.opLog(siteKey, accountKey, "重登签到", "info",
                             "静默重登需人工授权，转授权页", msg == null ? "" : msg, "auto");
                     toast("该账号需要重新授权一次" + (msg == null || msg.isEmpty() ? "" : "：" + msg));
-                    ReauthManager.release(siteKey, accountKey);
+                    /* v1.3.2（P1-3）：此处不再释放——锁的交接统一在 openAuthActivity 里做，
+                     * 避免「这里放了、那里又抢」的多点状态分叉。 */
                     beginAuth(store.findSite(siteKey), store.findAccount(accountKey));
                     finish.run(false);
                 } else {
@@ -997,7 +998,7 @@ public class MainActivity extends Activity {
     }
 
     private void bulkRefresh() {
-        if (bulkBusy) { toast("任务进行中…"); return; }
+        if (bulkBusy || singleBusy) { toast("任务进行中…"); return; }
         java.util.ArrayList<String[]> targets = new java.util.ArrayList<>();
         JSONArray sites = new Store(this).sites();
         for (int i = 0; i < sites.length(); i++) {
@@ -1081,7 +1082,7 @@ public class MainActivity extends Activity {
     /* ================= 单账号操作 ================= */
 
     private void doCheckin(String key, TextView btn) {
-        if (singleBusy) { toast("签到进行中…"); return; }
+        if (singleBusy || bulkBusy) { toast("签到进行中…"); return; }
         Store store = new Store(this);
         JSONObject site = store.siteOfAccount(key);
         if (site == null) { toast("站点信息缺失"); return; }
@@ -1757,7 +1758,10 @@ SilentAuth.run(this, sk, ak, (ok, needUi, user, msg) -> {
         });
     }
 
+    /** 拉起可见授权。锁在此处交接给 AuthActivity（它自己 acquire、onDestroy 释放），
+     *  MainActivity 侧不再持有，避免两条链路争同一把锁或互相误放。 */
     private void openAuthActivity(String sk, String ak, String al, String cid) {
+        ReauthManager.release(sk, ak);
         Intent it = new Intent(this, AuthActivity.class);
         it.putExtra("siteKey", sk);
         it.putExtra("accountKey", ak);

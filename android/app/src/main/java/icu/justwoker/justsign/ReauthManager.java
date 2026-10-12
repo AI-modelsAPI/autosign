@@ -33,16 +33,23 @@ public final class ReauthManager {
         return (siteKey == null ? "" : siteKey) + "|" + (accountKey == null ? "" : accountKey);
     }
 
-    /** 尝试持有授权事务锁；已有活跃持锁者（未超 TTL）返回 false。 */
+    /** 尝试持有授权事务锁；已有活跃持锁者（未超 TTL）返回 false。
+     *
+     * v1.3.2 修复两处并发缺陷（旧实现用「读-判断-写」三段 + Long 引用比较）：
+     *   a) 两个线程可能同时读到 old == null，于是都 return true → 同账号并行建两个会话，
+     *      正是本类要防的 AUTH_SESSION_LIMIT。
+     *   b) `LOCKS.get(k) == Long.valueOf(now)` 比较的是 Long 对象引用；时间戳远超
+     *      Long 缓存区间（-128..127），该判断恒为 false → 循环回到顶部、此时 old 已是
+     *      自己刚写入的值 → 返回 false。结果是「崩溃/被杀留下的锁永远抢不回来」，
+     *      且每次重试都把时间戳刷新，TTL 自愈形同虚设。
+     * 现改为单次 CAS：putIfAbsent 抢空锁，replace 只抢已过期的锁。 */
     public static boolean acquire(String siteKey, String accountKey) {
         String k = key(siteKey, accountKey);
         long now = System.currentTimeMillis();
-        for (;;) {
-            Long old = LOCKS.get(k);
-            if (old != null && now - old < LOCK_TTL_MS) return false;
-            if (LOCKS.put(k, now) == null || old == null) return true;
-            if (LOCKS.get(k) == Long.valueOf(now)) return true; // 覆盖了过期锁
-        }
+        Long old = LOCKS.get(k);
+        if (old == null) return LOCKS.putIfAbsent(k, now) == null;
+        if (now - old < LOCK_TTL_MS) return false;
+        return LOCKS.replace(k, old, now);   // 只替换「仍是这把过期锁」的情况
     }
 
     /** 锁当前是否被持有（含 TTL 判定）。调用方用于判断"锁已由我方上游持有"。 */

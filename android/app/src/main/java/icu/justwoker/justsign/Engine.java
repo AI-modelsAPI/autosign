@@ -1497,6 +1497,17 @@ public class Engine {
      *   REAUTH_NEEDS_UI/SKIP → needUi=true，交由上层拉起可见授权(L2)。
      */
     public JSONObject anyRouterRelogin(String accountKey) {
+        /* v1.3.2（P1-4）：整条「登出→重登→余额对照」必须原子。此前只对子步骤加锁
+         * （logoutSession/status 各自 synchronized），组合起来不是原子的 —— 手动签到
+         * （MainActivity.doCheckin）与定时任务（runScheduled）可同时进来，同账号并行
+         * 跑两条重登：一个刚登出、另一个正在重登，互相把对方的会话打掉。
+         * 统一走 opLock(accountKey)，与 status/checkin/logout 同一把锁、同一顺序。 */
+        synchronized (opLock(accountKey == null ? "" : accountKey)) {
+            return anyRouterReloginLocked(accountKey);
+        }
+    }
+
+    private JSONObject anyRouterReloginLocked(String accountKey) {
         JSONObject out = new JSONObject();
         try {
             JSONObject site = store.siteOfAccount(accountKey);
