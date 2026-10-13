@@ -10,8 +10,8 @@ import static org.junit.Assert.assertTrue;
  *
  * 设计原则（用户明确要求，不许靠等秒数）：
  *   - 唯一成功判据 = 业务接口返回真实 JSON（放行已确认）；
- *   - 超时 = 失败（waf-not-cleared / captcha-needs-human），绝不当成功放行；
- *   - 需要人工交互时如实上报，不代答、不伪造。
+ *   - 超时 = 失败（waf-not-cleared），绝不当成功放行；
+ *   - 重试由上层按 retryable 决定，不在脚本内空等。
  *
  * 这些断言锁死上述属性，防止再退回「等够 30s 就当过了」的猜法。
  */
@@ -25,7 +25,7 @@ public class OffscreenReadJsEvidenceTest {
     @Test public void timeoutIsFailureNotSuccess() {
         String s = js();
         assertTrue("超时必须上报 waf-not-cleared", s.contains("waf-not-cleared"));
-        assertTrue("需人工交互时必须如实上报", s.contains("captcha-needs-human"));
+        assertTrue("超时必须标可重试（一次没成 ≠ 永远不成）", s.contains("retryable:true"));
         // 旧的「超时也继续跑」写法必须消失
         assertFalse("不得再存在『超时后照常 run()』的写法",
                 s.contains("if(pageReady()||Date.now()>=gateCap){run();"));
@@ -47,10 +47,9 @@ public class OffscreenReadJsEvidenceTest {
         assertTrue(s.contains("arg1"));
     }
 
-    /** 人工交互判定只能「观察组件是否显形」，不得出现任何点击/代答动作。 */
-    @Test public void humanCheckOnlyObserves() {
+    /** 只读脚本的安全属性：绝不代答、不伪造、不提交。 */
+    @Test public void readOnlyScriptNeverActs() {
         String s = js();
-        assertTrue("需有 needsHuman 判定", s.contains("function needsHuman"));
         assertFalse("绝不代答：不得出现点击验证码", s.contains(".click()"));
         assertFalse("绝不伪造：不得写 cookie", s.contains("document.cookie="));
         assertFalse("不得提交表单", s.contains(".submit("));

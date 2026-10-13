@@ -237,10 +237,9 @@ public class Engine {
                  * 若离屏已把 WAF 质询跑完，放行 Cookie 就已落在该分区里 ——
                  * 此时重发一次原生请求即可通过。判据是「离屏确实跑过质询」这一可观测事实，
                  * 而不是「等了多久」。仅对幂等只读 GET、且只重试一次。 */
-                /* 需人工验证（滑块）时重试无意义：连 Chrome 都要人拖，重发原生请求也过不去。
-                 * 只对「未过盾/未就绪」这类可能自行恢复的情形重试。 */
+                /* v1.3.3：删掉 v1.3.2 那条「需人工则重试无意义」——前提（滑块）已被
+                 * 第一手复测证伪。未过盾/未就绪一律视为可重试（放行 Cookie 可能刚落地）。 */
                 boolean offscreenRanChallenge = recovered != null
-                        && !"captcha-needs-human".equals(offReason)
                         && (recovered.optBoolean("retryable", false)
                             || "waf-not-cleared".equals(offReason)
                             || "identity-not-ready".equals(offReason)
@@ -873,16 +872,13 @@ public class Engine {
                     }
                 }
                 lastError = "WAF200: " + txt.substring(0, Math.min(120, txt.length()));
-                /* v1.3.2 如实分类：该挑战页若是「必须人工拖动」的滑块验证码
-                 * （真机实证 agentrouter.org，连 Chrome 都要拖），就直说需要人工验证。
-                 * 旧实现一律回「请更换代理节点」——用户换节点后仍是滑块，
-                 * 属于误导性建议，且掩盖了「本站要求人工验证」这一事实。 */
-                boolean human = WafChallenge.needsHumanInteraction(txt);
+                /* v1.3.3 回退 v1.3.2 的错误结论：曾据「真机 Chrome 打开裸 /api/user/self
+                 * 出现滑块」推断该站要求人工验证。第一手复测证明那是**测试姿势造成的**
+                 * ——只有直接导航裸 API 路径（无有效会话、无站点页面上下文）才触发；
+                 * 正常流程（站点页面内 fetch / 有会话）不触发，用户也从没见过滑块。
+                 * 故不再区分「需人工」，回到如实描述。 */
                 return new JSONObject().put("http", 503).put("waf", true)
-                        .put("needsHuman", human)
-                        .put("message", human
-                                ? "该站点要求完成一次人工验证（滑块），请在应用内打开站点完成后再试"
-                                : "站点防护拦截了本次请求，请更换代理节点后重试");
+                        .put("message", "站点防护拦截了本次请求，请更换代理节点后重试");
             }
             JSONObject out = new JSONObject().put("http", resp.code());
             try { out.put("data", new JSONObject(txt)); }
@@ -1087,12 +1083,11 @@ public class Engine {
                 && self.optJSONObject("data") != null
                 && self.optJSONObject("data").optBoolean("success", false);
         boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(tk) || !selfReadable;
-        /* v1.3.2：已知需要人工验证（滑块）时，跳过静默重授权。
-         * 真机实证：agentrouter 的挑战页要求人工拖动，连 Chrome 都要拖；
-         * 静默重授权（OffscreenReauth）注定失败，却要白等 30s（还会拖慢整轮批量刷新）。
-         * 判据读 attempt 已算好的 needsHuman（WAF 归一化响应不带 body，不能重新解析）。 */
-        boolean needsHuman = self.optBoolean("needsHuman", false);
-        if (allowSilentReauth && keepAliveOk && !needsHuman
+        /* v1.3.3：删掉 v1.3.2 那个基于错误结论的「需人工则跳过静默重授权」。
+         * 真机第一手复测证明：正常流程没有滑块；离屏重授权失败的真实原因曾是
+         * window.open 被 WebView 丢弃（已在本版修复），不是「必须人工拖动」。
+         * 因此恢复静默重授权——这正是死会话自愈的唯一自动路径。 */
+        if (allowSilentReauth && keepAliveOk
                 && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
                 && "linuxdo".equals(SiteProtocol.provider(site, tk))
                 && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503

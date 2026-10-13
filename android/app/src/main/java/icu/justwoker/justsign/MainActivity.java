@@ -923,13 +923,30 @@ public class MainActivity extends Activity {
                 return;
             }
             if (!alive) {
-                /* status 失败：会话无法确证（503/WAF/网络），绝不登出销毁会话。让用户手动重新授权。 */
-                ReauthManager.release(siteKey, accountKey);
+                /* status 失败：会话无法确证（503/WAF/网络）。绝不登出销毁会话。
+                 *
+                 * v1.3.3（真机第一手证据）：原实现只弹「请重新授权后再试」，把重建会话
+                 * 完全推给用户手动操作 —— 而 README 允许授权流程开页面。现在可见授权页
+                 * 已能接管站点 SPA 的 window.open（OAuth 真正能跑通），因此这里直接
+                 * 转入可见授权：用户点一次「签到」即可自动完成重建，不再卡死。
+                 * 锁的交接交给 openAuthActivity 统一处理（它会先 release）。 */
                 int hc0 = st0 == null ? 0 : st0.optInt("http", 0);
-                store.opLog(siteKey, accountKey, "重登签到", "err",
-                        "会话状态无法确认，已中止重登（不销毁会话）",
-                        "status http=" + hc0 + "；请手动重新授权后再签到", "auto");
-                h.post(() -> { toast("无法确认会话状态（可能已失效），请重新授权后再试"); finish.run(false); });
+                store.opLog(siteKey, accountKey, "重登签到", "info",
+                        "会话状态无法确认，转可见授权重建会话",
+                        "status http=" + hc0 + "；不销毁旧会话", "auto");
+                JSONObject acc0 = store.findAccount(accountKey);
+                if (acc0 == null) {
+                    ReauthManager.release(siteKey, accountKey);
+                    h.post(() -> { toast("账号信息缺失，无法重新授权"); finish.run(false); });
+                    return;
+                }
+                final String al0 = acc0.optString("alias");
+                final String cid0 = acc0.optString("credentialId", "");
+                h.post(() -> {
+                    toast("会话已失效，正在打开授权以重建…");
+                    openAuthActivity(siteKey, accountKey, al0, cid0);
+                    finish.run(false);
+                });
                 return;
             }
             /* status 成功且今日未签 → 会话确证活着、确实没签，才登出重登触发发奖。

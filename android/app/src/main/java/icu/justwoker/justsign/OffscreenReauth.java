@@ -7,6 +7,9 @@ import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebResourceRequest;
+import android.os.Message;
+import android.webkit.WebChromeClient;
 import android.webkit.WebViewClient;
 
 import androidx.webkit.Profile;
@@ -129,6 +132,10 @@ public final class OffscreenReauth {
         private Profile profile;
         private volatile boolean finished = false;
         private volatile boolean forumChecked = false;
+        /* v1.3.3：弹窗回灌计数上限。可见侧有 AuthNavigationGuard 熔断，离屏侧原先没有，
+         * 若目标页每次加载都再次 window.open，就会在 30s 内持续重建中转 WebView。 */
+        private int popupHops = 0;
+        private static final int POPUP_HOP_LIMIT = 6;
         private final long startMs = System.currentTimeMillis();
         private final Runnable watchdog;
         private final Runnable tick;
@@ -178,11 +185,55 @@ public final class OffscreenReauth {
                 s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
                 wv.setVisibility(WebView.INVISIBLE);
                 wv.addJavascriptInterface(new Bridge(), "JustSign");
+                /* v1.3.3 根因修复（与 AuthActivity 同源）：站点 SPA 用 window.open 发起
+                 * OAuth（真机 SPA 源码实证）。WebView 默认丢弃 window.open → 离屏重授权
+                 * 点「LinuxDO」按钮后永不跳转，只能等满 30s 超时。开启弹窗并转回本实例，
+                 * 保持与站点会话同分区（OAuth 的 state 必须与论坛会话配对）。 */
+                try {
+                    s.setSupportMultipleWindows(true);
+                    s.setJavaScriptCanOpenWindowsAutomatically(true);
+                } catch (Exception ignored) {}
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public void onPageFinished(WebView v, String url) {
                         if (finished || url == null) return;
                         if (AuthProbeJs.sameOrigin(url, base)) {
                             try { v.evaluateJavascript(AuthProbeJs.render(base, expectId), null); } catch (Exception ignored) {}
+                        }
+                    }
+                });
+                /* v1.3.3：把 window.open 的 OAuth 弹窗转回本离屏实例加载
+                 * （离屏是 INVISIBLE 的，不影响用户；关键是保住同分区会话配对）。 */
+                wv.setWebChromeClient(new WebChromeClient() {
+                    @Override public boolean onCreateWindow(WebView view, boolean isDialog,
+                                                            boolean isUserGesture, Message resultMsg) {
+                        if (resultMsg == null || !(resultMsg.obj instanceof WebView.WebViewTransport)) return false;
+                        /* 熔断：超出上限说明页面在反复弹窗，继续回灌只会打转（可见侧有
+                         * AuthNavigationGuard 兜同样的场景）。停止回灌，交给 watchdog 收敛。 */
+                        if (++popupHops > POPUP_HOP_LIMIT) return false;
+                        final WebView relay = new WebView(ctx);
+                        /* 与 AuthActivity 同款回收纪律：正常取到 URL、5s 未导航兜底、
+                         * 异常三条路径都必须销毁，否则每次 window.open 泄漏一个 WebView。 */
+                        final Runnable reapRelay = () -> main.post(() -> {
+                            try { relay.stopLoading(); relay.destroy(); } catch (Exception ignored) {}
+                        });
+                        try {
+                            relay.getSettings().setJavaScriptEnabled(true);
+                            relay.setWebViewClient(new WebViewClient() {
+                                @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                                    if (req == null || req.getUrl() == null) return false;
+                                    String url = req.getUrl().toString();
+                                    if (!finished && wv != null) wv.loadUrl(url);
+                                    reapRelay.run();
+                                    return true;
+                                }
+                            });
+                            ((WebView.WebViewTransport) resultMsg.obj).setWebView(relay);
+                            resultMsg.sendToTarget();
+                            main.postDelayed(reapRelay, 5000);
+                            return true;
+                        } catch (Exception e) {
+                            reapRelay.run();
+                            return false;
                         }
                     }
                 });

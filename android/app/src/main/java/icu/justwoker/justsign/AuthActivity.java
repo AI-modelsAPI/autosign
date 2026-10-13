@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Message;
+import android.webkit.WebChromeClient;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
@@ -214,6 +216,10 @@ public class AuthActivity extends Activity {
     private volatile String lastNavLog = "";
     /** 授权导航单调序号：定位“确认页未完成加载就被回调拒绝”的时序问题。 */
     private final java.util.concurrent.atomic.AtomicInteger authNavSeq = new java.util.concurrent.atomic.AtomicInteger();
+    /** v1.3.3：window.open 回灌次数上限。站点 SPA 用弹窗发起 OAuth 时需要回灌，
+     * 但若目标页每次加载都再次弹窗，就会无限递归（离屏侧同款熔断）。 */
+    private int popupHops = 0;
+    private static final int POPUP_HOP_LIMIT = 6;
     private String credAccount = "", credPassword = "", credOtp = "";
     /** v1.0.3+：仅当凭据库明确存有 GitHub 用户名时才非空，专供授权 URL 的 &login= 使用。
      * credAccount 会在 githubUser 为空时回退 siteAccount（站内账号），若把站内账号当作
@@ -522,6 +528,63 @@ public class AuthActivity extends Activity {
             pcm.setAcceptCookie(true);
             pcm.setAcceptThirdPartyCookies(wv, true);
         } catch (Exception ignored) {}
+        /* v1.3.3 根因修复（真机第一手证据）：站点 SPA 的登录按钮全部走 window.open，
+         * 例如 agentrouter.org 的 /login 页（SPA 源码实证）：
+         *   window.open(`https://connect.linux.do/oauth2/authorize?...`)   // LinuxDO
+         *   window.open(`https://github.com/login/oauth/authorize?...`)    // GitHub
+         * WebView 默认 setSupportMultipleWindows(false) 且没有 WebChromeClient 时，
+         * window.open 会被内核**静默丢弃**：真机实测点「使用 LinuxDO 继续」后日志记
+         * 「已点击」，但 35 秒零导航、探测恒得 WAF 页、5 分钟超时（分区无活会话时必现）。
+         *
+         * 处理：允许弹窗，并在 onCreateWindow 里把弹窗**重定向回本 WebView**。
+         * 为什么不在弹窗里继续：OAuth 的 state 与论坛会话必须同分区配对（v1.0.7 定稿），
+         * 另开实例会丢会话上下文。重定向回本实例等价于 Chrome 里的整页跳转，
+         * 最贴近真浏览器行为，且不修改站点页面代码。 */
+        try {
+            s.setSupportMultipleWindows(true);
+            s.setJavaScriptCanOpenWindowsAutomatically(true);
+        } catch (Exception ignored) {}
+        wv.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onCreateWindow(WebView view, boolean isDialog,
+                                                    boolean isUserGesture, Message resultMsg) {
+                if (resultMsg == null || !(resultMsg.obj instanceof WebView.WebViewTransport)) return false;
+                /* 熔断：超出上限说明页面在反复弹窗，继续回灌只会打转。 */
+                if (++popupHops > POPUP_HOP_LIMIT) return false;
+                /* window.open(url) 的目标 URL 在 onCreateWindow 回调时还取不到
+                 * （HitTestResult 只对 <a target=_blank> 生效）。标准做法：挂一个中转
+                 * WebView 接管弹窗，等它第一次被要求导航时取走 URL，再交本 WebView 加载。 */
+                final WebView relay = new WebView(AuthActivity.this);
+                /* 中转实例只取一次 URL。三条路径都必须回收，否则每个 window.open
+                 * 都会泄漏一个持有 Activity 上下文的 WebView（审查发现）：
+                 *   1) 正常取到 URL → 立刻销毁；
+                 *   2) 弹窗不产生主框架导航（如 window.open() 后 document.write）→
+                 *      5s 兜底销毁，绝不无限存活；
+                 *   3) 创建/注册异常 → catch 里销毁。 */
+                final Runnable reapRelay = () -> h.post(() -> {
+                    try { relay.stopLoading(); relay.destroy(); } catch (Exception ignored) {}
+                });
+                try {
+                    relay.getSettings().setJavaScriptEnabled(true);
+                    relay.setWebViewClient(new WebViewClient() {
+                        @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                            if (req == null || req.getUrl() == null) return false;
+                            String url = req.getUrl().toString();
+                            authLog("info", "站点弹窗登录转本页加载", "url 已脱敏");
+                            if (!isAuthInactive() && wv != null) wv.loadUrl(url);
+                            reapRelay.run();
+                            return true;   /* 中转实例只负责「取 URL」，绝不真正加载 */
+                        }
+                    });
+                    ((WebView.WebViewTransport) resultMsg.obj).setWebView(relay);
+                    resultMsg.sendToTarget();
+                    h.postDelayed(reapRelay, 5000);
+                    return true;
+                } catch (Exception e) {
+                    reapRelay.run();
+                    return false;
+                }
+            }
+        });
         wv.addJavascriptInterface(new Bridge(), "JustSign");
         wv.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {

@@ -23,6 +23,22 @@ function extractJs(javaSrc) {
   const out = [];
   let i = 0;
   while (i < seg.length) {
+    /* Java 注释必须跳过：否则「块注释吞掉代码行」这类缺陷会被静默忽略 ——
+     * 抽取器只认引号，被注释掉的字符串拼接照样被捞出来，测试反而全绿。
+     * 真机教训：一次编辑漏写块注释结束符，把 run()/pollIdentity 尾部吞进注释，
+     * 单测与行为测试都通过，但离屏只读兜底恒失败。 */
+    if (seg[i] === '/' && seg[i + 1] === '*') {
+      const end = seg.indexOf('*/', i + 2);
+      if (end < 0) throw new Error('未闭合的块注释：其后的脚本代码已被注释吞掉');
+      i = end + 2;
+      continue;
+    }
+    if (seg[i] === '/' && seg[i + 1] === '/') {
+      const nl = seg.indexOf('\n', i);
+      if (nl < 0) break;
+      i = nl + 1;
+      continue;
+    }
     if (seg[i] === '"') {
       let buf = '';
       i++;
@@ -130,12 +146,12 @@ console.log('\nB. 一直卡在 v2 挑战页 → 判失败但标记「可重试�
   ok(r && r.retryable === true, '标记 retryable=true（未过盾值得再试）');
 }
 
-console.log('\nC. 验证码组件显形 → 如实上报需人工，且不可自动重试');
+console.log('\nC. 挑战页未放行 → 一律可重试（一次没成 ≠ 永远不成）');
 {
   const r = await runScenario({ selfResponses: [V2PAGE], captchaVisible: true });
   ok(r && r.ok === false, '回传 ok:false');
-  ok(r && r.reason === 'captcha-needs-human', 'reason=captcha-needs-human，实际=' + (r && r.reason));
-  ok(r && r.retryable === false, '标记 retryable=false（重试无意义）');
+  ok(r && r.reason === 'waf-not-cleared', 'reason=waf-not-cleared，实际=' + (r && r.reason));
+  ok(r && r.retryable === true, '标记 retryable=true');
 }
 
 console.log('\nD. 身份不符 → 硬停（安全属性）');
