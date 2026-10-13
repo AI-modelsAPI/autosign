@@ -35,6 +35,28 @@ final class WafChallenge {
         return body != null && ARG1.matcher(body).find();
     }
 
+    /**
+     * 该挑战页是否为「需要人工交互」的验证码（v1.3.2）。
+     *
+     * 真机实证（agentrouter.org）：该站对部分出口 IP 下发阿里云滑块验证码，
+     * Chrome 打开也显示「请按住滑块，拖动到最右边」——必须人工拖动，无法静默通过。
+     * 特征：调用 initAliyunCaptcha 且带滑块容器（nc-container / ha-sliding-slider）。
+     *
+     * 用途：让上层如实告知用户「需要人工验证」，而不是无限重试、
+     * 也不是给出「请更换代理节点」这种误导性建议（换节点仍是滑块）。
+     */
+    static boolean needsHumanInteraction(String body) {
+        if (body == null || body.isEmpty()) return false;
+        String b = body.length() > 65536 ? body.substring(0, 65536) : body;
+        boolean captcha = b.contains("initAliyunCaptcha")
+                || b.contains("AliyunCaptcha.js")
+                || b.contains("captcha-element");
+        boolean slider = b.contains("nc-container")
+                || b.contains("ha-sliding-slider")
+                || b.contains("sliding-slider");
+        return captcha && slider;
+    }
+
     /** 从质询页正文提取 arg1；无则返回 ""。 */
     static String arg1(String body) {
         if (body == null) return "";

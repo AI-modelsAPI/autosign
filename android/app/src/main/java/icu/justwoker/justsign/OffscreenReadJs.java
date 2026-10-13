@@ -34,7 +34,7 @@ public final class OffscreenReadJs {
         return "(function(){"
                 + "if(window.__jsRead)return;window.__jsRead=1;"
                 + "var B='" + base + "',P='" + pid + "',N='" + n + "',ID='" + id + "';"
-                + "var CAP=20000;"
+                + "var CAP=30000;"
                 + "function send(o){try{JustSign.onReadResult(N,JSON.stringify(o))}catch(e){}}"
                 + "function redact(x){return String(x==null?'error':x)"
                 + ".replace(/https?:\\/\\/[^\\s,;\"']+/g,'[url]')"
@@ -42,19 +42,45 @@ public final class OffscreenReadJs {
                 + ".replace(/[^\\s]{0,12}(cookie|token|secret|password|authorization|session)[^\\s]{0,12}/gi,'[redacted]')"
                 + ".slice(0,80)}"
                 + "function fail(e){send({ok:false,reason:redact(e&&e.message||e),status:0,body:''})}"
+                /* ---- WAF 质询识别（两种变体） ----
+                 * v1：阿里云 ESA 老式页，正文带 `var arg1='...'`，可由 WafChallenge 纯 Java 求解。
+                 * v2：阿里云 WAF v2.0.1 页（webpack 混淆 + meta[name=aliyun_waf_aa/bb]），
+                 *     正文【没有 arg1】，只能靠真实内核跑完它的 JS 拿到放行 Cookie。
+                 * 旧实现只认 v1：遇到 v2 页时 wafSolved() 返回 false，于是把这段 HTML
+                 * 当成「真实业务数据」ok:true 回传，上层解析失败后只报「离屏未拿到可用数据」，
+                 * 真正原因（被 v2 盾拦住）被完全掩盖 —— 实测 agentrouter.org 即命中此坑。 */
+                + "function isWafText(t){var s=String(t==null?'':t);"
+                + "  if(/var\\s+arg1\\s*=/.test(s))return true;"
+                + "  if(/aliyun_waf_(?:aa|bb)/.test(s))return true;"
+                + "  if(/__webpack_modules__/.test(s)&&/aliyun_waf/i.test(s))return true;"
+                + "  return false;}"
                 /* ---- 参考对象 1：WAF 质询是否已放行 ---- */
                 + "function wafSolved(text){"
-                + "  if(text!=null&&/var\\s+arg1\\s*=/.test(String(text)))return true;"
+                + "  if(text!=null&&isWafText(String(text)))return true;"
                 + "  var h=String(text==null?((document.documentElement&&document.documentElement.innerHTML)||''):text);"
-                + "  return /var\\s+arg1\\s*=/.test(h);}"
+                + "  return isWafText(h);}"
                 + "function wafPending(){try{"
                 + "  if(/(^|;\\s*)acw_sc__v2=/.test(document.cookie))return false;"
                 + "  var h=(document.documentElement&&document.documentElement.innerHTML)||'';"
-                + "  return /var\\s+arg1\\s*=/.test(h);"
+                + "  return isWafText(h);"
                 + "}catch(e){return false;}}"
                 /* ---- 参考对象 2：文档已离开 loading ---- */
                 + "function pageReady(){try{if(document.readyState==='loading')return false;}catch(e){}"
                 + "  return !wafPending();}"
+                /* ---- 该挑战页是否需要人工交互（阿里云 NoCaptcha 组件） ----
+                 * v2 页配置为阿里云验证码（nc-container / captcha-element / AliyunCaptcha.js），
+                 * 且 renderData.data 为空 —— 需要现场走一次验证。能无感就静默过，
+                 * 要求交互时组件会显形（可见且非 display:none）。此处只做「是否显形」判定，
+                 * 绝不代答、不伪造、不点击。 */
+                + "function needsHuman(){try{"
+                + "  var el=document.getElementById('captcha-element');"
+                + "  if(!el)return false;"
+                + "  var r=el.getBoundingClientRect();"
+                + "  if(r.width<=0||r.height<=0)return false;"
+                + "  var st=window.getComputedStyle(el);"
+                + "  if(!st)return false;"
+                + "  return st.display!=='none'&&st.visibility!=='hidden'&&st.opacity!=='0';"
+                + "}catch(e){return false;}}"
                 + "function fetchSelf(){return fetch(B+'/api/user/self',{method:'GET',credentials:'include',"
                 + "  headers:{'Accept':'application/json'}}).then(function(r){return r.text().then(function(t){"
                 + "    return {st:r.status,text:t}})})}"
@@ -87,13 +113,29 @@ public final class OffscreenReadJs {
                 + "  (function tick(){probeIdentity().then(function(r){"
                 + "    if(r.ok){fetchTarget();return;}"
                 + "    if(r.hard){send({ok:false,reason:'identity-mismatch',status:0,body:''});return;}"
-                + "    if(Date.now()>=cap){send({ok:false,reason:'identity-not-ready',status:0,body:''});return;}"
+                /* v1.3.2 严谨化（两件事必须分开）：
+                 *   判定：单次尝试内没有「放行已确认」的证据，就绝不能声称成功；
+                 *   重试：一次没成 ≠ 永远不成（网络抖动、外部脚本首次加载慢都很常见），
+                 *         由上层按「可重试标记」再试，而不是在这里空等或直接放弃。
+                 * retryable=true   → 未过盾/未就绪：值得再试一次（放行 Cookie 可能刚落地）
+                 * retryable=false  → 需要人工交互 / 身份不符：重试无意义，必须如实上报 */
+                + "    if(Date.now()>=cap){"
+                + "      var nh=needsHuman();"
+                + "      send({ok:false,reason:nh?'captcha-needs-human':'waf-not-cleared',"
+                + "            retryable:!nh,status:0,body:''});return;}"
                 + "    setTimeout(tick,300);});})();}"
                 + "function run(){if(!ID){send({ok:false,reason:'missing-expected-id',status:0,body:''});return;}"
                 + "  pollIdentity();}"
-                /* ---- 入口：等参考对象成立再跑 ---- */
+                /* ---- 入口：以「可观测证据」驱动，不靠等秒数 ----
+                 * 证据 = 已离开 loading 且已不处于 WAF 质询态（放行 cookie 已落地）。
+                 * 到 CAP 仍不成立 → 直接判失败（waf-not-cleared / captcha-needs-human），
+                 * 绝不把「等够了」当成「过盾了」。 */
                 + "var gateCap=Date.now()+CAP;"
-                + "(function gate(){if(pageReady()||Date.now()>=gateCap){run();return;}"
+                + "(function gate(){if(pageReady()){run();return;}"
+                + "  if(Date.now()>=gateCap){"
+                + "    var nh2=needsHuman();"
+                + "    send({ok:false,reason:nh2?'captcha-needs-human':'waf-not-cleared',"
+                + "          retryable:!nh2,status:0,body:''});return;}"
                 + "  setTimeout(gate,120);})();"
                 + "})();";
     }

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.webkit.CookieManager;
+import android.webkit.WebResourceRequest;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -72,10 +73,14 @@ public final class OffscreenReadRunner {
         private volatile boolean done = false;
         private final Runnable watchdog;
 
+        /** v1.3.2：诊断日志用（只记状态与布尔，不含凭据）。 */
+        private final Store store;
+
         Runner(Context c, String base, String siteKey, String accountKey, String uid,
-               String path, String host, int to, Callback cb) {
+               String path, String allowHostIn, int to, Callback cb) {
             this.ctx = c; this.base = base; this.siteKey = siteKey; this.accountKey = accountKey;
-            this.siteUserId = uid; this.targetPath = path; this.allowHost = host;
+            this.store = new Store(c);
+            this.siteUserId = uid; this.targetPath = path; this.allowHost = allowHostIn;
             this.timeoutSec = to; this.cb = cb;
             this.watchdog = () -> finish(null);
         }
@@ -97,19 +102,39 @@ public final class OffscreenReadRunner {
                 } catch (Exception ignored) {}
                 wv.getSettings().setJavaScriptEnabled(true);
                 wv.getSettings().setDomStorageEnabled(true);
-                wv.getSettings().setBlockNetworkImage(true);
+                /* v1.3.2：离屏不 attach 窗口。
+                 * 曾试过用 1×1 透明宿主窗口承载（想复刻可见授权页的渲染环境），
+                 * 真机实测证伪：给不给窗口都过不了本类遇到的新版阿里云滑块验证码
+                 * （该验证码要求人工拖动，连设备 Chrome 打开也显示「请按住滑块，拖动到最右边」）。
+                 * 宿主方案既无收益、又留下空壳 Activity 卡在前台，故撤销。 */
                 wv.setVisibility(WebView.INVISIBLE);
                 wv.addJavascriptInterface(new Bridge(), "JustSign");
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public void onPageFinished(WebView view, String url) {
                         if (done || url == null) return;
-                        if (AuthProbeJs.sameOrigin(url, base)) {
-                            /* v1.1.6 修正参数顺序：原调用把 /api/user/self 当成了站点根，
-                             * 于是 fetch('/api/user/self' + '/api/user/self') 必然 404，
-                             * 身份判定永远 identity-mismatch —— 该兜底从未成功过。
-                             * 正确顺序：站点根 / 目标路径 / 期望身份 ID / 关联号。 */
+                        /* v1.3.2 诊断：只记「是否同源 / 是否已注入」，不含 URL 细节与凭据。
+                         * 没有这行时，离屏失败完全看不到内部进展（排查 v2 盾时无据可依）。 */
+                        boolean same = AuthProbeJs.sameOrigin(url, base);
+                        if (store != null) {
+                            try {
+                                store.opLog(siteKey, accountKey, "只读离屏兜底", "info",
+                                        "离屏页面加载完成", "sameOrigin=" + same + "; injected=" + same, "auto");
+                            } catch (Exception ignored) {}
+                        }
+                        if (same) {
                             wv.evaluateJavascript(
                                     OffscreenReadJs.render(base, targetPath, siteUserId, nonce), null);
+                        }
+                    }
+                    @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
+                                                              android.webkit.WebResourceResponse resp) {
+                        if (r == null || !r.isForMainFrame()) return;
+                        int code = resp == null ? 0 : resp.getStatusCode();
+                        if (store != null) {
+                            try {
+                                store.opLog(siteKey, accountKey, "只读离屏兜底", "warn",
+                                        "离屏主帧 HTTP 错误", "http=" + code, "auto");
+                            } catch (Exception ignored) {}
                         }
                     }
                 });
@@ -161,7 +186,23 @@ public final class OffscreenReadRunner {
                     if (done) return;
                     try {
                         JSONObject o = new JSONObject(payload);
-                        if (!o.optBoolean("ok")) { finish(null); return; }
+                        /* v1.3.2：失败原因必须透传（旧实现直接 finish(null)，把 reason 整个丢掉，
+                         * 上层只能报「离屏未拿到可用数据」——真机排查 v2 盾时完全看不到线索）。
+                         * reason 是脚本内的固定类别词（waf-challenge / identity-mismatch /
+                         * http-NNN / identity-not-ready / missing-expected-id），已经过 redact，
+                         * 不含 URL、Cookie 或正文。 */
+                        if (!o.optBoolean("ok")) {
+                            JSONObject fail = new JSONObject()
+                                    .put("http", o.optInt("status", 0))
+                                    .put("reason", o.optString("reason", ""))
+                                    /* v1.3.2：透传「是否值得重试」。
+                                     * 未过盾/未就绪 → true（放行 Cookie 可能刚落地，重发原生请求即可）
+                                     * 需人工交互/身份不符 → false（重试无意义，必须如实上报） */
+                                    .put("retryable", o.optBoolean("retryable", false))
+                                    .put("offscreenFailed", true);
+                            finish(fail);
+                            return;
+                        }
                         JSONObject out = new JSONObject().put("http", o.optInt("status", 0));
                         out.put("data", o.optString("body", ""));
                         finish(out);

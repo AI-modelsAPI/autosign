@@ -213,16 +213,51 @@ public class Engine {
                     "原生请求失败，转离屏验证", "path=" + path.split("\\?", 2)[0]
                     + "; reason=" + reason + "; oauth=false; maxAttempts=1", "auto");
             try {
+                /* v1.3.2：超时 40s（原 25s）。脚本内部对 v2 盾的等待上限是 30s，
+                 * 外层若仍按 25s 掐，JS 永远跑不完 → 必然「未拿到可用数据」。
+                 * 内外层必须满足：外层 > 内层，否则再放宽内层也无效。 */
                 JSONObject recovered = OffscreenReadRunner.read(ctx, site.optString("baseUrl"),
                         site.optString("key"), accountKey, uid,
-                        path, site.optString("baseUrl"), 25);
+                        path, site.optString("baseUrl"), 40);
                 if (ReadFallback.usable(path, recovered, uid)) {
                     store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
                             "离屏读取成功", "path=" + path.split("\\?", 2)[0] + "; oauth=false", "auto");
                     return recovered;
                 }
+                /* v1.3.2：把离屏失败的具体 reason 写进日志（旧实现只写「未拿到可用数据」，
+                 * 真机排查 v2 盾时完全没有线索）。reason 为固定类别词，不含 URL/Cookie/正文。 */
+                String offReason = recovered == null ? "no-result"
+                        : recovered.optString("reason", recovered.optString("http", ""));
                 store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "warn",
-                        "离屏未拿到可用数据，保留原始错误", "path=" + path.split("\\?", 2)[0], "auto");
+                        "离屏未拿到可用数据，保留原始错误",
+                        "path=" + path.split("\\?", 2)[0]
+                                + "; offscreenReason=" + (offReason.isEmpty() ? "-" : offReason), "auto");
+                /* v1.3.2 重试（有依据，不是猜时间）：
+                 * 离屏用的是与本请求同一个「站点×账号」分区（P0-1 修复后），
+                 * 若离屏已把 WAF 质询跑完，放行 Cookie 就已落在该分区里 ——
+                 * 此时重发一次原生请求即可通过。判据是「离屏确实跑过质询」这一可观测事实，
+                 * 而不是「等了多久」。仅对幂等只读 GET、且只重试一次。 */
+                /* 需人工验证（滑块）时重试无意义：连 Chrome 都要人拖，重发原生请求也过不去。
+                 * 只对「未过盾/未就绪」这类可能自行恢复的情形重试。 */
+                boolean offscreenRanChallenge = recovered != null
+                        && !"captcha-needs-human".equals(offReason)
+                        && (recovered.optBoolean("retryable", false)
+                            || "waf-not-cleared".equals(offReason)
+                            || "identity-not-ready".equals(offReason)
+                            || "no-result".equals(offReason));
+                if (offscreenRanChallenge && ReadFallback.allowed(method, path)) {
+                    store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
+                            "离屏已跑过质询，重发原生请求（放行 Cookie 应已落在本账号分区）",
+                            "path=" + path.split("\\?", 2)[0] + "; retry=1", "auto");
+                    JSONObject afterOffscreen = null;
+                    try { afterOffscreen = callWithAuthNative(site, accountKey, method, path, jsonBody); }
+                    catch (Exception ignored) {}
+                    if (afterOffscreen != null && ReadFallback.usable(path, afterOffscreen, uid)) {
+                        store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "info",
+                                "离屏过盾后原生请求成功", "path=" + path.split("\\?", 2)[0], "auto");
+                        return afterOffscreen;
+                    }
+                }
             } catch (Exception e) {
                 store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "err",
                         "离屏执行异常，保留原始错误", "reason=" + ReadFallback.category(e), "auto");
@@ -238,7 +273,13 @@ public class Engine {
         if (allowReauth && sessionLikelyDead(response, failure)) {
             JSONObject acc = store.findAccount(accountKey);
             boolean rewardSite = SiteProtocol.isAnyRouter(site) || Engine.needsReloginCheckin(site);
-            boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(acc);
+            /* v1.3.2：与 statusLocked 同款精确化。能走到这里说明响应已是「会话失效信号」
+             * （401/403/503/WAF，见 sessionLikelyDead），不存在「保活把会话续着」的情况；
+             * 但仍保留原意图：会话**可读**且今日未签的重登型站不重建（留给登出重登领奖）。 */
+            boolean responseReadable = response != null && response.optInt("http") == 200
+                    && response.optJSONObject("data") != null
+                    && response.optJSONObject("data").optBoolean("success", false);
+            boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(acc) || !responseReadable;
             if (keepAliveOk && acc != null && "linuxdo".equals(SiteProtocol.provider(site, acc))) {
                 int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
                 if (rc == OffscreenReauth.REAUTH_OK) {
@@ -832,8 +873,16 @@ public class Engine {
                     }
                 }
                 lastError = "WAF200: " + txt.substring(0, Math.min(120, txt.length()));
+                /* v1.3.2 如实分类：该挑战页若是「必须人工拖动」的滑块验证码
+                 * （真机实证 agentrouter.org，连 Chrome 都要拖），就直说需要人工验证。
+                 * 旧实现一律回「请更换代理节点」——用户换节点后仍是滑块，
+                 * 属于误导性建议，且掩盖了「本站要求人工验证」这一事实。 */
+                boolean human = WafChallenge.needsHumanInteraction(txt);
                 return new JSONObject().put("http", 503).put("waf", true)
-                        .put("message", "站点防护拦截了本次请求，请更换代理节点后重试");
+                        .put("needsHuman", human)
+                        .put("message", human
+                                ? "该站点要求完成一次人工验证（滑块），请在应用内打开站点完成后再试"
+                                : "站点防护拦截了本次请求，请更换代理节点后重试");
             }
             JSONObject out = new JSONObject().put("http", resp.code());
             try { out.put("data", new JSONObject(txt)); }
@@ -1026,8 +1075,24 @@ public class Engine {
          * 因此：仅当「今日已签」后才允许保活式静默重授权；今日未签的发奖站不保活，留给重登流程登出。
          */
         boolean rewardSite = SiteProtocol.isAnyRouter(site) || Engine.needsReloginCheckin(site);
-        boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(tk);
-        if (allowSilentReauth && keepAliveOk
+        /* v1.3.2（真机实测 agentrouter.org/L站-1 死结）：原守卫对「重登型发奖站」一律
+         * 禁止静默重授权，本意是「别把活着的会话续着，否则永远走不到登出→重登领奖」。
+         * 但当会话已经**读不出来**（503/401/403/WAF）时，根本不存在「保活」这回事：
+         *   status() 读不到 → 重登流程中止（会话状态无法确认）→ 而唯一能重建会话的
+         *   OffscreenReauth 又被本守卫挡死 → 该账号永久签不上（真机复现 3 次，稳定）。
+         * 因此把守卫精确化：只在「能读到会话且今日未签」时才阻止保活；
+         * 会话读不出来时放行重建 —— 这是重登流程的前置条件，不是保活。
+         * 读得出来（HTTP 200 且业务 success=true）说明会话活着，原意图完整保留。 */
+        boolean selfReadable = selfHttp == 200
+                && self.optJSONObject("data") != null
+                && self.optJSONObject("data").optBoolean("success", false);
+        boolean keepAliveOk = !rewardSite || Engine.isCheckedToday(tk) || !selfReadable;
+        /* v1.3.2：已知需要人工验证（滑块）时，跳过静默重授权。
+         * 真机实证：agentrouter 的挑战页要求人工拖动，连 Chrome 都要拖；
+         * 静默重授权（OffscreenReauth）注定失败，却要白等 30s（还会拖慢整轮批量刷新）。
+         * 判据读 attempt 已算好的 needsHuman（WAF 归一化响应不带 body，不能重新解析）。 */
+        boolean needsHuman = self.optBoolean("needsHuman", false);
+        if (allowSilentReauth && keepAliveOk && !needsHuman
                 && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
                 && "linuxdo".equals(SiteProtocol.provider(site, tk))
                 && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503
