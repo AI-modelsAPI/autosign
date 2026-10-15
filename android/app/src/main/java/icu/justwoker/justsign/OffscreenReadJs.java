@@ -34,7 +34,7 @@ public final class OffscreenReadJs {
         return "(function(){"
                 + "if(window.__jsRead)return;window.__jsRead=1;"
                 + "var B='" + base + "',P='" + pid + "',N='" + n + "',ID='" + id + "';"
-                + "var CAP=30000;"
+                + "var CAP=30000;var LASTF={st:0,len:0};"
                 + "function send(o){try{JustSign.onReadResult(N,JSON.stringify(o))}catch(e){}}"
                 + "function redact(x){return String(x==null?'error':x)"
                 + ".replace(/https?:\\/\\/[^\\s,;\"']+/g,'[url]')"
@@ -73,7 +73,7 @@ public final class OffscreenReadJs {
                 /* 三态：ok / hard（明确别的身份，立即停手）/ soft（未就绪，继续轮询） */
                 + "function probeIdentity(){if(ID=='')return Promise.resolve({ok:false,hard:true});"
                 + "  return fetchSelf().then(function(o){"
-                + "    if(wafSolved(o.text))return {ok:false,hard:false};"
+                + "    LASTF={st:o.st,len:String(o.text).length};if(wafSolved(o.text))return {ok:false,hard:false};"
                 + "    var j=null;try{j=JSON.parse(o.text)}catch(e){}"
                 + "    var d=(j&&j.data&&j.data.data)||(j&&j.data);"
                 + "    if(o.st==200&&j&&j.success===true&&d&&String(d.id)===ID)return {ok:true};"
@@ -85,7 +85,7 @@ public final class OffscreenReadJs {
                 /* 未就绪＝继续轮询，绝不硬停：原实现只在 200+JSON 但身份不符时 hard，
                  * 其余一律 soft 而 CAP 只有 8s —— 慢网络下必然误报 identity-not-ready。
                  * 现在有明确结束条件（拿到合身份响应 / 超时上限），故上限放宽到 20s。 */
-                + "    return {ok:false,hard:false};"
+                + "    LASTF={st:o.st,len:String(o.text).length};return {ok:false,hard:false};"
                 + "  }).catch(function(e){return {ok:false,hard:false,err:redact(e&&e.message||e)}});}"
                 /* v1.1.6：拿到响应后仍要确认「没被 WAF 换页」，且 HTTP 状态必须是 2xx。
                  * 原实现无条件 ok:true —— 质询页会被当成 Key 列表回传给上层，等于把 WAF 页
@@ -106,14 +106,14 @@ public final class OffscreenReadJs {
                  * 到 CAP 仍不成立 → 判失败 waf-not-cleared 且标 retryable=true。
                  * 入口同样以「可观测证据」驱动：证据 = 已离开 loading 且不处于质询态。 */
                 + "    if(Date.now()>=cap){"
-                + "      send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:''});return;}"
+                + "      send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:'',diag:'fetch;st='+LASTF.st+';len='+LASTF.len});return;}"
                 + "    setTimeout(tick,300);});})();}"
                 + "function run(){if(!ID){send({ok:false,reason:'missing-expected-id',status:0,body:''});return;}"
                 + "  pollIdentity();}"
                 + "var gateCap=Date.now()+CAP;"
                 + "(function gate(){if(pageReady()){run();return;}"
                 + "  if(Date.now()>=gateCap){"
-                + "    send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:''});return;}"
+                + "    send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:'',diag:'gate'});return;}"
                 + "  setTimeout(gate,120);})();"
                 + "})();";
     }

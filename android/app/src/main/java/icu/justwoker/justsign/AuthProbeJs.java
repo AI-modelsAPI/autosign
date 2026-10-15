@@ -43,17 +43,67 @@ public final class AuthProbeJs {
           var controller=new AbortController();
           var timer=setTimeout(function(){controller.abort();},10000);
           function release(){clearTimeout(timer);window.__justsignSelfBusy=false;}
-          return fetch('/api/user/self',{credentials:'include',headers:headers,
-              cache:'no-store',redirect:'error',signal:controller.signal})
-            .then(function(r){return r.text().then(function(t){
-              if(t.length>262144)throw new Error('response-too-large');
-              return {s:r.status,b:t};
-            });})
-            .then(function(r){if(location.origin==='__ORIGIN__')
-              window.JustSign.onSelfResult(r.s,r.b);})
-            .catch(function(e){if(location.origin==='__ORIGIN__')
-              window.JustSign.onSelfFailed(e&&e.name==='AbortError'?'timeout':'network-or-response');})
-            .then(release,release);
+          function report(s,b){if(location.origin==='__ORIGIN__')window.JustSign.onSelfResult(s,b);}
+          function fail(e){if(location.origin==='__ORIGIN__')
+            window.JustSign.onSelfFailed(e&&e.name==='AbortError'?'timeout':'network-or-response');}
+          function tryNewApi(){
+            return fetch('/api/user/self',{credentials:'include',headers:headers,
+                cache:'no-store',redirect:'error',signal:controller.signal})
+              .then(function(r){return r.text().then(function(t){
+                if(t.length>262144)throw new Error('response-too-large');
+                return {s:r.status,b:t};
+              });});
+          }
+          /* v1.3.4 根因修复（真机+抓包实证）：fengwind 系站点都不是 New API，
+           * 其 /api/user/self 恒 404（实测三套子域全是），真实会话端点与 token 键各异：
+           *   · api.fengwind.com          → /api/v1/auth/me + auth_token
+           *   · api-donation.fengwind.com → /api/me         + donation_token
+           *   · api-welfalre.fengwind.com → /api/me         + welfare_token
+           * 凭据是页面自己写进 localStorage 的 Bearer token。
+           * 此前只探 /api/user/self → 登录明明成功也永远探测不到 → 「登录失败/额度为空」。
+           * 仅当 New API 端点不存在（404）时才回退，不影响既有站点。
+           * 安全：token 只作为凭据回传落库（与其它站同待遇），绝不写日志。 */
+          function bearer(){
+            try{
+              var ks=['auth_token','donation_token','welfare_token'];
+              for(var i=0;i<ks.length;i++){var v=localStorage.getItem(ks[i]);
+                if(v)return v;}
+              return '';
+            }catch(e){return '';}
+          }
+          function unwrap(t){
+            var j=null;try{j=JSON.parse(t);}catch(e){return null;}
+            if(!j)return null;
+            if(j.code===0&&j.data)return j.data;
+            if(j.success===true)return j.data||j.user||null;
+            return null;
+          }
+          function tryOne(url,T){
+            return fetch(url,{credentials:'include',cache:'no-store',
+                headers:{'Accept':'application/json','Authorization':'Bearer '+T}})
+              .then(function(r){if(r.status!==200)return null;
+                return r.text().then(function(t){
+                  var u=unwrap(t);if(!u)return null;
+                  var id2=u.id||u.sub2api_user_id||u.linuxdo_id||u.user_id||'';
+                  var nm=u.display_name||u.username||u.name||'';
+                  return JSON.stringify({success:true,data:{id:id2,username:nm,access_token:T}});
+                });})
+              .catch(function(){return null;});
+          }
+          function trySub2Api(){
+            var T=bearer();
+            if(!T)return Promise.resolve(null);
+            var urls=['/api/me','/api/v1/auth/me'];
+            return urls.reduce(function(p,u){
+              return p.then(function(hit){return hit!=null?hit:tryOne(u,T);});
+            },Promise.resolve(null));
+          }
+          return tryNewApi().then(function(r){
+            if(r.s!==404){report(r.s,r.b);return;}
+            return trySub2Api().then(function(b){
+              if(b!=null)report(200,b);else report(r.s,r.b);
+            });
+          }).catch(fail).then(release,release);
         })();
         """;
 }

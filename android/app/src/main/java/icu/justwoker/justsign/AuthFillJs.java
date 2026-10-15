@@ -72,7 +72,12 @@ public final class AuthFillJs {
                 + "function findLinuxdoBtn(){try{"
                 + "var bs=document.querySelectorAll('button,[role=button],a');"
                 + "for(var i=0;i<bs.length;i++){var t=((bs[i].innerText||'')+'').trim();"
-                + "if(/linux\\s*do/i.test(t)&&t.length<40&&!bs[i].disabled)return bs[i];}"
+                /* v1.3.4 根因修复（真机抓取 DOM 实证）：按钮文案因站而异 ——
+                 * AgentRouter 型是「LinuxDo 登录」，fengwind 型是「使用 Linux.do 登录」。
+                 * 旧正则 /linux\s*do/i 里的 \s* 只匹配空白，遇到中间的「.」就失配 →
+                 * 观察器永远找不到按钮 → L站登录停在登录页不动（真机复现）。
+                 * 放宽分隔符为 [\s._-]*，两类文案都能命中；仍要求按钮文本短且含该词。 */
+                + "if(/linux[\\s._-]*do/i.test(t)&&t.length<40&&!bs[i].disabled)return bs[i];}"
                 + "}catch(e){}return null;}"
                 + "function robustClick(el){try{el.scrollIntoView({block:'center'});}catch(e){}"
                 + "try{var r=el.getBoundingClientRect();var cx=r.left+r.width/2,cy=r.top+r.height/2;"

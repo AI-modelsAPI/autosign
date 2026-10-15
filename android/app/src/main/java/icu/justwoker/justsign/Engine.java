@@ -228,10 +228,12 @@ public class Engine {
                  * 真机排查 v2 盾时完全没有线索）。reason 为固定类别词，不含 URL/Cookie/正文。 */
                 String offReason = recovered == null ? "no-result"
                         : recovered.optString("reason", recovered.optString("http", ""));
+                String offDiag = recovered == null ? "" : recovered.optString("diag", "");
                 store.opLog(site.optString("key"), accountKey, "只读离屏兜底", "warn",
                         "离屏未拿到可用数据，保留原始错误",
                         "path=" + path.split("\\?", 2)[0]
-                                + "; offscreenReason=" + (offReason.isEmpty() ? "-" : offReason), "auto");
+                                + "; offscreenReason=" + (offReason.isEmpty() ? "-" : offReason)
+                                + (offDiag.isEmpty() ? "" : "; diag=" + offDiag), "auto");
                 /* v1.3.2 重试（有依据，不是猜时间）：
                  * 离屏用的是与本请求同一个「站点×账号」分区（P0-1 修复后），
                  * 若离屏已把 WAF 质询跑完，放行 Cookie 就已落在该分区里 ——
@@ -917,6 +919,128 @@ public class Engine {
                 || l.contains("waf.tencent-cloud.com")
                 || l.contains("safedog");
     }
+    /**
+     * v1.3.5：fengwind 系（非 New API）站点的会话读取回退。
+     *
+     * 背景（真机 + 站点前端 bundle 实证）：这一族站点根本没有 /api/user/self（三套子域全 404），
+     * 会话端点是 /api/me（福利站/捐赠站）与 /api/v1/auth/me（主站），
+     * 响应信封是 {code:0,message:"success",data:{...}}，USD 字段名也与 New API 不同。
+     *
+     * 本方法把结果归一化成 New API 形状回传，使 statusLocked 的下游逻辑一字不改即可复用：
+     *   {http:200, data:{success:true, data:{id, username, quota, used_quota}}}
+     * 其中 quota/used_quota 由站点给出的 USD 值乘 unit 反算（与 New API 的 quota 同单位）。
+     *
+     * 诚实原则：字段名认不出就返回 null（保留上次额度），绝不编造数字。
+     * 诊断日志只记【字段名与是否命中】，不记字段值 —— 值可能含凭据。
+     */
+    private JSONObject foreignSelf(JSONObject site, String key, long unit) {
+        String token = cachedToken(key);
+        if (token.isEmpty()) {
+            JSONObject acc = store.findAccount(key);
+            if (acc != null) token = clean(acc.optString("token", ""));
+        }
+        if (token.isEmpty()) return null;
+        long u = unit > 0 ? unit : QUOTA_PER_UNIT_DEFAULT;
+
+        String hit = "";
+        /* 金额字段的位置各站不同：主站/捐赠站在 /api/me 直层，
+         * 福利站在 /api/level 的 profile 下。逐个候选端点试，谁先给出金额就用谁 ——
+         * 全都没有才返回 null（保留上次额度），不编造。 */
+        JSONObject mapped = null;
+        for (String p : new String[]{"/api/me", "/api/v1/auth/me", "/api/level", "/api/v1/usage"}) {
+            JSONObject r = null;
+            try { r = call(site, token, "", "", "GET", p); } catch (Exception ignored) {}
+            if (r == null || r.optInt("http") != 200) continue;
+            JSONObject m = mapForeignSelf(r, u);
+            if (m == null) continue;
+            mapped = m; hit = p; break;
+        }
+        if (mapped == null) return null;
+
+        String uid = mapped.optString("_id", "");
+        mapped.remove("_id");
+        JSONObject norm = mapped.optJSONObject("data");
+        store.opLog(site.optString("key", ""), key, "刷新", "info",
+                "非 New API 站点会话读取",
+                "path=" + hit + "; avail=" + (norm != null && norm.has("quota"))
+                        + "; used=" + (norm != null && norm.has("used_quota"))
+                        + "; id=" + !uid.isEmpty(), "auto");
+        return mapped;
+    }
+
+    /**
+     * 把非 New API 站的会话响应归一化成 New API 形状：
+     *   {http:200, data:{success:true, data:{id, username, quota, used_quota}}}
+     * 其中 quota/used_quota 由站点给出的 USD 值乘 unit 反算（与 New API 同单位）。
+     *
+     * 抽成 static 纯函数是为了能被单测直接覆盖 —— 这段映射写错的症状是
+     * 「卡片三个额度全空」，只在运行时暴露，编译期看不出来。
+     * 认不出任何金额字段时返回 null（保留上次额度），绝不编造数字。
+     *
+     * @return 归一化响应；识别不出金额时 null。附带 "_id" 键供调用方记日志。
+     */
+    static JSONObject mapForeignSelf(JSONObject envelope, long unit) {
+        JSONObject body = envelope == null ? null : envelope.optJSONObject("data");
+        if (body == null) return null;
+        Object innerRaw = body.opt("data");
+        JSONObject user = innerRaw instanceof JSONObject ? (JSONObject) innerRaw : body;
+        JSONObject nested = user.optJSONObject("user");
+        if (nested != null) user = nested;
+        /* 福利站把金额放在 /api/level 的 profile 子对象下（真机实证）。 */
+        JSONObject profile = user.optJSONObject("profile");
+        if (profile != null) user = profile;
+
+        /* 可用额（美元）：站点给的就是美元，命中即用，不猜。 */
+        Double avail = firstFinite(user, "balance", "usd_balance", "available_balance",
+                "credit_balance", "available_usd", "balance_usd", "available");
+        /* 累计已用：这些站的 /me 常不含用量（另有专用端点，调用方会再试一轮）。
+         * 读不到时按 0 处理，与 New API 站「字段缺失即 0」保持一致；
+         * 已知上限：无法区分「真的没用过」与「站点没提供」。 */
+        Double used = firstFinite(user, "usage_total_cost", "used_usd", "total_used",
+                "spent_usd", "total_cost", "usage_amount", "used");
+        /* 必须真的读到「可用额」才接受这次结果：卡片的头条数字就是它，
+         * 拿一个凑出来的 0 顶上，等于替站点断言「你的余额是 0」——
+         * 比空白更有害。读不到就返回 null，保留上次额度并如实报错。
+         * （「累计已用」缺失仍按 0 显示，与既有 New API 站行为一致。） */
+        if (avail == null) return null;
+        double a = avail;
+        double b = used == null ? 0 : used;
+        String uid = String.valueOf(user.opt("id"));
+        if (uid.isEmpty() || "null".equals(uid)) {
+            Object alt = user.opt("sub2api_user_id");
+            if (alt == null) alt = user.opt("user_id");
+            if (alt != null) uid = String.valueOf(alt);
+        }
+        String nm = user.optString("display_name", "");
+        if (nm.isEmpty()) nm = user.optString("username", "");
+        try {
+            return new JSONObject().put("http", 200)
+                    .put("_id", uid)
+                    .put("data", new JSONObject()
+                            .put("success", true)
+                            .put("data", new JSONObject()
+                                    .put("id", uid)
+                                    .put("username", nm)
+                                    .put("quota", a * unit)
+                                    .put("used_quota", b * unit)));
+        } catch (Exception e) { return null; }
+    }
+
+
+    /** 取第一个存在且有限的数值字段；全部缺失返回 null（不编造）。 */
+    private static Double firstFinite(JSONObject o, String... names) {
+        for (String n : names) {
+            if (o == null || !o.has(n) || o.isNull(n)) continue;
+            Object v = o.opt(n);
+            if (!(v instanceof Number) && !(v instanceof String)) continue;
+            try {
+                double d = Double.parseDouble(String.valueOf(v));
+                if (Double.isFinite(d)) return d;
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
     private static JSONObject dd(JSONObject resp) {
         if (resp == null) return new JSONObject();
         JSONObject d = resp.optJSONObject("data");
@@ -1097,6 +1221,22 @@ public class Engine {
                 resetTokenCache();
                 return statusLocked(key, logSummary, false); // 用新会话重跑一次，禁止再次静默避免循环
             }
+        }
+
+        /* v1.3.5 根因修复（真机 + 站点前端实证）：fengwind 系站点不是 New API，
+         * /api/user/self 恒 404（三套子域实测全 404），真实会话端点各异：
+         *   api.fengwind.com          → GET /api/v1/auth/me
+         *   api-donation.fengwind.com → GET /api/me
+         *   api-welfalre.fengwind.com → GET /api/me（用量在 /api/level）
+         * 响应形状为 {code:0,message:"success",data:{...}}，USD 字段名也与 New API 不同。
+         * 此前只认 /api/user/self + quota/used_quota → 这类站 validSelf 恒 false →
+         * 卡片三个额度全空（用户实证「三个额度一个都没显示」）。
+         * 仅在 New API 端点【不存在】（404/405）时回退，既有站点一字不动。 */
+        if (!SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
+                && (selfHttp == 404 || selfHttp == 405)) {
+            JSONObject alt = foreignSelf(site, key,
+                    store.siteMetaLong(sKey, "quotaPerUnit", QUOTA_PER_UNIT_DEFAULT));
+            if (alt != null) { self = alt; selfHttp = self.optInt("http"); }
         }
 
         if (!SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))) {

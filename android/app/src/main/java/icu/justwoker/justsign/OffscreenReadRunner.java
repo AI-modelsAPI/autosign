@@ -199,6 +199,9 @@ public final class OffscreenReadRunner {
                                      * 未过盾/未就绪 → true（放行 Cookie 可能刚落地，重发原生请求即可）
                                      * 需人工交互/身份不符 → false（重试无意义，必须如实上报） */
                                     .put("retryable", o.optBoolean("retryable", false))
+                                    /* v1.3.4 诊断：区分「闸门没开」与「fetch 拿到挑战页」，
+                                     * 只含状态码与文本长度，不含 URL/Cookie/正文。 */
+                                    .put("diag", o.optString("diag", ""))
                                     .put("offscreenFailed", true);
                             finish(fail);
                             return;
