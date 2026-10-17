@@ -41,11 +41,27 @@ public final class CheckinJs {
     /** v0.3.9：siteUserId 为站点数字用户 ID（New API 系请求须带 New-Api-User 头）。
      * 空串时不加该头（兼容非 New API 站/旧数据）。 */
     public static String render(String sid, String sitekey, String seedToken, String siteUserId) {
+        return render(sid, sitekey, seedToken, siteUserId, "NEWAPI");
+    }
+
+    /**
+     * 按站点形态渲染。
+     *
+     * WELFARE（fengwind 福利站）与 New API 的差异（真机 + 站点 bundle 实证）：
+     *   状态：GET  /api/checkin/status        → can_check_in / checked_in_today
+     *   签到：POST /api/checkin               → 需 X-Turnstile-Token 头
+     *   流水：GET  /api/ledger?limit=N        → items[].amount / status
+     * 其它形态沿用 New API 的 /api/user/checkin 与 /api/log/self。
+     */
+    public static String render(String sid, String sitekey, String seedToken,
+                                String siteUserId, String kind) {
+        boolean welfare = "WELFARE".equalsIgnoreCase(kind == null ? "" : kind);
         return TEMPLATE
                 .replace("/*__SID__*/null", jsStr(sid))
                 .replace("/*__SITEKEY__*/null", jsStr(sitekey))
                 .replace("/*__TOKEN__*/null", jsStr(seedToken))
-                .replace("/*__SITEUID__*/null", jsStr(siteUserId));
+                .replace("/*__SITEUID__*/null", jsStr(siteUserId))
+                .replace("/*__WELFARE__*/false", welfare ? "true" : "false");
     }
 
     static String jsStr(String s) {
@@ -74,11 +90,17 @@ public final class CheckinJs {
         "var sid=/*__SID__*/null;var sitekey=/*__SITEKEY__*/null;var seedtk=/*__TOKEN__*/null;var siteuid=/*__SITEUID__*/null;" +
         "if(seedtk&&!window.__jstoken)window.__jstoken=seedtk;" +
         "var UNIT=500000;var CHECKIN_ON=true;var TS_ON=false;var tsErr='';" +
+        "var WELFARE=/*__WELFARE__*/false;" +
         "var usd=function(q){q=Number(q||0);if(!isFinite(q)||q<=0)return 0;" +
         "  return q>=1000?Math.round(q/UNIT*100)/100:q;};" +
+        /* 福利站用自己 localStorage 里的 welfare_token；其它站用 seedtk/页面会话。
+         * 实测：福利站所有接口都要求 Authorization: Bearer <welfare_token>。 */
         "var H=function(){var hh={'Accept':'application/json'};" +
-        "  if(window.__jstoken)hh['Authorization']='Bearer '+window.__jstoken;" +
-        "  if(siteuid)hh['New-Api-User']=siteuid;return hh;};" +
+        "  var t='';" +
+        "  if(WELFARE){try{t=localStorage.getItem('welfare_token')||'';}catch(e){}}" +
+        "  if(!t&&window.__jstoken)t=window.__jstoken;" +
+        "  if(t)hh['Authorization']='Bearer '+t;" +
+        "  if(!WELFARE&&siteuid)hh['New-Api-User']=siteuid;return hh;};" +
         "function pad2(n){return n<10?('0'+n):(''+n)}" +
         "function today(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());}" +
         "function month(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1);}" +
@@ -113,6 +135,18 @@ public final class CheckinJs {
         "}catch(e){}}" +
         /* ---- GET /api/user/checkin?month=YYYY-MM：只读状态（无需人机验证） ---- */
         "async function stateOf(){try{" +
+        /* WELFARE（福利站）：独立的状态端点与字段。 */
+        "  if(WELFARE){" +
+        "    var r=await fetch('/api/checkin/status',{headers:H(),credentials:'include'});" +
+        "    var st=r.status;var j=null;try{j=await r.json()}catch(e){}" +
+        "    if(st!==200)return {ok:false,http:st,message:'HTTP '+st};" +
+        "    var d=(j&&j.data)||j||{};" +
+        "    var fin=(d.checked_in_today===true)||(d.checked_in===true);" +
+        "    var tdy=d.today||{};" +
+        "    var rw=Number(tdy.amount!==undefined?tdy.amount:0)||0;" +
+        "    return {ok:true,http:200,checked:fin,reward:rw,rewardKnown:fin&&rw>0," +
+        "            eligible:(d.can_check_in===true)||(d.checkin_eligible===true)};" +
+        "  }" +
         "  var r=await fetch('/api/user/checkin?month='+encodeURIComponent(month())," +
         "    {headers:H(),credentials:'include'});" +
         "  var st=r.status;var j=null;try{j=await r.json()}catch(e){}" +
@@ -234,6 +268,26 @@ public final class CheckinJs {
         "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
         /* 第 2 步：未签 → 正式签到 */
         "P('正在签到…');" +
+        /* WELFARE：POST /api/checkin，必须带 X-Turnstile-Token。
+         * 令牌由站点自己的 Turnstile 挂件产出（不破解、不代答）。 */
+        "if(WELFARE){" +
+        "  var tk0=await turnstileToken();" +
+        "  if(!tk0){finish(false,false,0,false,'turnstile-wait-timeout：验证码未就绪');return;}" +
+        "  var rr=null,ss=0;" +
+        "  try{var rr0=await fetch('/api/checkin',{method:'POST',credentials:'include'," +
+        "        headers:Object.assign({},H(),{'Content-Type':'application/json','X-Turnstile-Token':tk0})," +
+        "        body:'{}'});ss=rr0.status;try{rr=await rr0.json()}catch(e){}}catch(e){}" +
+        "  var mm=(rr&&(rr.message||rr.error))||('HTTP '+ss);" +
+        "  if(ss===200&&(!rr||rr.code===0||rr.success!==false)){" +
+        "    var c=await stateOf();" +
+        "    var rw2=c.ok?Number(c.reward||0):0;" +
+        "    finish(true,false,rw2,rw2>0,rw2>0?('签到成功 +$'+rw2):'签到成功');return;}" +
+        "  if(ALREADY.test(mm)){var c2=await stateOf();" +
+        "    finish(true,true,c2.ok?c2.reward:0,c2.ok&&c2.rewardKnown,'今日已签到');return;}" +
+        "  if(ss===401||AUTHBAD.test(mm)){" +
+        "    out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
+        "  finish(false,false,0,false,mm);return;" +
+        "}" +
         "var res1=await post('/api/user/checkin');" +
         "var r1=res1.j;var st1=res1.status;" +
         "if(r1&&r1.success){var rw=usd(r1.data&&r1.data.quota_awarded);" +

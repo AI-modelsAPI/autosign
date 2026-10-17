@@ -38,6 +38,7 @@ public final class LogPopup {
     private final FrameLayout scrim;
     private final LinearLayout body;      // 日志行容器
     private final ScrollView scroller;
+    private final LinearLayout tabRow;    // tab：全部 / 用户 / 系统
     private final TextView footerRight;
     private final Handler h = new Handler(Looper.getMainLooper());
 
@@ -93,6 +94,24 @@ public final class LogPopup {
         header.addView(close);
         win.addView(header, new LinearLayout.LayoutParams(-1, -2));
         win.addView(hairline(a));
+        /* Tab 行：全部 / 用户 / 系统。用户日志是结论，系统日志是排查细节。 */
+        tabRow = Ui.row(a);
+        tabRow.setPadding(Ui.dp(a, 12), 0, Ui.dp(a, 12), Ui.dp(a, 6));
+        String[][] tabs = {{"all", "全部"}, {"user", "用户"}, {"system", "系统"}};
+        for (String[] t : tabs) {
+            TextView tab = Ui.tv(a, t[1], 11, "all".equals(t[0]) ? Ui.LOG_TXT : Ui.LOG_INFO, true);
+            tab.setPadding(Ui.dp(a, 10), Ui.dp(a, 4), Ui.dp(a, 10), Ui.dp(a, 4));
+            tab.setTag(t[0]);
+            tab.setClickable(true);
+            final String key = t[0];
+            tab.setOnClickListener(v -> setKindFilter(key));
+            tabRow.addView(tab);
+            tabRow.addView(Ui.gapW(a, 4));
+        }
+        tabRow.addView(Ui.spring(a));
+        win.addView(tabRow, new LinearLayout.LayoutParams(-1, -2));
+        win.addView(hairline(a));
+
 
         /* Body 挂载 */
         win.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -171,6 +190,17 @@ public final class LogPopup {
         p.scheduleFlush();
     }
 
+    /** 当前 tab：all / user / system（默认 all）。 */
+    private String kindFilter = "all";
+
+    /** 该条日志是否属于当前 tab。旧数据没有 kind 字段 → 视为 user。 */
+    private boolean matches(JSONObject e) {
+        if ("all".equals(kindFilter)) return true;
+        String k = e.optString("kind", Store.LOG_USER);
+        if (Store.LOG_SYSTEM.equals(kindFilter)) return Store.LOG_SYSTEM.equals(k);
+        return !Store.LOG_SYSTEM.equals(k);
+    }
+
     private void scheduleFlush() {
         if (flushScheduled) return;
         flushScheduled = true;
@@ -181,28 +211,48 @@ public final class LogPopup {
                 batch = new java.util.ArrayList<>(pending);
                 pending.clear();
             }
-            for (JSONObject e : batch) body.addView(line(e));
+            for (JSONObject e : batch) if (matches(e)) body.addView(line(e));
             trim();
             scroller.post(() -> scroller.fullScroll(View.FOCUS_DOWN));
         }, 80);
     }
 
+
     /** 从 Store 重新加载全部日志（最多 120 条，避免浮窗过长） */
     public void reload() {
         body.removeAllViews();
         JSONArray a = new Store(act).opLogs();
-        int from = Math.max(0, a.length() - 120);
-        if (a.length() == 0) {
-            body.addView(emptyLine("暂无日志 · 执行签到或刷新后这里会实时输出"));
-        } else {
-            for (int i = from; i < a.length(); i++) {
-                JSONObject e = a.optJSONObject(i);
-                if (e != null) body.addView(line(e));
-            }
+        int from = Math.max(0, a.length() - 400);
+        int shown = 0;
+        for (int i = from; i < a.length(); i++) {
+            JSONObject e = a.optJSONObject(i);
+            if (e != null && matches(e)) { body.addView(line(e)); shown++; }
+        }
+        if (shown == 0) {
+            body.addView(emptyLine("system".equals(kindFilter)
+                    ? "暂无系统日志 · 这里记录请求路径/状态码/耗时/降级原因"
+                    : "暂无日志 · 执行签到或刷新后这里会实时输出"));
         }
         boolean autoOn = new Store(act).uiPref("logAutoPopup", true);
         footerRight.setText("自动弹出: " + (autoOn ? "开" : "关"));
         scroller.post(() -> scroller.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** 切换 tab：all / user / system。 */
+    private void setKindFilter(String k) {
+        if (k == null || k.equals(kindFilter)) return;
+        kindFilter = k;
+        for (int i = 0; i < tabRow.getChildCount(); i++) {
+            View v = tabRow.getChildAt(i);
+            Object tag = v.getTag();
+            if (tag == null) continue;
+            boolean on = k.equals(String.valueOf(tag));
+            if (v instanceof TextView) {
+                ((TextView) v).setTextColor(on ? Ui.LOG_TXT : Ui.LOG_INFO);
+                ((TextView) v).setAlpha(on ? 1f : 0.6f);
+            }
+        }
+        reload();
     }
 
     private void trim() {

@@ -14,8 +14,13 @@ public final class ReadFallback {
             URI u = new URI(path);
             if (u.isAbsolute() || u.getRawAuthority() != null || u.getFragment() != null) return false;
             String p = u.getRawPath();
+            /* 只读白名单：New API 系 + 福利站（子站点）的只读端点。
+             * 福利站端点来自实测：/api/me、/api/level、/api/checkin/status、/api/ledger。
+             * 写操作（POST /api/checkin）永不进白名单。 */
             if (!java.util.Set.of("/api/user/self", "/api/token/", "/api/log/self",
-                    "/api/data/self", "/api/user/checkin").contains(p)) return false;
+                    "/api/data/self", "/api/user/checkin",
+                    "/api/me", "/api/level", "/api/checkin/status", "/api/ledger")
+                    .contains(p)) return false;
             String q = u.getRawQuery();
             return q == null || q.matches("[A-Za-z0-9_=&:%+.,-]*");
         } catch (Exception e) { return false; }

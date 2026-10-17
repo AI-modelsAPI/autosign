@@ -1040,29 +1040,73 @@ public class MainActivity extends Activity {
             Store store = new Store(this);
             int ok = 0, err = 0;
             try {
-                for (int i = 0; i < targets.size(); i++) {
-                    final int n = i + 1;
-                    String[] t = targets.get(i);
-                    final String who;
-                    JSONObject st0 = store.findSite(t[0]);
-                    JSONObject ac0 = store.findAccount(t[1]);
-                    who = (st0 == null ? t[0] : st0.optString("name", t[0]))
-                            + (ac0 == null ? "" : " · " + ac0.optString("alias", ""));
-                    h.post(() -> {
-                        setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
-                                n + "/" + total, Ui.BLUE);
-                        busyUpdate("一键刷新 " + n + "/" + total + "：" + who);
-                    });
-                    try {
-                        JSONObject stt = engine.status(t[1]);
-                        store.patchAccount(t[1], buildStatusPatch(stt));
-                        if (stt.optBoolean("ok")) ok++; else err++;
-                    } catch (Exception e) {
-                        err++;
-                        store.opLog(t[0], t[1], "一键刷新", "err", "刷新失败", String.valueOf(e.getMessage()), "user");
-                    }
-                    h.post(() -> pushLog(store));
+                /* 站点间并行、站点内串行（用户明确要求）：
+                 * 同一站点同一时刻只有一个账号在跑，避免同站并发触发限流/会话互踢；
+                 * 不同站点之间并行，把总耗时从「账号数×单次」压到「最慢站点×其账号数」。
+                 * 实现：按 siteKey 分组，每组一个串行队列，组间用固定大小线程池。 */
+                java.util.LinkedHashMap<String, java.util.List<String>> bySite =
+                        new java.util.LinkedHashMap<>();
+                for (String[] t : targets) {
+                    java.util.List<String> l = bySite.get(t[0]);
+                    if (l == null) { l = new java.util.ArrayList<>(); bySite.put(t[0], l); }
+                    l.add(t[1]);
                 }
+                final java.util.concurrent.atomic.AtomicInteger done =
+                        new java.util.concurrent.atomic.AtomicInteger(0);
+                final java.util.concurrent.atomic.AtomicInteger okA =
+                        new java.util.concurrent.atomic.AtomicInteger(0);
+                final java.util.concurrent.atomic.AtomicInteger errA =
+                        new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.List<java.util.concurrent.Callable<Void>> jobs = new java.util.ArrayList<>();
+                for (java.util.Map.Entry<String, java.util.List<String>> en : bySite.entrySet()) {
+                    final String sk = en.getKey();
+                    final java.util.List<String> ak = en.getValue();
+                    jobs.add(() -> {
+                        for (String accountKey : ak) {
+                            final int n = done.incrementAndGet();
+                            JSONObject st0 = store.findSite(sk);
+                            JSONObject ac0 = store.findAccount(accountKey);
+                            final String who = (st0 == null ? sk : st0.optString("name", sk))
+                                    + (ac0 == null ? "" : " · " + ac0.optString("alias", ""));
+                            h.post(() -> {
+                                setTabAction(tabRefreshIcon, tabRefreshText, "hourglass",
+                                        n + "/" + total, Ui.BLUE);
+                                busyUpdate("一键刷新 " + n + "/" + total + "：" + who);
+                            });
+                            try {
+                                JSONObject stt = engine.status(accountKey);
+                                store.patchAccount(accountKey, buildStatusPatch(stt));
+                                if (stt.optBoolean("ok")) okA.incrementAndGet();
+                                else errA.incrementAndGet();
+                            } catch (Exception e) {
+                                errA.incrementAndGet();
+                                store.opLog(sk, accountKey, "一键刷新", "err",
+                                        "刷新失败", String.valueOf(e.getMessage()), "user");
+                            }
+                            h.post(() -> pushLog(store));
+                        }
+                        return null;
+                    });
+                }
+                /* 并发度 = 站点数（每个站点一个串行任务），上限 6 防线程过多。 */
+                int poolSize = Math.max(1, Math.min(6, bySite.size()));
+                java.util.concurrent.ExecutorService pool =
+                        java.util.concurrent.Executors.newFixedThreadPool(poolSize);
+                try {
+                    java.util.List<java.util.concurrent.Future<Void>> fs = null;
+                    try { fs = pool.invokeAll(jobs); }
+                    catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                    if (fs != null) for (java.util.concurrent.Future<Void> f : fs) {
+                        try { f.get(); } catch (Exception ignored) {}
+                    }
+                } finally {
+                    pool.shutdown();
+                    pool.shutdown();
+                }
+                ok = okA.get();
+                err = errA.get();
             } finally {
                 /* v1.1.1：try/finally 兜底——任何异常路径都保证 busyEnd 执行，
                  * 顶栏绝不残留"刷新中"转圈（此前异常路径 busyDepth 泄漏）。 */
@@ -1108,11 +1152,16 @@ public class MainActivity extends Activity {
 
         /* 网页手动型：没有可用签到接口，直接开站点主页交给用户，不假装在签 */
         if (Engine.isWebOnly(site)) {
-            String home = site.optString("homeUrl", site.optString("baseUrl", ""));
+            /* 配了福利站就优先开福利站（签到/额度都在那边），否则开站点主页。 */
+            String welfare = SiteProfile.welfareUrl(site);
+            String home = welfare.isEmpty()
+                    ? site.optString("homeUrl", site.optString("baseUrl", ""))
+                    : welfare;
             store.opLog(sk, key, "签到", "info", "该站需网页手动签到，已打开站点", home, "user");
-            toast("该站不开放签到接口，已打开网页");
-            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(home))); }
-            catch (Exception e) { toast("无法打开链接"); }
+            toast("已打开网页（登录会留在应用内，之后可静默）");
+            /* 必须用应用内 WebView：系统浏览器的 Cookie 与本应用不共享，
+             * 用户在 Chrome 里登录了，应用里仍是未登录（实测踩过）。 */
+            WebViewActivity.open(this, sk, key, home, site.optString("name", sk));
             return;
         }
 
@@ -1235,6 +1284,21 @@ public class MainActivity extends Activity {
     private void applyCheckinResult(String accountKey, JSONObject r, boolean batchMode) {
         double reward = r.optDouble("reward", 0);
         boolean known = r.optBoolean("rewardKnown", false);
+        /* needWebview：该站签到必须在真实浏览器上下文里完成（Turnstile 等）。
+         * 用应用内 WebView 打开，会话落在同一账号分区，签完回来刷新即可。 */
+        if (r.optBoolean("needWebview")) {
+            JSONObject site0 = new Store(this).siteOfAccount(accountKey);
+            String welfare = site0 == null ? "" : SiteProfile.welfareUrl(site0);
+            String target = welfare.isEmpty()
+                    ? (site0 == null ? "" : site0.optString("baseUrl", ""))
+                    : welfare;
+            if (!batchMode && !target.isEmpty()) {
+                toast(r.optString("message", "该站签到需要浏览器环境，正在打开"));
+                WebViewActivity.open(this, site0.optString("key", ""), accountKey,
+                        target, site0.optString("name", ""));
+            }
+            return;
+        }
         if (r.optBoolean("already")) {
             String m = r.optString("message", "今日已签到");
             if (known && reward > 0) m += " · 奖励 $" + Ui.usd(reward);

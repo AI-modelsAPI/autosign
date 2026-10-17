@@ -709,6 +709,25 @@ public class SettingsView extends FrameLayout {
         slp.topMargin = Ui.dp(act, 5);
         box.addView(seg, slp);
 
+        /* 福利站（子站点）地址：可选。
+         * fengwind 这类站把「签到」和「额度」放在子站点上，登录仍走主站 SSO。
+         * 填了就走子站点的 /api/checkin 与 /api/level；留空则走主站协议。 */
+        final EditText[] wOut = new EditText[1];
+        box.addView(Ui.gapH(act, 10));
+        box.addView(Ui.tv(act, "福利站地址（可选）", 11, Ui.SUB, true));
+        EditText welfareEt = Ui.input(act, "https://api-welfalre.fengwind.com");
+        wOut[0] = welfareEt;
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(-1, -2);
+        wlp.topMargin = Ui.dp(act, 5);
+        box.addView(welfareEt, wlp);
+        box.addView(Ui.tv(act, "签到与额度在这个子站点上时填写；留空表示签到/额度都在主站", 9, Ui.SUB2));
+        if (!isNew) {
+            JSONObject m0 = site.optJSONObject("meta");
+            String w0 = m0 == null ? "" : m0.optString("welfareUrl", "");
+            if (w0.isEmpty()) w0 = site.optString("welfareUrl", "");
+            welfareEt.setText(w0);
+        }
+
         if (!isNew) {
             nOut[0].setText(site.optString("name"));
             uOut[0].setText(site.optString("baseUrl"));
@@ -748,6 +767,14 @@ public class SettingsView extends FrameLayout {
                         if (!s.has("homeUrl")) s.put("homeUrl", u);
                         s.put("checkinType", type[0]);
                         s.put("hideOnBoard", hideOnBoard[0]);
+                        /* 福利站（子站点）地址：空则清除，非空则存到 meta。
+                         * 存 meta 与 Store.putSiteMeta 一致，老数据不受影响。 */
+                        String wu = wOut[0] == null ? "" : wOut[0].getText().toString().trim();
+                        wu = wu.replaceAll("/+$", "");
+                        JSONObject sm = s.optJSONObject("meta");
+                        if (sm == null) { sm = new JSONObject(); s.put("meta", sm); }
+                        if (wu.isEmpty()) sm.remove("welfareUrl");
+                        else sm.put("welfareUrl", wu);
                         store.upsertSite(s);
                         store.opLog(s.optString("key"), "", isNew ? "添加站点" : "编辑站点", "ok",
                                 s.optString("name"), u, "user");

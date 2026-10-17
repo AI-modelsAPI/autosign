@@ -208,10 +208,17 @@ public final class OffscreenCheckin {
                     }
                 });
                 main.postDelayed(timeoutTask, timeoutSec * 1000L);
-                /* 代理探活完成后才加载（v0.1.8 修复竞态：原来不等探活就 loadUrl） */
+                /* 代理探活完成后才加载（v0.1.8 修复竞态：原来不等探活就 loadUrl）。
+                 * 配了福利站就加载福利站（签到/额度都在那边，主站没有签到接口 —— 实测确认）。 */
                 applyProxyThen(new Store(ctx), () -> {
                     if (done) return;
-                    try { if (wv != null) wv.loadUrl(base + "/"); }
+                    String target = base;
+                    try {
+                        JSONObject st0 = new Store(ctx).findSite(siteKey);
+                        String w = SiteProfile.welfareUrl(st0);
+                        if (!w.isEmpty()) target = w;
+                    } catch (Exception ignored) {}
+                    try { if (wv != null) wv.loadUrl(target + "/"); }
                     catch (Exception e) { finish(false, false, 0, false, "加载失败: " + e.getMessage()); }
                 });
             } catch (Throwable t) {
@@ -273,7 +280,10 @@ public final class OffscreenCheckin {
 
         private String js() {
             loadSnapshot();
-            return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey, snapToken, snapSiteUserId);
+            JSONObject st = new Store(ctx).findSite(siteKey);
+            String kind = SiteProfile.kindName(SiteProfile.kindOf(st));
+            return CheckinJs.render(CheckinJs.extractSid(snapToken), snapSiteKey,
+                    snapToken, snapSiteUserId, kind);
         }
 
         private synchronized void finish(boolean ok, boolean already, double reward,

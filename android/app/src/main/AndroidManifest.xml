@@ -37,6 +37,10 @@
             android:exported="false"
             android:theme="@style/Theme.JustSign" />
         <activity
+            android:name=".WebViewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.JustSign" />
+        <activity
             android:name=".AuthActivity"
             android:exported="false"
             android:theme="@style/Theme.JustSign.Auth" />

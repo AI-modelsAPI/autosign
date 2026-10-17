@@ -814,6 +814,34 @@ public class Store {
      */
     public void opLog(String siteKey, String accountKey, String action,
                       String level, String summary, String detail, String source) {
+        /* 旧签名：默认按用户日志记录（结论型）。系统日志请用 sysLog。 */
+        opLog(siteKey, accountKey, action, level, summary, detail, source, LOG_USER);
+    }
+
+    /** 用户日志：用户看得懂的结论（「已签到 +$25」「余额增量未达标」）。 */
+    public static final String LOG_USER = "user";
+    /** 系统日志：排查用（路径/状态码/耗时/字段名/降级原因），绝不含凭据。 */
+    public static final String LOG_SYSTEM = "system";
+
+    /**
+     * 系统日志。与用户日志分开存放（kind 字段），浮窗里分 tab 展示。
+     *
+     * 纪律：只记可观测事实 —— path、http 状态、耗时 ms、字段名、布尔、降级级别。
+     * 绝不记 token / cookie / 响应正文。summary 请写「发生了什么」，不要写结论。
+     */
+    public void sysLog(String siteKey, String accountKey, String action,
+                       String level, String summary, String detail) {
+        opLog(siteKey, accountKey, action, level, summary, detail, "auto", LOG_SYSTEM);
+    }
+
+    /**
+     * 记一条操作日志。
+     * level：ok / err / info（决定浮窗里的颜色与状态点）
+     * source：user / cron / auto（触发源，日志副行展示）
+     * kind：user / system（决定浮窗 tab）
+     */
+    public void opLog(String siteKey, String accountKey, String action,
+                      String level, String summary, String detail, String source, String kind) {
         synchronized (LOCK) {
             try {
                 JSONArray a;
@@ -836,14 +864,16 @@ public class Store {
                         .put("level", level == null ? "info" : level)
                         .put("summary", summary == null ? "" : summary)
                         .put("detail", detail == null ? "" : detail)
-                        .put("source", source == null ? "user" : source);
+                        .put("source", source == null ? "user" : source)
+                        .put("kind", LOG_SYSTEM.equals(kind) ? LOG_SYSTEM : LOG_USER);
                 a.put(e);
                 while (a.length() > OPLOG_MAX) a.remove(0);
                 sp.edit().putString("opLogs", a.toString()).commit();
                 /* v1.3.0 诊断：同时镜像到 logcat（TAG=JUSTSIGN_OPLOG），
                  * 便于用 adb/Shizuku logcat 读取运行日志（SharedPreferences 私有目录读不到）。
                  * 只记已脱敏的 summary/detail，不含令牌/cookie 原文。 */
-                android.util.Log.i("JUSTSIGN_OPLOG", "[" + (siteKey == null ? "" : siteKey) + "/"
+                String kindTag = LOG_SYSTEM.equals(kind) ? "SYS" : "USR";
+                android.util.Log.i("JUSTSIGN_OPLOG", "[" + kindTag + "][" + (siteKey == null ? "" : siteKey) + "/"
                         + (accountKey == null ? "" : accountKey) + "] [" + action + "] " + level
                         + " | " + summary + " | " + (detail == null ? "" : detail)
                         + " | src=" + source);
