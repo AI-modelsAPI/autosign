@@ -67,6 +67,25 @@ public class OffscreenReadJsWafTest {
         assertTrue("等待上限应 >= 30s 以覆盖挑战页", js.contains("var CAP=30000;"));
         assertFalse("不应再停留在旧的 20s", js.contains("var CAP=20000;"));
     }
+    /**
+     * 「导航型放行」必须真的会被触发。
+     *
+     * 真机教训（agentrouter.org，2026-10-20）：Runner 里早有 navigateToClearWaf()，
+     * 但脚本从不发 waf-need-navigate —— 那段导航代码是死代码，
+     * 于是 fetch 拿到 16011B 挑战页后一直空转到 CAP，日志恒为 waf-not-cleared。
+     * 这个用例锁死「识别到挑战页 → 请求内核导航一次」这条链路。
+     */
+    @Test public void challengePageRequestsKernelNavigation() {
+        String js = rendered();
+        assertTrue("脚本必须能发出导航请求，否则 Runner 的过盾导航是死代码",
+                js.contains("reason:'waf-need-navigate'"));
+        assertTrue("导航请求必须由挑战页判定驱动（LASTF.waf）",
+                js.contains("if(LASTF.waf){send({ok:false,reason:'waf-need-navigate'"));
+        assertTrue("必须记录本轮 fetch 是否为挑战页",
+                js.contains("waf:wafSolved(o.text)"));
+        assertTrue("重新注入不能被 __jsRead 守卫挡掉",
+                js.contains("try{window.__jsRead=0;}catch(e){}"));
+    }
 
     /** 判定逻辑必须对三种挑战页为真、对业务 JSON 为假。 */
     @Test public void wafClassifierSeparatesChallengeFromData() {

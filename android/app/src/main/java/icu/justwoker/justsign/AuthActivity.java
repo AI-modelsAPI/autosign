@@ -233,6 +233,8 @@ public class AuthActivity extends Activity {
     private volatile boolean holdsAuthLock = false;
     /* 本次授权绑定的「站点×账号」Profile（降级=Default 时为 null） */
     private androidx.webkit.Profile mProfile;
+    /** 是否已为 WAF 质询导航过一次（只做一次，避免反复重载）。 */
+    private boolean wafNavDone = false;
 
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
@@ -304,6 +306,20 @@ public class AuthActivity extends Activity {
                         logProbeDiagnostic("http200-nosuccess", "HTTP 200 但 success=false（未登录或响应异常）");
                     } catch (Exception e) {
                         logProbeDiagnostic("http200-badjson", "HTTP 200 响应非 JSON（疑似质询页）");
+                        /* 质询页修复（真机实证 agentrouter L站，2026-10-20）：
+                         * /api/user/self 返回的是 16011 字节的阿里云 WAF 挑战页，
+                         * 而 fetch 响应里的 <script> 永远不会执行 → 放行 Cookie 永远
+                         * 不会写入本分区（cookieLen 恒为 818 不变），于是一直轮询到超时。
+                         * 解法：用内核**导航**一次站点真实页面，让挑战 JS 真正跑起来，
+                         * 写入 acw_sc__v2 后再由下一轮探测读取。
+                         * 只导航一次（wafNavDone），避免把出口 IP 打得更脏。 */
+                        if (!wafNavDone && wv != null && body.length() > 2000) {
+                            wafNavDone = true;
+                            authLog("info", "WAF 质询", "响应为挑战页，导航站点页面以完成质询");
+                            h.post(() -> {
+                                if (!isAuthInactive() && wv != null) wv.loadUrl(baseUrl + "/console");
+                            });
+                        }
                     }
                 } else {
                     logProbeDiagnostic("http-" + status, "HTTP " + status + "（登录仍在进行）");
@@ -1514,7 +1530,13 @@ if (exchanging) return r.sameHost;
             if (credentialId != null && !credentialId.isEmpty()) patch.put("credentialId", credentialId);
         /* opus4.8 审计·B-02：cookie 型站点的真会话凭据（gin session） */
         if (setCookie != null && !setCookie.isEmpty()) {
-            patch.put("siteCookie", setCookie);
+            /* 授权成功时把本分区当前**全部** Cookie 合并进来（含 WAF 放行 Cookie）。
+             * 真机实证（agentrouter L站，2026-10-20）：授权那一刻 /api/user/self 是 200
+             * （能读到 $26.23），但紧接着原生请求就被 503 —— 因为 setCookie 只带了
+             * 会话 Cookie，没带阿里云放行 Cookie（acw_sc__v2），原生 OkHttp 过不了盾。
+             * 合并后落库串与浏览器内一致，后续原生请求才不需要每次重新过盾。 */
+            String merged = WebViewProfileUtil.mergeProfileCookies(setCookie, mProfile, baseUrl);
+            patch.put("siteCookie", merged == null || merged.isEmpty() ? setCookie : merged);
             /* v0.6.7 会话指纹（新·可见授权链路）：与 SilentAuth 同判据。 */
             try {
                 new Store(this).opLog(siteKey, accountKey, "授权链路", "info",

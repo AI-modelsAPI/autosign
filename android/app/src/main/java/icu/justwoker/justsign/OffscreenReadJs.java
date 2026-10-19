@@ -37,7 +37,11 @@ public final class OffscreenReadJs {
         String id = js(expectId == null ? "" : expectId.trim());
         String n = js(nonce == null ? "" : nonce);
         return "(function(){"
-                + "if(window.__jsRead)return;window.__jsRead=1;"
+                /* __jsRead 守卫防的是「同一文档里重复注入」。过盾导航会换文档（新 window），
+                 * 本来无需清；但 WebView 里同源导航可能复用同一 window 对象，
+                 * 那样重新注入会被守卫挡掉 → 导航完还是读不到。故注入前显式清一次，
+                 * 由 Runner 保证注入次数受控（每次页面加载/导航后各一次）。 */
+                + "try{window.__jsRead=0;}catch(e){}"
                 + "var B='" + base + "',P='" + pid + "',N='" + n + "',ID='" + id + "';"
                 + "var CAP=30000;var LASTF={st:0,len:0,body:''};"
                 + "function send(o){try{JustSign.onReadResult(N,JSON.stringify(o))}catch(e){}}"
@@ -80,8 +84,8 @@ public final class OffscreenReadJs {
                 /* 三态：ok / hard（明确别的身份或明确被拒，立即停手）/ soft（未就绪，继续轮询） */
                 + "function probeIdentity(){if(ID=='')return Promise.resolve({ok:false,hard:true});"
                 + "  return fetchSelf().then(function(o){"
-                + "    LASTF={st:o.st,len:String(o.text).length,body:String(o.text).slice(0,400)};"
-                + "    if(wafSolved(o.text))return {ok:false,hard:false};"
+                + "    LASTF={st:o.st,len:String(o.text).length,body:String(o.text).slice(0,400),waf:wafSolved(o.text)};"
+                + "    if(LASTF.waf)return {ok:false,hard:false};"
                 + "    var j=null;try{j=JSON.parse(o.text)}catch(e){}"
                 + "    var d=(j&&j.data&&j.data.data)||(j&&j.data);"
                 + "    if(o.st==200&&j&&j.success===true&&d&&String(d.id)===ID)return {ok:true};"
@@ -99,6 +103,12 @@ public final class OffscreenReadJs {
                 + "  (function tick(){probeIdentity().then(function(r){"
                 + "    if(r.ok){fetchTarget();return;}"
                 + "    if(r.hard){send({ok:false,reason:'identity-mismatch',status:0,body:''});return;}"
+                /* 「导航型放行」：fetch 拿到的是 WAF 挑战页时，响应里的 <script> 永远不执行，
+                 * 只有内核真正导航过去才会跑挑战 JS 并写入 acw_sc__v2。
+                 * 一旦确认是挑战页就立刻请求一次导航（Runner 侧 navigatedForWaf 保证只做一次），
+                 * 不能等 CAP 到期 —— 那时外层 40s 已没剩多少时间给「导航 + 重新注入」。
+                 * 导航后仍读不到，则按原样如实失败（绝不把挑战页当数据）。 */
+                + "    if(LASTF.waf){send({ok:false,reason:'waf-need-navigate',retryable:true,status:0,body:''});return;}"
                 /* 到 CAP 仍无「放行已确认」的证据 → 判失败并标可重试，绝不当成功。
                  * 诊断只回传分类布尔与长度，绝不回传正文（含凭据）。 */
                 + "    if(Date.now()>=cap){"

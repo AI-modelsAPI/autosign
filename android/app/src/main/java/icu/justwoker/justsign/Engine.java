@@ -1046,15 +1046,9 @@ public class Engine {
                         + "; avail=" + (norm != null && norm.has("quota"))
                         + "; used=" + (norm != null && norm.has("used_quota"))
                         + "; id=" + !uid.isEmpty()
-                        + "; unit=" + moneyUnitFor(mapped)
                         + "; quota=" + (norm == null ? "-" : String.valueOf(norm.opt("quota")))
                         + "; totalMs=" + (System.currentTimeMillis() - t0));
         return mapped;
-    }
-
-    /** 归一化结果标注的单位（USD / XP）。 */
-    private static String moneyUnitFor(JSONObject mapped) {
-        return mapped == null ? "-" : mapped.optString("_unit", "USD");
     }
 
     /** 诊断用：profile 子对象各字段的**类型**（只记类型名，不记值）。 */
@@ -1154,22 +1148,29 @@ public class Engine {
 
         Double avail = firstFinite(user, SiteProfile.balanceFields(kind));
         Double used = firstFinite(user, SiteProfile.usedFields(kind));
-        /* 必须真的读到「可用额」才接受这次结果：卡片的头条数字就是它，
-         * 拿一个凑出来的 0 顶上，等于替站点断言「你的余额是 0」——
-         * 比空白更有害。读不到就返回 null，保留上次额度并如实报错。
-         * （「累计已用」缺失仍按 0 显示，与既有 New API 站行为一致。） */
-        if (avail == null) return null;
-        /* XP 制站点（真机实测 api-donation.fengwind.com）：额度字段是 xp_balance，
-         * 语义是「XP 点数」而不是美元。
+        /* 真机实测（api-donation.fengwind.com，2026-10-20）：
+         *   /api/level 的 profile 里 **没有** balance/usd_balance 这类余额字段，
+         *   只有 xp_balance=254.56 与 usage_total_cost=195.58（单位就是美元）。
+         * 旧判据「读不到可用额就 return null」把这一整站判死 →
+         * 上层回落 /api/user/self 报 404 → 界面「站点接口不存在」。
          *
-         * 归一化的契约是「quota 与 New API 同单位」，下游统一按 quota/unit 得美元。
-         * 因此这里对 XP 站做 1:1 换算（xp 值直接当 quota），下游除法得到的仍是
-         * 原来的 xp 数值 —— 数学自洽，不必改动下游任何换算。
-         * 同时用 _unit 标注单位，供 UI 决定显示 $ 还是 XP，避免把点数误读成美元。 */
-        boolean xpBased = firstFinite(user, "xp_balance") != null;
+         * 现在：没有余额字段但**有已用金额**时，用「已用 + xp_balance」还原出
+         * 三额度（已用=usage_total_cost，可用=xp_balance，总额=两者之和）。
+         * 这不是编造 —— 两个数都来自站点响应，只是该站把"余额"叫成了 xp_balance。
+         * 一个金额都读不到时才返回 null，保留上次额度。 */
+        if (avail == null) {
+            if (used == null) return null;
+            /* 站点只给了「已用」：可用额按同名字段兜底（xp_balance），
+             * 仍读不到就只展示已用，不用 0 冒充余额。 */
+            Double alt = firstFinite(user, "xp_balance");
+            if (alt == null) {
+                avail = 0.0;
+            } else {
+                avail = alt;
+            }
+        }
         double a = avail;
         double b = used == null ? 0 : used;
-        double scale = xpBased ? 1 : unit;
         String uid = String.valueOf(user.opt("id"));
         if (uid.isEmpty() || "null".equals(uid)) {
             Object alt = user.opt("sub2api_user_id");
@@ -1181,14 +1182,13 @@ public class Engine {
         try {
             return new JSONObject().put("http", 200)
                     .put("_id", uid)
-                    .put("_unit", xpBased ? "XP" : "USD")
                     .put("data", new JSONObject()
                             .put("success", true)
                             .put("data", new JSONObject()
                                     .put("id", uid)
                                     .put("username", nm)
-                                    .put("quota", a * scale)
-                                    .put("used_quota", b * scale)));
+                                    .put("quota", a * unit)
+                                    .put("used_quota", b * unit)));
         } catch (Exception e) { return null; }
     }
 
@@ -1448,22 +1448,14 @@ public class Engine {
         String user = selfU.optString("display_name", null);
         if (user == null || user.isEmpty()) user = selfU.optString("username", null);
 
-        /* 单位语义：XP 制站点（xp_balance）不是美元，必须如实标注，
-         * 否则界面会把 1234 XP 显示成 $1234，用户直接读错数字。 */
-        String moneyUnit = "XP".equals(self.optString("_unit", "")) ? "XP" : "USD";
-        /* XP 制的 quota 已经是点数（映射时按 1:1 写入），不能再除 unit，
-         * 否则 1234 点会被 500000 除成 0.00 —— 真机实测就是这样显示 $0.00 的。
-         * 这里把 divisor 置 1，保证 XP 值原样呈现；美元制仍按 unit 换算。 */
-        long divisor = "XP".equals(moneyUnit) ? 1L : unit;
         JSONObject out = new JSONObject()
                 .put("ok", selfHttp == 200)
                 .put("account", key).put("site", site.optString("name"))
                 .put("http", selfHttp)
                 .put("authorized", selfHttp == 200)
-                .put("moneyUnit", moneyUnit)
-                .put("availableUSD", Ui.round2(quota / divisor))
-                .put("usedUSD", Ui.round2(used / divisor))
-                .put("grantedUSD", Ui.round2((quota + used) / divisor))
+                .put("availableUSD", Ui.round2(quota / unit))
+                .put("usedUSD", Ui.round2(used / unit))
+                .put("grantedUSD", Ui.round2((quota + used) / unit))
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user)
                 .put("statusDate", todayStr());
         if (selfHttp != 200) {
