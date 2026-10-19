@@ -271,6 +271,7 @@ public class Engine {
                 boolean offscreenRanChallenge = recovered != null
                         && (recovered.optBoolean("retryable", false)
                             || "waf-not-cleared".equals(offReason)
+                            || "waf-need-navigate".equals(offReason)
                             || "identity-not-ready".equals(offReason)
                             || "no-result".equals(offReason));
                 if (offscreenRanChallenge && ReadFallback.allowed(method, path)) {

@@ -146,8 +146,13 @@ public final class OffscreenCheckin {
         private volatile boolean needUi = false;
         /** v1.3.2（P0-1）：本 WebView 绑定的「站点×账号」专属分区（降级=Default 时为 null）。 */
         private androidx.webkit.Profile mProfile;
+        /** v1.3.6：诊断用页面计数（判断 SPA 是否发生了换文档）。 */
+        private int pageCount = 0;
+        /** v1.3.6：诊断日志用（Bridge 内也要写日志，故提到字段；构造函数里初始化）。 */
+        private final Store diagStore;
         Runner(Context ctx, String siteKey, String accountKey, int timeoutSec, Callback cb) {
             this.ctx = ctx; this.siteKey = siteKey; this.accountKey = accountKey;
+            this.diagStore = new Store(ctx);
             this.timeoutSec = timeoutSec; this.cb = cb;
             this.timeoutTask = () -> finish(false, false, 0, false,
                     needUi ? "人机验证需要手动确认" : "后台签到超时");
@@ -188,12 +193,43 @@ public final class OffscreenCheckin {
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return false; }
                     @Override public void onPageFinished(WebView v, String url) {
-                        if (done || fired) return;
-                        /* 只在站点主页加载完成后注入（避免 about:blank / 跳转中间页触发） */
+                        if (done) return;
+                        boolean same = url != null && AuthProbeJs.sameOrigin(url, base);
+                        /* 诊断：只记是否同源与页面计数，不含 URL 细节/凭据。 */
+                        try {
+                            diagStore.opLog(siteKey, accountKey, "后台签到V2", "info",
+                                    "离屏页面加载完成",
+                                    "sameOrigin=" + same + "; pages=" + (++pageCount), "auto");
+                        } catch (Exception ignored) {}
                         if (url == null || url.startsWith("about:")) return;
-                        fired = true;
-                        try { v.evaluateJavascript(js(), null); }
-                        catch (Exception e) { finish(false, false, 0, false, "注入失败: " + e.getMessage()); }
+                        if (!same) return;
+                        /* 每个同源页面完成时注入。
+                         *
+                         * 注入内容 = 探针 + 正式脚本。探针只做一件事：立刻回一个
+                         * probe 事件，证明「脚本确实在这个文档里跑起来了」。
+                         * 没有探针时，「页面已加载、脚本零回调」有两种完全不同的原因
+                         * （注入没生效 vs 脚本卡在 fetch 上），日志无法区分 —— 真机实测
+                         * 就卡在这个二义性上，白改了几轮。 */
+                        final WebView target = v;
+                        main.postDelayed(() -> {
+                            if (done || target != wv) return;
+                            try {
+                                target.evaluateJavascript(
+                                        "try{window.JustSign.onProgress('probe-js-alive')}catch(e){}", null);
+                                /* 给正式脚本挂结果回调：若因语法错误执行失败，
+                                 * 回调会带回 "SyntaxError: ..." 而不是静默丢弃。
+                                 * 没有这行时「脚本注入了但零回调」无法定位（真机白改数轮）。 */
+                                target.evaluateJavascript(js(), value -> {
+                                    if (value == null || "null".equals(value)) return;
+                                    try {
+                                        diagStore.opLog(siteKey, accountKey, "后台签到V2", "info",
+                                                "脚本执行返回", "value=" + clip(value), "auto");
+                                    } catch (Exception ignored) {}
+                                });
+                            } catch (Exception e) {
+                                finish(false, false, 0, false, "注入失败: " + e.getMessage());
+                            }
+                        }, 600);
                     }
                     @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                         if (r == null || !r.isForMainFrame()) return;
@@ -322,9 +358,26 @@ public final class OffscreenCheckin {
             main.post(() -> { try { cb.onResult(fok, fal, frw, frk, fmsg); } catch (Exception ignored) {} });
         }
 
+        /** 诊断用：把回传值截断（只用于日志，避免刷屏）。 */
+        private static String clip(String v) {
+            if (v == null) return "";
+            String s = v.trim();
+            return s.length() > 160 ? s.substring(0, 160) + "…" : s;
+        }
+
         /** JS 与 Java 的桥：结果回传 + 续期新 token / 站点 siteKey 落库 */
         private class Bridge {
             @JavascriptInterface public void onProgress(String m) {
+                /* 探针事件：证明脚本确实在当前文档里跑起来了。
+                 * 用于区分「注入没生效」与「脚本卡在 fetch 上」——没有这条，
+                 * 真机上这两种完全不同的故障在日志里长得一模一样。 */
+                if (m != null && m.contains("probe-js-alive")) {
+                    try {
+                        diagStore.opLog(siteKey, accountKey, "后台签到V2", "info",
+                                "脚本已注入并执行", "probe=js-alive", "auto");
+                    } catch (Exception ignored) {}
+                    return;
+                }
                 /* 纯后台无 UI；只关心「需要人机交互」这个信号 */
                 if (m == null || !m.contains(CheckinJs.SIGNAL_NEED_UI)) return;
                 if (needUi) return;

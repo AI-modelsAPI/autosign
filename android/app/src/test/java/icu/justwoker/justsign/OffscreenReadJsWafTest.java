@@ -26,6 +26,17 @@ public class OffscreenReadJsWafTest {
             + "<meta name=\"aliyun_waf_bb\" content=\"eade71455e2ad9c6d08b82bc7d98df8c\">"
             + "<script>/* v2.0.1 */!function(){var __webpack_modules__={340:function(){}}();</script>";
 
+    /**
+     * 真机 2026-10-18 实测的挑战页（agentrouter.org 被拦响应，len=16011 的开头）。
+     * 关键：只有 `<meta name="aliyun_wa…`，既无 arg1，也无 aliyun_waf_aa/bb 字面，
+     * 更无 __webpack_modules__ —— 旧实现三条判据全部落空，挑战页被当成"未就绪"，
+     * 白等 30s 后报 waf-not-cleared。这个用例就是锁住这次修复。
+     */
+    private static final String META_ONLY_CHALLENGE =
+            "<!doctype html><meta charset=\"UTF-8\">"
+            + "<meta name=\"aliyun_waf_verify\" content=\"1\">"
+            + "<script>location.reload()</script>";
+
     /** 阿里云 ESA 老式 v1 挑战页特征（带 arg1，可纯 Java 求解）。 */
     private static final String V1_CHALLENGE =
             "<html><script>var arg1='ABCDEF0123456789';</script></html>";
@@ -38,41 +49,47 @@ public class OffscreenReadJsWafTest {
         return OffscreenReadJs.render("https://example.com", "/api/user/self", "12345", "nonce1");
     }
 
-    /** 脚本必须把 v1 与 v2 两种挑战页都纳入 wafSolved 判据。 */
-    @Test public void v2ChallengeIsRecognizedAsWaf() {
+    /** 脚本必须把三种挑战页变体都纳入 wafSolved 判据。 */
+    @Test public void challengeVariantsAreRecognized() {
         String js = rendered();
-        assertTrue("脚本必须能识别 v2 盾的 meta 标记",
-                js.contains("aliyun_waf_(?:aa|bb)"));
-        assertTrue("脚本必须保留 v1 的 arg1 判据",
-                js.contains("arg1"));
+        assertTrue("脚本必须保留 v1 的 arg1 判据", js.contains("arg1"));
+        assertTrue("脚本必须能识别任意 aliyun_waf 变体",
+                js.contains("/aliyun_waf/i"));
+        assertTrue("脚本必须能识别 meta name=aliyun_wa… 这种实测形态",
+                js.contains("aliyun_wa"));
         assertTrue("脚本必须存在统一的 isWafText 判定",
                 js.contains("function isWafText"));
     }
 
-    /** 轮询上限必须放宽，给内核跑完 v2 的 JS 留时间。 */
-    @Test public void waitCapCoversV2Challenge() {
+    /** 轮询上限必须放宽，给内核跑完挑战页的 JS 留时间。 */
+    @Test public void waitCapCoversChallenge() {
         String js = rendered();
-        assertTrue("等待上限应 >= 30s 以覆盖 v2 盾", js.contains("var CAP=30000;"));
+        assertTrue("等待上限应 >= 30s 以覆盖挑战页", js.contains("var CAP=30000;"));
         assertFalse("不应再停留在旧的 20s", js.contains("var CAP=20000;"));
     }
 
-    /** 提取出来的 isWafText 判定逻辑，必须对 v1/v2 为真、对业务 JSON 为假。 */
+    /** 判定逻辑必须对三种挑战页为真、对业务 JSON 为假。 */
     @Test public void wafClassifierSeparatesChallengeFromData() {
-        assertTrue(isWafText(V1_CHALLENGE));
-        assertTrue(isWafText(V2_CHALLENGE));
+        assertTrue("v1 带 arg1", isWafText(V1_CHALLENGE));
+        assertTrue("v2 带 aliyun_waf_aa/bb", isWafText(V2_CHALLENGE));
+        assertTrue("实测的 meta-only 变体（本次修复的对象）", isWafText(META_ONLY_CHALLENGE));
         assertFalse("正常业务 JSON 不能被误判为挑战页", isWafText(REAL_JSON));
         assertFalse(isWafText(""));
         assertFalse(isWafText(null));
     }
 
     /**
-     * 与脚本内 isWafText 等价的 Java 复刻：三条判据必须一致，
+     * 与脚本内 isWafText 等价的 Java 复刻：判据必须与脚本一致，
      * 否则「脚本改了、测试没跟上」会静默漂移。
      */
     private static boolean isWafText(String t) {
         if (t == null) return false;
-        if (t.matches("(?s).*var\\s+arg1\\s*=.*")) return true;
-        if (t.matches("(?s).*aliyun_waf_(?:aa|bb).*")) return true;
-        return t.contains("__webpack_modules__") && t.toLowerCase(java.util.Locale.US).contains("aliyun_waf");
+        String s = t;
+        if (s.matches("(?s).*var\\s+arg1\\s*=.*")) return true;
+        if (s.matches("(?s)(?i).*aliyun_waf.*")) return true;
+        if (s.matches("(?s)(?i).*name\\s*=\\s*[\"']aliyun_wa.*")) return true;
+        if (s.contains("__webpack_modules__") && s.toLowerCase(java.util.Locale.US).contains("aliyun")) return true;
+        if (s.matches("(?s)(?i).*(acw_sc__v2|acw_tc).*") && s.matches("(?s)(?i).*(<html|<!doctype).*")) return true;
+        return false;
     }
 }

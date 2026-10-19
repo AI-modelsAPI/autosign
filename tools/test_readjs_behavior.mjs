@@ -15,11 +15,22 @@ import process from 'node:process';
 const JAVA = process.argv[2]
   || 'android/app/src/main/java/icu/justwoker/justsign/OffscreenReadJs.java';
 
-/** 按 Java 字符串字面量转义规则，抽取 render() 里拼接出的真实 JS。 */
+// （注释已合并到下方 extractJs 文档块）
+/**
+ * 按 Java 字符串字面量转义规则，抽取 render() 里拼接出的真实 JS。
+ *
+ * 结束条件：遇到 render() 方法自身的右花括号。不能只靠「括号配平」——
+ * render() 之后还有 js() 这个辅助方法，它内部也有 "..." 字面量（sb.append("\\u%04x")），
+ * 配平判断会把它们一并抽进来，生成的脚本末尾拖着 Java 代码 → SyntaxError，
+ * 看起来像产品脚本坏了。真机教训：这类假阳性会把人骗去改本来正确的脚本。
+ */
 function extractJs(javaSrc) {
   const start = javaSrc.indexOf('return "(function(){');
   if (start < 0) throw new Error('未找到 render() 的脚本入口');
-  const seg = javaSrc.slice(start);
+  /* 只取到 render() 方法体结束：其后是 js() 辅助方法，含自己的字符串字面量，
+   * 一并抽进来会让脚本末尾拖着 Java 代码。 */
+  const bodyEnd = javaSrc.indexOf('\n    private static String js(', start);
+  const seg = javaSrc.slice(start, bodyEnd > 0 ? bodyEnd : javaSrc.length);
   const out = [];
   let i = 0;
   while (i < seg.length) {

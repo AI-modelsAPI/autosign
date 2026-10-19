@@ -7,6 +7,8 @@ import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
 import android.webkit.WebViewClient;
 
 import androidx.webkit.Profile;
@@ -71,6 +73,8 @@ public final class OffscreenReadRunner {
         private WebView wv;
         private Profile profile;
         private volatile boolean done = false;
+        /** 是否已为「导航型放行」的 WAF 挑战导航过一次（只允许一次，防循环）。 */
+        private boolean navigatedForWaf = false;
         private final Runnable watchdog;
 
         /** v1.3.2：诊断日志用（只记状态与布尔，不含凭据）。 */
@@ -100,8 +104,15 @@ public final class OffscreenReadRunner {
                     pcm.setAcceptCookie(true);
                     pcm.setAcceptThirdPartyCookies(wv, true);
                 } catch (Exception ignored) {}
-                wv.getSettings().setJavaScriptEnabled(true);
-                wv.getSettings().setDomStorageEnabled(true);
+                WebSettings ws = wv.getSettings();
+                ws.setJavaScriptEnabled(true);
+                ws.setDomStorageEnabled(true);
+                /* 与授权/签到/重授权同一 UA（真机差异修复）：
+                 * OffscreenReauth / OffscreenCheckin / SilentAuth 全都设了 UA_OFFSCREEN，
+                 * 唯独只读兜底没设，用的是 WebView 默认 UA（带 "; wv" 标记）。
+                 * 站点 WAF 对这种 UA 的处置与真实浏览器不同，表现为「同分区、同出口，
+                 * 授权页能读到数据、只读兜底读不到」。统一 UA 是这条链路能成功的前提之一。 */
+                ws.setUserAgentString(Engine.UA_OFFSCREEN);
                 /* v1.3.2：离屏不 attach 窗口。
                  * 曾试过用 1×1 透明宿主窗口承载（想复刻可见授权页的渲染环境），
                  * 真机实测证伪：给不给窗口都过不了本类遇到的新版阿里云滑块验证码
@@ -121,10 +132,14 @@ public final class OffscreenReadRunner {
                                         "离屏页面加载完成", "sameOrigin=" + same + "; injected=" + same, "auto");
                             } catch (Exception ignored) {}
                         }
-                        if (same) {
-                            wv.evaluateJavascript(
-                                    OffscreenReadJs.render(base, targetPath, siteUserId, nonce), null);
-                        }
+                        /* 同源页面加载完成后注入只读脚本。
+                         *
+                         * 注意「只导航一次」的语义：navigatedForWaf 一旦置位就【不再清零】，
+                         * 因此这里不会因为导航回来又触发第二轮导航。
+                         * （上一版在这里把标志清零，等于允许无限重载，既掩盖真实失败、
+                         *   又反复用非常规姿势打站点 —— 熔断形同虚设。）
+                         * 页面本身已加载完（挑战 JS 已跑过），重新注入脚本即可读到数据。 */
+                        if (same) injectReadScript();
                     }
                     @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
                                                               android.webkit.WebResourceResponse resp) {
@@ -147,6 +162,42 @@ public final class OffscreenReadRunner {
             } catch (Exception e) {
                 finish(null);
             }
+        }
+
+        /**
+         * 注入只读脚本。抽成方法是因为过盾导航后需要重新注入。
+         */
+        private void injectReadScript() {
+            if (done || wv == null) return;
+            try {
+                wv.evaluateJavascript(
+                        OffscreenReadJs.render(base, targetPath, siteUserId, nonce), null);
+            } catch (Exception ignored) {}
+        }
+
+        /**
+         * WAF 质询未放行时，用一次「真实页面导航」代替裸 API 导航。
+         *
+         * 为什么导航站点自身的 SPA 页面而不是 /api/user/self：
+         *   · 挑战页里的 <script> 只有在文档被真正导航时才会执行（fetch 响应里的不执行）；
+         *   · 但直接导航裸 API 地址是"非常规访问姿势"，会把出口 IP 打出 WAF 标记，
+         *     反而更难过盾（历史上就是这么把测试环境搞脏的）。
+         *   导航 /console 这类真实页面，既能让挑战 JS 跑完写入放行 Cookie，
+         *   又保持与真人访问一致的请求形态。
+         *
+         * 只做一次：过不了就不再重载（避免把 IP 打得更脏），交给上层如实上报。
+         */
+        private void navigateToClearWaf() {
+            if (done || wv == null || navigatedForWaf) return;
+            navigatedForWaf = true;
+            try {
+                if (store != null) {
+                    store.opLog(siteKey, accountKey, "只读离屏兜底", "info",
+                            "WAF 未放行，导航站点页面以完成挑战", "once=true; page=/console", "auto");
+                }
+                WebViewProfileUtil.flush(profile);
+                wv.loadUrl(base + "/console");
+            } catch (Exception ignored) {}
         }
 
         /** 与 SilentAuth / OffscreenSelfProbe 同一套出口策略：可达才套代理，否则直连。 */
@@ -192,28 +243,63 @@ public final class OffscreenReadRunner {
                          * http-NNN / identity-not-ready / missing-expected-id），已经过 redact，
                          * 不含 URL、Cookie 或正文。 */
                         if (!o.optBoolean("ok")) {
+                            /* 「导航型放行」：拿到的是 WAF 挑战页，fetch 里的脚本不会执行，
+                             * 必须让内核导航过去跑挑战 JS 才能拿到放行 Cookie。
+                             * 这里不结束，改为导航一次后重新注入脚本。 */
+                            if ("waf-need-navigate".equals(o.optString("reason", ""))
+                                    && !navigatedForWaf) {
+                                navigateToClearWaf();
+                                return;
+                            }
                             JSONObject fail = new JSONObject()
                                     .put("http", o.optInt("status", 0))
                                     .put("reason", o.optString("reason", ""))
-                                    /* v1.3.2：透传「是否值得重试」。
-                                     * 未过盾/未就绪 → true（放行 Cookie 可能刚落地，重发原生请求即可）
+                                    /* 未过盾/未就绪 → true（放行 Cookie 可能刚落地，重发原生请求即可）
                                      * 需人工交互/身份不符 → false（重试无意义，必须如实上报） */
                                     .put("retryable", o.optBoolean("retryable", false))
-                                    /* v1.3.4 诊断：区分「闸门没开」与「fetch 拿到挑战页」，
+                                    /* 诊断：区分「闸门没开」与「fetch 拿到挑战页」，
                                      * 只含状态码与文本长度，不含 URL/Cookie/正文。 */
                                     .put("diag", o.optString("diag", ""))
                                     .put("offscreenFailed", true);
+                            /* 只要离屏真的跑过质询，无论这次读取成没成，
+                             * 都必须把 Profile 里新落地的放行 Cookie 同步进落库的 siteCookie。
+                             * 原生 OkHttp 读的是落库串，不搬这一次，下次重发仍是旧 Cookie → 永远 503。 */
+                            syncCookiesToStore();
                             finish(fail);
                             return;
                         }
                         JSONObject out = new JSONObject().put("http", o.optInt("status", 0));
                         out.put("data", o.optString("body", ""));
+                        syncCookiesToStore();
                         finish(out);
                     } catch (Exception e) {
                         finish(null);
                     }
                 });
             }
+        }
+
+        /**
+         * 把本 Profile 当前 Cookie（含 WAF 放行 Cookie）合并进账号的 siteCookie 落库串。
+         *
+         * 只补充/覆盖同名键，不丢已有键；值可能轮换，故以 Profile 为准。
+         * 全程不写日志内容（Cookie 属凭据），只记录「是否发生了变化」这一布尔。
+         */
+        private void syncCookiesToStore() {
+            if (store == null || accountKey == null || accountKey.isEmpty()) return;
+            try {
+                JSONObject acc = store.findAccount(accountKey);
+                if (acc == null) return;
+                String before = acc.optString("siteCookie", "");
+                String merged = WebViewProfileUtil.mergeProfileCookies(before, profile, base);
+                if (merged == null || merged.isEmpty() || merged.equals(before)) return;
+                store.patchAccount(accountKey, new JSONObject().put("siteCookie", merged));
+                try {
+                    store.opLog(siteKey, accountKey, "只读离屏兜底", "info",
+                            "放行 Cookie 已同步到本账号会话",
+                            "keysAddedOrRotated=" + (merged.length() != before.length()), "auto");
+                } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
         }
     }
 }

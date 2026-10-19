@@ -170,4 +170,52 @@ public final class WebViewProfileUtil {
     public static void flush(@Nullable Profile profile) {
         try { cookieManagerFor(profile).flush(); } catch (Throwable ignored) {}
     }
+    /**
+     * 把该 Profile 当前持有的 Cookie（含 WAF 放行 Cookie）合并进已落库的 cookie 串。
+     *
+     * 为什么必须做（真机日志实证的根因）：
+     *   原生请求（OkHttp）用的是**落库的 siteCookie 字符串**，不是 WebView 的 Cookie 库。
+     *   离屏 WebView 过盾后，放行 Cookie（acw_sc__v2 / acw_tc 等）只写进了 Profile 的
+     *   CookieManager，落库串里没有它 —— 于是「离屏已跑过质询，重发原生请求」仍然被
+     *   WAF 拦回 503，日志恒为 waf-not-cleared，看起来像"质询永远过不去"，
+     *   实际是"过了，但放行凭证没搬到原生请求手上"。
+     *
+     * 规则：
+     *   · 只补充/覆盖同名键，绝不丢弃落库串里已有的键（session Cookie 必须保留）；
+     *   · 同名时以 WebView 的值为准（WAF 放行值会轮换，WebView 里是最新的）。
+     *
+     * @param existing 已落库的 Cookie 头值，可为 null/空
+     * @param profile  离屏用过的 Profile
+     * @param url      取 Cookie 的目标站点根
+     * @return 合并后的 Cookie 头值；取不到任何东西时原样返回 existing
+     */
+    @NonNull
+    public static String mergeProfileCookies(@Nullable String existing, @Nullable Profile profile,
+                                             @NonNull String url) {
+        String base = existing == null ? "" : existing.trim();
+        String live;
+        try {
+            WebViewProfileUtil.flush(profile);
+            live = cookieManagerFor(profile).getCookie(url);
+        } catch (Throwable t) { return base; }
+        if (live == null || live.isEmpty()) return base;
+
+        java.util.LinkedHashMap<String, String> merged = new java.util.LinkedHashMap<>();
+        for (String pair : base.split(";")) {
+            int i = pair.indexOf('=');
+            if (i <= 0) continue;
+            merged.put(pair.substring(0, i).trim(), pair.substring(i + 1).trim());
+        }
+        for (String pair : live.split(";")) {
+            int i = pair.indexOf('=');
+            if (i <= 0) continue;
+            merged.put(pair.substring(0, i).trim(), pair.substring(i + 1).trim());
+        }
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : merged.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        return sb.toString();
+    }
 }

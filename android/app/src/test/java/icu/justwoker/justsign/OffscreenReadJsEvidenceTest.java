@@ -2,6 +2,7 @@ package icu.justwoker.justsign;
 
 import org.junit.Test;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -37,14 +38,46 @@ public class OffscreenReadJsEvidenceTest {
         assertTrue("成功必须要求 success===true", s.contains("j.success===true"));
         assertTrue("成功必须校验身份 id", s.contains("String(d.id)===ID"));
         assertTrue("被 WAF 换页时必须判失败", s.contains("reason:'waf-challenge'"));
-        assertTrue("非 2xx 必须判失败", s.contains("reason:'http-'+r.status"));
+        assertTrue("非 2xx 必须判失败", s.contains("reason:'http-'+o.st"));
     }
 
-    /** 必须能识别 v1 与 v2 两种挑战页。 */
-    @Test public void bothWafVariantsAreDetected() {
+    /** 三种挑战页变体都必须被识别为 WAF（否则会被当成"未就绪"空等）。 */
+    @Test public void allWafVariantsAreDetected() {
         String s = js();
-        assertTrue(s.contains("aliyun_waf_(?:aa|bb)"));
+        /* v1：带 arg1 的老式页 */
         assertTrue(s.contains("arg1"));
+        /* v2 与 meta-only 变体：任意 aliyun_waf 形态都必须命中。
+         * 旧断言锁的是 `aliyun_waf_(?:aa|bb)` 这个具体名，而真机实测的挑战页
+         * 只有 `<meta name="aliyun_wa…`，具体名并不匹配 —— 正是这个过窄的判据
+         * 让挑战页被当成"未就绪"，白等 30s。现在放宽到任意 aliyun_waf。 */
+        assertTrue(s.contains("/aliyun_waf/i"));
+    }
+
+    /**
+     * 与 AuthProbeJs（同仓已证明能探到会话的路径）对齐的两个请求细节。
+     *
+     * New API 变体要求 New-Api-User，缺失时服务端按匿名处理 → 恒 401；
+     * 被 WAF 换页后的响应若被缓存，重试只会反复拿到挑战页。
+     */
+    @Test public void requestsMatchKnownGoodProbe() {
+        String s = js();
+        assertTrue("必须带 New-Api-User（与 AuthProbeJs 一致）", s.contains("New-Api-User"));
+        assertTrue("必须绕过缓存（避免命中挑战页缓存）", s.contains("cache:'no-store'"));
+    }
+
+    /**
+     * 关键回归：脚本必须只有一个 pollIdentity 定义。
+     *
+     * 上一版拼接时写了两遍、第一份还没闭合，生成的是语法非法 JS ——
+     * Java 单测全绿，但真机上离屏读取从未跑起来过。
+     * tools/test_readjs_behavior.mjs 真实执行脚本，能抓到这类问题。
+     */
+    @Test public void singlePollIdentityDefinition() {
+        String s = js();
+        int first = s.indexOf("function pollIdentity");
+        assertTrue("必须有 pollIdentity", first >= 0);
+        assertEquals("pollIdentity 只能定义一次（重复定义会生成非法脚本）",
+                -1, s.indexOf("function pollIdentity", first + 1));
     }
 
     /** 只读脚本的安全属性：绝不代答、不伪造、不提交。 */

@@ -83,6 +83,17 @@ public final class CheckinJs {
     }
 
     private static final String TEMPLATE =
+        /* 幂等门：同一文档内只跑一次。
+         *
+         * 关键：整段脚本必须包在 IIFE 里，幂等门用 if/else 而不是顶层 return。
+         * 真机血泪（SeekAI，2026-10-19）：写成 `if(x)return;` 会让整段脚本在
+         * **编译阶段**就失败 —— "Illegal return statement"（return 只能在函数体内）。
+         * Android WebView 的 evaluateJavascript 对编译失败是静默丢弃的：
+         * 不抛异常、不走结果回调；而探针脚本却能正常执行，表现就是
+         * 「页面已加载、脚本已注入、但永远零回调，100s 后报后台签到超时」。
+         * 这个坑用字符串断言和 new Function 都发现不了（后者自动包函数体），
+         * 只有 vm.Script 的脚本模式才复现。 */
+        "(function(){if(window.__jsCheckin)return;window.__jsCheckin=1;" +
         "(async function(){" +
         "var R=function(o){try{window.JustSign.onResult(JSON.stringify(o))}catch(e){}};" +
         "var P=function(m){try{window.JustSign.onProgress(String(m))}catch(e){}};" +
@@ -104,9 +115,21 @@ public final class CheckinJs {
         "function pad2(n){return n<10?('0'+n):(''+n)}" +
         "function today(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());}" +
         "function month(){var d=new Date();return d.getFullYear()+'-'+pad2(d.getMonth()+1);}" +
+        /* ---- 带超时的 fetch ----
+         * 真机实测（SeekAI，2026-10-19）：脚本注入成功（probe=js-alive 有日志），
+         * 但全程零回调、连第一句 onProgress 都没出现 —— 说明卡在第一个 await 上。
+         * WebView 里的 fetch 在网络异常/被 WAF 挂起时不会 reject，而是一直 pending，
+         * 于是整个 async 函数永久停住，Java 侧只能干等到超时报「后台签到超时」。
+         * 所有请求一律走带超时的 fetchT：超时即 reject，由各自的 try/catch 收尾，
+         * 保证任何一步出问题都能走回 R(...) 回传结果，而不是静默挂死。 */
+        "function fetchT(u,o,ms){return new Promise(function(res,rej){" +
+        "  var done=false;" +
+        "  var t=setTimeout(function(){if(!done){done=true;rej(new Error('fetch-timeout'))}},ms||12000);" +
+        "  fetch(u,o).then(function(r){if(!done){done=true;clearTimeout(t);res(r)}}," +
+        "    function(e){if(!done){done=true;clearTimeout(t);rej(e)}});});}" +
         /* ---- /api/status：quota 单位 + turnstile siteKey + 站点是否开启签到 ---- */
         "async function loadStatus(){try{" +
-        "  var r=await fetch('/api/status',{headers:{'Accept':'application/json'},credentials:'include'});" +
+        "  var r=await fetchT('/api/status',{headers:{'Accept':'application/json'},credentials:'include'},12000);" +
         "  var j=await r.json();var d=(j&&j.data)||{};" +
         "  var u=Number(d.quota_per_unit||0);if(u>0)UNIT=u;" +
         "  if(d.checkin_enabled===false)CHECKIN_ON=false;" +
@@ -137,7 +160,7 @@ public final class CheckinJs {
         "async function stateOf(){try{" +
         /* WELFARE（福利站）：独立的状态端点与字段。 */
         "  if(WELFARE){" +
-        "    var r=await fetch('/api/checkin/status',{headers:H(),credentials:'include'});" +
+        "    var r=await fetchT('/api/checkin/status',{headers:H(),credentials:'include'},12000);" +
         "    var st=r.status;var j=null;try{j=await r.json()}catch(e){}" +
         "    if(st!==200)return {ok:false,http:st,message:'HTTP '+st};" +
         "    var d=(j&&j.data)||j||{};" +
@@ -147,7 +170,7 @@ public final class CheckinJs {
         "    return {ok:true,http:200,checked:fin,reward:rw,rewardKnown:fin&&rw>0," +
         "            eligible:(d.can_check_in===true)||(d.checkin_eligible===true)};" +
         "  }" +
-        "  var r=await fetch('/api/user/checkin?month='+encodeURIComponent(month())," +
+        "  var r=await fetchT('/api/user/checkin?month='+encodeURIComponent(month())," +
         "    {headers:H(),credentials:'include'});" +
         "  var st=r.status;var j=null;try{j=await r.json()}catch(e){}" +
         "  if(st!==200||!j||!j.success)return {ok:false,http:st,message:(j&&j.message)||('HTTP '+st)};" +
@@ -173,7 +196,7 @@ public final class CheckinJs {
         "  var urls=['/api/log/self?type=4&limit=30&page=1'," +
         "            '/api/log/self?limit=50&page=1'];" +
         "  for(var u=0;u<urls.length;u++){" +
-        "    var r=null;try{r=await fetch(urls[u],{headers:H(),credentials:'include'});}catch(e){continue}" +
+        "    var r=null;try{r=await fetchT(urls[u],{headers:H(),credentials:'include'},12000);}catch(e){continue}" +
         "    if(!r||r.status!==200)continue;" +
         "    var j=null;try{j=await r.json()}catch(e){continue}" +
         "    if(!j||!j.success)continue;" +
@@ -198,7 +221,7 @@ public final class CheckinJs {
         "}catch(e){return {found:false,reward:0,known:false};}}" +
         /* ---- POST 封装 ---- */
         "async function post(u){var st=0;try{" +
-        "  var r=await fetch(u,{method:'POST',headers:H(),credentials:'include'});st=r.status;" +
+        "  var r=await fetchT(u,{method:'POST',headers:H(),credentials:'include'},15000);st=r.status;" +
         "  var j=null;try{j=await r.json()}catch(e){}" +
         "  return {j:(j&&typeof j==='object')?j:null,status:st};" +
         "}catch(e){return {j:null,status:st,err:String((e&&e.message)||e)};}}" +
@@ -274,9 +297,9 @@ public final class CheckinJs {
         "  var tk0=await turnstileToken();" +
         "  if(!tk0){finish(false,false,0,false,'turnstile-wait-timeout：验证码未就绪');return;}" +
         "  var rr=null,ss=0;" +
-        "  try{var rr0=await fetch('/api/checkin',{method:'POST',credentials:'include'," +
+        "  try{var rr0=await fetchT('/api/checkin',{method:'POST',credentials:'include'," +
         "        headers:Object.assign({},H(),{'Content-Type':'application/json','X-Turnstile-Token':tk0})," +
-        "        body:'{}'});ss=rr0.status;try{rr=await rr0.json()}catch(e){}}catch(e){}" +
+        "        body:'{}'},15000);ss=rr0.status;try{rr=await rr0.json()}catch(e){}}catch(e){}" +
         "  var mm=(rr&&(rr.message||rr.error))||('HTTP '+ss);" +
         "  if(ss===200&&(!rr||rr.code===0||rr.success!==false)){" +
         "    var c=await stateOf();" +
@@ -328,5 +351,5 @@ public final class CheckinJs {
         "  finish(false,false,0,false,m2||'签到失败');return;}" +
         "finish(false,false,0,false,m1||'签到失败');" +
         "}catch(e){try{R({ok:false,message:'JS 异常: '+((e&&e.message)||String(e)),token:window.__jstoken||''});}catch(e2){}}" +
-        "})();";
+        "})();})();";
 }

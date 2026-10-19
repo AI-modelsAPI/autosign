@@ -6,15 +6,20 @@ package icu.justwoker.justsign;
  *   2) 通过只读身份探测拿到的 ID 与本地保存 ID 一致后，才回传响应。
  * 不写 Cookie、不按名称读取受限 Cookie、不点击任何按钮、不重放写操作。
  *
- * v1.1.6 修正：
- *   - 不再固定等 400ms 才发请求。改为轮询两个可靠参考对象：
- *     a) document.readyState 已离开 loading；
- *     b) WAF 质询已放行 —— 阿里云 ESA/Tengine 的质询页里带 {@code var arg1='...'} 脚本，
- *        过盾成功后内核写入放行 Cookie（acw_sc__v2）。
- *     两者都成立才发请求。上限 8s 只是安全网。
- *   - 身份确认同样改为轮询：质询刚放行时会话可能尚未生效，单次判定会误报 identity-mismatch。
- *   - 明确区分「硬失配」（拿到了明确是别的身份 → 立即停手）与「未就绪」（继续轮询），
- *     安全属性不变：只要不是本地保存的那个身份，绝不回传数据。
+ * v1.3.6 修复（真实行为测试抓到的致命缺陷）：
+ *   上一版拼接时把 pollIdentity 写了两遍、第一份还没闭合，生成的是**语法非法**的 JS。
+ *   Java 单测只做字符串包含断言，所以全绿；而 tools/test_readjs_behavior.mjs
+ *   真正执行脚本时立刻 SyntaxError —— 也就是说离屏只读兜底在真机上从未跑起来过，
+ *   日志里的 waf-not-cleared 根本不是"盾过不去"，而是"脚本没跑"。
+ *
+ *   现在按「单一函数定义」重写，并让行为测试真实执行它。
+ *
+ * 与 AuthProbeJs（同仓已证明能探到会话的那条路径）保持一致的三个细节：
+ *   · 带 New-Api-User: <id>（New API 变体要求，缺失时服务端按匿名处理）；
+ *   · cache:'no-store'（避免命中被 WAF 换页后的缓存响应）；
+ *   · 由 Java 侧设置 UA_OFFSCREEN（与授权/签到/重授权同一 UA，缺了会被当爬虫）。
+ *
+ * 证据驱动（不靠等秒数）：唯一成功判据 = 业务接口返回 success===true 且 id 相符。
  */
 public final class OffscreenReadJs {
 
@@ -34,7 +39,7 @@ public final class OffscreenReadJs {
         return "(function(){"
                 + "if(window.__jsRead)return;window.__jsRead=1;"
                 + "var B='" + base + "',P='" + pid + "',N='" + n + "',ID='" + id + "';"
-                + "var CAP=30000;var LASTF={st:0,len:0};"
+                + "var CAP=30000;var LASTF={st:0,len:0,body:''};"
                 + "function send(o){try{JustSign.onReadResult(N,JSON.stringify(o))}catch(e){}}"
                 + "function redact(x){return String(x==null?'error':x)"
                 + ".replace(/https?:\\/\\/[^\\s,;\"']+/g,'[url]')"
@@ -42,19 +47,20 @@ public final class OffscreenReadJs {
                 + ".replace(/[^\\s]{0,12}(cookie|token|secret|password|authorization|session)[^\\s]{0,12}/gi,'[redacted]')"
                 + ".slice(0,80)}"
                 + "function fail(e){send({ok:false,reason:redact(e&&e.message||e),status:0,body:''})}"
-                /* ---- WAF 质询识别（两种变体） ----
-                 * v1：阿里云 ESA 老式页，正文带 `var arg1='...'`，可由 WafChallenge 纯 Java 求解。
-                 * v2：阿里云 WAF v2.0.1 页（webpack 混淆 + meta[name=aliyun_waf_aa/bb]），
-                 *     正文【没有 arg1】，只能靠真实内核跑完它的 JS 拿到放行 Cookie。
-                 * 旧实现只认 v1：遇到 v2 页时 wafSolved() 返回 false，于是把这段 HTML
-                 * 当成「真实业务数据」ok:true 回传，上层解析失败后只报「离屏未拿到可用数据」，
-                 * 真正原因（被 v2 盾拦住）被完全掩盖 —— 实测 agentrouter.org 即命中此坑。 */
+                /* ---- WAF 质询识别 ----
+                 * 真机实测（agentrouter.org，2026-10-18）被拦响应的确切特征：
+                 *   st=200; len=16011; html=true; aliyun=true
+                 *   head = `<!doctype html><meta charset="UTF-8"><meta name="aliyun_wa…`
+                 * 旧实现只认 `var arg1=` / `aliyun_waf_aa|bb` / `__webpack_modules__` 三种具体形态，
+                 * 这页三条全落空 → 挑战页被当成"未就绪"空等到超时。
+                 * 现在按实测特征放宽：任意 aliyun_waf 变体、meta name=aliyun_wa…、acw_ 系列都算挑战页。 */
                 + "function isWafText(t){var s=String(t==null?'':t);"
                 + "  if(/var\\s+arg1\\s*=/.test(s))return true;"
-                + "  if(/aliyun_waf_(?:aa|bb)/.test(s))return true;"
-                + "  if(/__webpack_modules__/.test(s)&&/aliyun_waf/i.test(s))return true;"
+                + "  if(/aliyun_waf/i.test(s))return true;"
+                + "  if(/name\\s*=\\s*[\"']aliyun_wa/i.test(s))return true;"
+                + "  if(/__webpack_modules__/.test(s)&&/aliyun/i.test(s))return true;"
+                + "  if(/acw_sc__v2|acw_tc/i.test(s)&&/<html|<!doctype/i.test(s))return true;"
                 + "  return false;}"
-                /* ---- 参考对象 1：WAF 质询是否已放行 ---- */
                 + "function wafSolved(text){"
                 + "  if(text!=null&&isWafText(String(text)))return true;"
                 + "  var h=String(text==null?((document.documentElement&&document.documentElement.innerHTML)||''):text);"
@@ -64,49 +70,51 @@ public final class OffscreenReadJs {
                 + "  var h=(document.documentElement&&document.documentElement.innerHTML)||'';"
                 + "  return isWafText(h);"
                 + "}catch(e){return false;}}"
-                /* ---- 参考对象 2：文档已离开 loading ---- */
                 + "function pageReady(){try{if(document.readyState==='loading')return false;}catch(e){}"
                 + "  return !wafPending();}"
-                + "function fetchSelf(){return fetch(B+'/api/user/self',{method:'GET',credentials:'include',"
-                + "  headers:{'Accept':'application/json'}}).then(function(r){return r.text().then(function(t){"
-                + "    return {st:r.status,text:t}})})}"
-                /* 三态：ok / hard（明确别的身份，立即停手）/ soft（未就绪，继续轮询） */
+                /* 与 AuthProbeJs 对齐：New API 变体需要 New-Api-User，缓存必须绕过。 */
+                + "function hdr(){var h={'Accept':'application/json'};if(ID)h['New-Api-User']=ID;return h;}"
+                + "function get(u){return fetch(u,{method:'GET',credentials:'include',cache:'no-store',headers:hdr()})"
+                + "  .then(function(r){return r.text().then(function(t){return {st:r.status,text:t}})})}"
+                + "function fetchSelf(){return get(B+'/api/user/self')}"
+                /* 三态：ok / hard（明确别的身份或明确被拒，立即停手）/ soft（未就绪，继续轮询） */
                 + "function probeIdentity(){if(ID=='')return Promise.resolve({ok:false,hard:true});"
                 + "  return fetchSelf().then(function(o){"
-                + "    LASTF={st:o.st,len:String(o.text).length};if(wafSolved(o.text))return {ok:false,hard:false};"
+                + "    LASTF={st:o.st,len:String(o.text).length,body:String(o.text).slice(0,400)};"
+                + "    if(wafSolved(o.text))return {ok:false,hard:false};"
                 + "    var j=null;try{j=JSON.parse(o.text)}catch(e){}"
                 + "    var d=(j&&j.data&&j.data.data)||(j&&j.data);"
                 + "    if(o.st==200&&j&&j.success===true&&d&&String(d.id)===ID)return {ok:true};"
                 + "    if(o.st==200&&j&&j.success===true&&d)return {ok:false,hard:true};"
-                /* v1.1.6：success 明确为 false ＝ 服务端已明确拒绝（未登录/无权限），
-                 * 不是「页面未就绪」。原实现把它归进 soft 分支 → 打满 CAP 也无解，
-                 * 白白多耗 20s 还发一堆无用请求。必须硬停。 */
                 + "    if(o.st==200&&j&&j.success===false)return {ok:false,hard:true,reason:'self-rejected'};"
-                /* 未就绪＝继续轮询，绝不硬停：原实现只在 200+JSON 但身份不符时 hard，
-                 * 其余一律 soft 而 CAP 只有 8s —— 慢网络下必然误报 identity-not-ready。
-                 * 现在有明确结束条件（拿到合身份响应 / 超时上限），故上限放宽到 20s。 */
-                + "    LASTF={st:o.st,len:String(o.text).length};return {ok:false,hard:false};"
+                + "    return {ok:false,hard:false};"
                 + "  }).catch(function(e){return {ok:false,hard:false,err:redact(e&&e.message||e)}});}"
-                /* v1.1.6：拿到响应后仍要确认「没被 WAF 换页」，且 HTTP 状态必须是 2xx。
-                 * 原实现无条件 ok:true —— 质询页会被当成 Key 列表回传给上层，等于把 WAF 页
-                 * 当数据。上层虽有 businessValid 兜底，但这里必须自己判死。 */
-                + "function fetchTarget(){return fetch(B+P,{method:'GET',credentials:'include',"
-                + "  headers:{'Accept':'application/json'}}).then(function(r){return r.text().then(function(t){"
-                + "    if(wafSolved(t)){send({ok:false,reason:'waf-challenge',status:r.status,body:''});return;}"
-                + "    if(!(r.status>=200&&r.status<300)){send({ok:false,reason:'http-'+r.status,status:r.status,body:''});return;}"
-                + "    send({ok:true,status:r.status,body:t.slice(0,12000)})})}).catch(fail);}"
+                /* 目标读取：再判一次「没被换页」且必须是 2xx，绝不把挑战页当数据回传。 */
+                + "function fetchTarget(){return get(B+P).then(function(o){"
+                + "    if(wafSolved(o.text)){send({ok:false,reason:'waf-challenge',status:o.st,body:''});return;}"
+                + "    if(!(o.st>=200&&o.st<300)){send({ok:false,reason:'http-'+o.st,status:o.st,body:''});return;}"
+                + "    send({ok:true,status:o.st,body:o.text.slice(0,12000)});"
+                + "  }).catch(fail);}"
                 + "function pollIdentity(){var cap=Date.now()+CAP;"
                 + "  (function tick(){probeIdentity().then(function(r){"
                 + "    if(r.ok){fetchTarget();return;}"
                 + "    if(r.hard){send({ok:false,reason:'identity-mismatch',status:0,body:''});return;}"
-                /* v1.3.3 严谨化（两件事必须分开）：
-                 *   判定：单次尝试内没有「放行已确认」的证据，就绝不能声称成功；
-                 *   重试：一次没成 ≠ 永远不成（网络抖动、外部脚本首次加载慢都很常见），
-                 *         由上层按「可重试标记」再试，而不是在这里空等或直接放弃。
-                 * 到 CAP 仍不成立 → 判失败 waf-not-cleared 且标 retryable=true。
-                 * 入口同样以「可观测证据」驱动：证据 = 已离开 loading 且不处于质询态。 */
+                /* 到 CAP 仍无「放行已确认」的证据 → 判失败并标可重试，绝不当成功。
+                 * 诊断只回传分类布尔与长度，绝不回传正文（含凭据）。 */
                 + "    if(Date.now()>=cap){"
-                + "      send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:'',diag:'fetch;st='+LASTF.st+';len='+LASTF.len});return;}"
+                + "      var f={st:LASTF.st,len:LASTF.len};"
+                + "      try{var b=LASTF.body||'';"
+                + "        f.html=/<html|<!doctype/i.test(b);"
+                + "        f.json=/^\\s*[\\{\\[]/.test(b);"
+                + "        f.arg1=/var\\s+arg1\\s*=/.test(b);"
+                + "        f.aliyun=/aliyun/i.test(b);"
+                + "        f.captcha=/captcha|slider|turnstile|challenge/i.test(b);"
+                + "        f.head=b.slice(0,60).replace(/[^\\x20-\\x7e]/g,'.');"
+                + "      }catch(e){}"
+                + "      send({ok:false,reason:'waf-not-cleared',retryable:true,status:0,body:'',"
+                + "        diag:'fetch;st='+f.st+';len='+f.len+';html='+f.html+';json='+f.json"
+                + "          +';arg1='+f.arg1+';aliyun='+f.aliyun+';captcha='+f.captcha"
+                + "          +';head='+f.head});return;}"
                 + "    setTimeout(tick,300);});})();}"
                 + "function run(){if(!ID){send({ok:false,reason:'missing-expected-id',status:0,body:''});return;}"
                 + "  pollIdentity();}"
