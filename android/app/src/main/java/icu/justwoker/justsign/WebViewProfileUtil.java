@@ -218,4 +218,39 @@ public final class WebViewProfileUtil {
         }
         return sb.toString();
     }
+    /**
+     * 诊断用：列出该 Profile 在若干域下持有的 Cookie **名称**（不含值），
+     * 以及论坛登录态判定结果。
+     *
+     * 为什么要它：真机上应用私有分区不可读，`forum-session-absent` 到底是
+     * 「人工登录后会话没落到这个分区」还是「落到了但域/名字与判据不符」，
+     * 从外部完全看不出来 —— 只能让应用自己如实报出名字。
+     * 安全：只输出 Cookie 名与布尔，绝不输出任何值。
+     */
+    @NonNull
+    public static String describeCookieNames(@Nullable Profile profile) {
+        String[] urls = {"https://connect.linux.do", "https://linux.do", "https://anyrouter.top"};
+        StringBuilder sb = new StringBuilder();
+        for (String u : urls) {
+            String names = "";
+            try {
+                String c = cookieManagerFor(profile).getCookie(u);
+                if (c != null && !c.isEmpty()) {
+                    StringBuilder n = new StringBuilder();
+                    for (String pair : c.split(";")) {
+                        int eq = pair.indexOf('=');
+                        if (eq <= 0) continue;
+                        if (n.length() > 0) n.append(',');
+                        n.append(pair.substring(0, eq).trim());
+                    }
+                    names = n.toString();
+                }
+            } catch (Throwable ignored) {}
+            String host;
+            try { host = java.net.URI.create(u).getHost(); } catch (Exception e) { host = u; }
+            sb.append(host).append("=[").append(names).append("] ");
+        }
+        sb.append("linuxdoLoggedIn=").append(linuxdoLoggedIn(profile));
+        return sb.toString();
+    }
 }

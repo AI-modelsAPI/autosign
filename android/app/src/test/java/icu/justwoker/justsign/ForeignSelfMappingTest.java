@@ -95,4 +95,36 @@ public class ForeignSelfMappingTest {
         assertEquals(200, mapped.getInt("http"));
         assertTrue(SiteProtocol.validSelf(mapped, "9"));
     }
+    /**
+     * XP 制站点（真机实测 api-donation.fengwind.com）：
+     * /api/level 的 profile 只有 xp_balance / usage_total_cost，没有美元字段。
+     * 旧判据只认 balance/usd_balance → 映射返回 null → 上层回落 /api/user/self 报 404
+     * → 界面显示「站点接口不存在」。这个用例锁死「XP 制必须能映射，且不能乘 unit」。
+     */
+    @Test public void xpBasedProfileMapsWithoutUnitScaling() throws Exception {
+        /* 真实形态：profile 嵌在 data 下 */
+        JSONObject env = new JSONObject().put("http", 200).put("data",
+                new JSONObject().put("code", 0)
+                        .put("data", new JSONObject()
+                                .put("profile", new JSONObject()
+                                        .put("sub2api_user_id", 777)
+                                        .put("xp_balance", 1234.5)
+                                        .put("usage_total_cost", 67.8))));
+        JSONObject mapped = Engine.mapForeignSelf(env, 500000L);
+        assertNotNull("XP 制必须能映射出额度", mapped);
+        assertEquals("XP", mapped.optString("_unit"));
+        JSONObject u = user(mapped);
+        /* 关键：XP 不能乘 quotaPerUnit，否则 1234.5 * 500000 这种荒谬数字会显示给用户 */
+        assertEquals(1234.5, u.getDouble("quota"), 0.001);
+        assertEquals(67.8, u.getDouble("used_quota"), 0.001);
+        assertEquals(777, u.getInt("id"));
+    }
+
+    /** 美元制站点仍必须乘 unit（不能被 XP 分支带偏）。 */
+    @Test public void usdBalanceStillScalesByUnit() throws Exception {
+        JSONObject mapped = Engine.mapForeignSelf(envelope("{\"id\":9,\"balance\":2.5}"), 500000L);
+        assertNotNull(mapped);
+        assertEquals("USD", mapped.optString("_unit"));
+        assertEquals(1250000.0, user(mapped).getDouble("quota"), 0.001);
+    }
 }

@@ -169,6 +169,11 @@ public final class OffscreenReauth {
                 profile = WebViewProfileUtil.bindProfile(wv, WebViewProfileUtil.profileNameFor(siteKey, accountKey));
                 /* 关键：论坛会话若已失效，静默必然过不了人机验证——直接 needUi，绝不在离屏碰 CF。 */
                 if (!WebViewProfileUtil.linuxdoLoggedIn(profile)) {
+                    /* 如实报出分区里到底有什么（只记 Cookie 名，不记值），
+                     * 否则「论坛会话缺失」与「会话在但域/名字不符」无法区分。 */
+                    store.opLog(siteKey, accountKey, "静默重授权", "warn",
+                            "账号分区无论坛登录态",
+                            WebViewProfileUtil.describeCookieNames(profile), "auto");
                     finish(REAUTH_NEEDS_UI, "forum-session-absent");
                     return;
                 }

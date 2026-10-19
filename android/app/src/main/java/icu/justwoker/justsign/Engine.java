@@ -1019,10 +1019,20 @@ public class Engine {
             store.sysLog(site.optString("key", ""), key, "刷新", "info",
                     "会话端点探测",
                     "kind=" + SiteProfile.kindName(kind) + "; path=" + p + "; http=" + code
-                            + "; ms=" + (System.currentTimeMillis() - s0));
+                            + "; ms=" + (System.currentTimeMillis() - s0)
+                            + (code == 200 ? "; keys=" + keysOf(r) : ""));
             if (code != 200) continue;
             JSONObject m = mapForeignSelf(r, u, kind);
-            if (m == null) continue;
+            if (m == null) {
+                /* 200 但映射失败：把字段名如实写进日志（只记名字不记值）。
+                 * 没有这行时「端点通了却显示接口不存在」完全无从下手 ——
+                 * 字段名写错是这类站点最常见的形态差异（真机已踩过）。 */
+                store.sysLog(site.optString("key", ""), key, "刷新", "warn",
+                        "会话响应无法映射额度",
+                        "path=" + p + "; keys=" + keysOf(r) + "; profileKeys=" + profileKeysOf(r)
+                                + "; profileTypes=" + profileTypesOf(r));
+                continue;
+            }
             mapped = m; hit = p; break;
         }
         if (mapped == null) return null;
@@ -1036,8 +1046,79 @@ public class Engine {
                         + "; avail=" + (norm != null && norm.has("quota"))
                         + "; used=" + (norm != null && norm.has("used_quota"))
                         + "; id=" + !uid.isEmpty()
+                        + "; unit=" + moneyUnitFor(mapped)
+                        + "; quota=" + (norm == null ? "-" : String.valueOf(norm.opt("quota")))
                         + "; totalMs=" + (System.currentTimeMillis() - t0));
         return mapped;
+    }
+
+    /** 归一化结果标注的单位（USD / XP）。 */
+    private static String moneyUnitFor(JSONObject mapped) {
+        return mapped == null ? "-" : mapped.optString("_unit", "USD");
+    }
+
+    /** 诊断用：profile 子对象各字段的**类型**（只记类型名，不记值）。 */
+    private static String profileTypesOf(JSONObject r) {
+        try {
+            JSONObject body = r == null ? null : r.optJSONObject("data");
+            if (body == null) return "-";
+            Object inner = body.opt("data");
+            JSONObject o = inner instanceof JSONObject ? (JSONObject) inner : body;
+            Object pfRaw = o.opt("profile");
+            if (!(pfRaw instanceof JSONObject)) {
+                return pfRaw == null ? "null" : ("not-object:" + pfRaw.getClass().getSimpleName());
+            }
+            JSONObject pf = (JSONObject) pfRaw;
+            java.util.Iterator<String> it = pf.keys();
+            StringBuilder sb = new StringBuilder();
+            while (it.hasNext()) {
+                String k = it.next();
+                Object v = pf.opt(k);
+                if (sb.length() > 0) sb.append(',');
+                /* 只对额度相关字段附带数值（这些不是凭据，且是排查必需）；
+                 * 其余字段只记类型，避免把邮箱等隐私写进日志。 */
+                boolean numeric = k.contains("xp") || k.contains("cost") || k.contains("balance");
+                sb.append(k).append(':').append(v == null ? "null" : v.getClass().getSimpleName());
+                if (numeric && v instanceof Number) sb.append('=').append(v);
+            }
+            return sb.length() == 0 ? "-" : sb.toString();
+        } catch (Exception e) { return "-"; }
+    }
+
+    /** 诊断用：profile 子对象的字段名（福利站金额常在这个嵌套层）。 */
+    private static String profileKeysOf(JSONObject r) {
+        try {
+            JSONObject body = r == null ? null : r.optJSONObject("data");
+            if (body == null) return "-";
+            Object inner = body.opt("data");
+            JSONObject o = inner instanceof JSONObject ? (JSONObject) inner : body;
+            JSONObject pf = o.optJSONObject("profile");
+            if (pf == null) return "-";
+            java.util.Iterator<String> it = pf.keys();
+            StringBuilder sb = new StringBuilder();
+            while (it.hasNext()) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append(it.next());
+            }
+            return sb.length() == 0 ? "-" : sb.toString();
+        } catch (Exception e) { return "-"; }
+    }
+
+    /** 诊断用：响应顶层（解信封后）字段名列表，只记名字不记值。 */
+    private static String keysOf(JSONObject r) {
+        try {
+            JSONObject body = r == null ? null : r.optJSONObject("data");
+            if (body == null) return "-";
+            Object inner = body.opt("data");
+            JSONObject o = inner instanceof JSONObject ? (JSONObject) inner : body;
+            java.util.Iterator<String> it = o.keys();
+            StringBuilder sb = new StringBuilder();
+            while (it.hasNext()) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append(it.next());
+            }
+            return sb.length() == 0 ? "-" : sb.toString();
+        } catch (Exception e) { return "-"; }
     }
 
     /**
@@ -1078,8 +1159,17 @@ public class Engine {
          * 比空白更有害。读不到就返回 null，保留上次额度并如实报错。
          * （「累计已用」缺失仍按 0 显示，与既有 New API 站行为一致。） */
         if (avail == null) return null;
+        /* XP 制站点（真机实测 api-donation.fengwind.com）：额度字段是 xp_balance，
+         * 语义是「XP 点数」而不是美元。
+         *
+         * 归一化的契约是「quota 与 New API 同单位」，下游统一按 quota/unit 得美元。
+         * 因此这里对 XP 站做 1:1 换算（xp 值直接当 quota），下游除法得到的仍是
+         * 原来的 xp 数值 —— 数学自洽，不必改动下游任何换算。
+         * 同时用 _unit 标注单位，供 UI 决定显示 $ 还是 XP，避免把点数误读成美元。 */
+        boolean xpBased = firstFinite(user, "xp_balance") != null;
         double a = avail;
         double b = used == null ? 0 : used;
+        double scale = xpBased ? 1 : unit;
         String uid = String.valueOf(user.opt("id"));
         if (uid.isEmpty() || "null".equals(uid)) {
             Object alt = user.opt("sub2api_user_id");
@@ -1091,13 +1181,14 @@ public class Engine {
         try {
             return new JSONObject().put("http", 200)
                     .put("_id", uid)
+                    .put("_unit", xpBased ? "XP" : "USD")
                     .put("data", new JSONObject()
                             .put("success", true)
                             .put("data", new JSONObject()
                                     .put("id", uid)
                                     .put("username", nm)
-                                    .put("quota", a * unit)
-                                    .put("used_quota", b * unit)));
+                                    .put("quota", a * scale)
+                                    .put("used_quota", b * scale)));
         } catch (Exception e) { return null; }
     }
 
@@ -1357,14 +1448,22 @@ public class Engine {
         String user = selfU.optString("display_name", null);
         if (user == null || user.isEmpty()) user = selfU.optString("username", null);
 
+        /* 单位语义：XP 制站点（xp_balance）不是美元，必须如实标注，
+         * 否则界面会把 1234 XP 显示成 $1234，用户直接读错数字。 */
+        String moneyUnit = "XP".equals(self.optString("_unit", "")) ? "XP" : "USD";
+        /* XP 制的 quota 已经是点数（映射时按 1:1 写入），不能再除 unit，
+         * 否则 1234 点会被 500000 除成 0.00 —— 真机实测就是这样显示 $0.00 的。
+         * 这里把 divisor 置 1，保证 XP 值原样呈现；美元制仍按 unit 换算。 */
+        long divisor = "XP".equals(moneyUnit) ? 1L : unit;
         JSONObject out = new JSONObject()
                 .put("ok", selfHttp == 200)
                 .put("account", key).put("site", site.optString("name"))
                 .put("http", selfHttp)
                 .put("authorized", selfHttp == 200)
-                .put("availableUSD", Ui.round2(quota / unit))
-                .put("usedUSD", Ui.round2(used / unit))
-                .put("grantedUSD", Ui.round2((quota + used) / unit))
+                .put("moneyUnit", moneyUnit)
+                .put("availableUSD", Ui.round2(quota / divisor))
+                .put("usedUSD", Ui.round2(used / divisor))
+                .put("grantedUSD", Ui.round2((quota + used) / divisor))
                 .put("user", (user == null || user.isEmpty()) ? JSONObject.NULL : user)
                 .put("statusDate", todayStr());
         if (selfHttp != 200) {

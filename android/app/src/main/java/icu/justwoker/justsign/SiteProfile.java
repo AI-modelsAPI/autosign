@@ -95,13 +95,26 @@ public final class SiteProfile {
         return new String[]{"/api/v1/auth/me", "/api/me"};
     }
 
-    /** 可用额字段名候选（按顺序取第一个有限的数值）。 */
+    /**
+     * 可用额字段名候选（按顺序取第一个有限的数值）。
+     *
+     * 真机实测（api-donation.fengwind.com，2026-10-19）：
+     *   /api/me     keys = created_at,email,id,…,sub2api_user_id,username
+     *               → **没有任何金额字段**
+     *   /api/level  profile = sub2api_user_id,welfare_user_id,xp_balance,
+     *               lifetime_earned_xp,lifetime_reversed_xp,usage_total_cost,level,…
+     *               → 额度是 **XP 制**（xp_balance），不是美元余额
+     * 旧判据只认 balance/usd_balance 等美元字段，于是「端点 200 但映射失败」，
+     * 上层再回落到 /api/user/self 报 404，最终显示「站点接口不存在」。
+     * 现在把 XP 制字段纳入候选。
+     */
     public static String[] balanceFields(Kind k) {
         switch (k) {
             case WELFARE:
             case SUB2API:
                 return new String[]{"balance", "usd_balance", "available_balance",
-                        "credit_balance", "available_usd", "balance_usd", "available"};
+                        "credit_balance", "available_usd", "balance_usd", "available",
+                        "xp_balance"};
             default:
                 return new String[]{"quota"};
         }
