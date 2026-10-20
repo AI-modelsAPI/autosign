@@ -93,6 +93,15 @@ public final class WebViewProfileUtil {
         } catch (Throwable t) { return null; }
     }
 
+    /** 取得已有命名 Profile（未创建则返回 null，不新建）。 */
+    @Nullable
+    public static Profile profileOf(@Nullable String siteKey, @Nullable String accountKey) {
+        if (!multiProfileSupported()) return null;
+        try {
+            return ProfileStore.getInstance().getProfile(profileNameFor(siteKey, accountKey));
+        } catch (Throwable t) { return null; }
+    }
+
     /** 取得应对该 Profile 生效的 CookieManager（降级时返回全局 = Default 分区）。 */
     @NonNull
     public static CookieManager cookieManagerFor(@Nullable Profile profile) {
@@ -118,10 +127,13 @@ public final class WebViewProfileUtil {
      */
     public static boolean linuxdoLoggedIn(@Nullable Profile profile) {
         try {
-            String c = cookieManagerFor(profile).getCookie("https://connect.linux.do");
-            if (c == null || c.isEmpty()) return false;
+            CookieManager cm = cookieManagerFor(profile);
+            String c1 = cm.getCookie("https://connect.linux.do");
+            String c2 = cm.getCookie("https://linux.do");
+            String c = (c1 == null ? "" : c1) + ";" + (c2 == null ? "" : c2);
+            if (c.trim().isEmpty()) return false;
             String l = c.toLowerCase(java.util.Locale.US);
-            return l.contains("session") || l.contains("logged_in=yes");
+            return l.contains("session") || l.contains("logged_in") || l.contains("cf_clearance");
         } catch (Throwable t) { return false; }
     }
     /** 该 Profile（或 Default）下是否已有 GitHub 会话 Cookie。 */
@@ -169,6 +181,24 @@ public final class WebViewProfileUtil {
     /** 主动落盘该 Profile（或 Default）Cookie。 */
     public static void flush(@Nullable Profile profile) {
         try { cookieManagerFor(profile).flush(); } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 把已落库的 Cookie 串注入该 Profile（或 Default）分区的 CookieManager 中。
+     * 确保离屏 WebView 在发起请求时具备已保存的会话态，避免裸奔被 WAF 当成恶意爬虫拦截。
+     */
+    public static void injectCookies(@Nullable Profile profile, @NonNull String url, @Nullable String cookieHeader) {
+        if (cookieHeader == null || cookieHeader.trim().isEmpty()) return;
+        try {
+            CookieManager cm = cookieManagerFor(profile);
+            for (String pair : cookieHeader.split(";")) {
+                String p = pair.trim();
+                if (!p.isEmpty() && p.contains("=")) {
+                    cm.setCookie(url, p + "; Path=/");
+                }
+            }
+            cm.flush();
+        } catch (Throwable ignored) {}
     }
     /**
      * 把该 Profile 当前持有的 Cookie（含 WAF 放行 Cookie）合并进已落库的 cookie 串。

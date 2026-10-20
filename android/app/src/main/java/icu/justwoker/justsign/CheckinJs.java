@@ -234,12 +234,12 @@ public final class CheckinJs {
         "  if(!window.turnstile||typeof window.turnstile.render!=='function'){P('加载人机验证组件…');" +
         "    var loaded=await new Promise(function(res){var fired=false;" +
         "      var fin=function(v){if(!fired){fired=true;res(v);}};" +
-        "      var ex=document.querySelector('script[data-jsts]');" +
+        "      var ex=document.getElementById('cf-turnstile')||document.querySelector('script[data-jsts]');" +
         "      var sc=ex||document.createElement('script');" +
-        "      if(!ex){sc.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';" +
+        "      if(!ex){sc.id='cf-turnstile';sc.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';" +
         "        sc.async=true;sc.defer=true;sc.setAttribute('data-jsts','1');" +
         "        sc.onload=function(){fin(true)};sc.onerror=function(){fin(false)};" +
-        "        document.head.appendChild(sc);}" +
+        "        (document.head||document.documentElement).appendChild(sc);}" +
         "      var t0=Date.now();var iv=setInterval(function(){" +
         "        if(window.turnstile&&window.turnstile.render){clearInterval(iv);fin(true);}" +
         "        else if(Date.now()-t0>20000){clearInterval(iv);fin(false);}},200);" +
@@ -249,29 +249,81 @@ public final class CheckinJs {
         "  var box=document.getElementById('__jsts_box');" +
         "  if(!box){box=document.createElement('div');box.id='__jsts_box';" +
         "    box.style.cssText='position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);" +
-        "z-index:2147483647;background:#fff;padding:10px;border-radius:10px';" +
-        "    document.body.appendChild(box);}" +
-        "  box.innerHTML='';" +
+        "z-index:2147483647;background:#fff;padding:10px;border-radius:10px;width:300px;height:65px;min-width:300px;min-height:65px;';" +
+        "    (document.body||document.documentElement).appendChild(box);}" +
+        "  box.innerHTML='';await new Promise(function(w){setTimeout(w,150);});" +
         "  return await new Promise(function(res){var fired=false;" +
         "    var fin=function(t){if(!fired){fired=true;res(t||'');}};" +
-        "    try{window.turnstile.render(box,{sitekey:sitekey,appearance:'interaction-only'," +
+        "    try{var wid=window.turnstile.render(box,{sitekey:sitekey," +
         "      callback:function(t){fin(t)}," +
         "      'error-callback':function(c){tsErr='cf-'+(c||'error');fin('')}," +
         "      'timeout-callback':function(){tsErr='cf-timeout';fin('')}," +
         "      'expired-callback':function(){tsErr='cf-expired';fin('')}});" +
+        "      if(wid&&window.turnstile.execute){try{window.turnstile.execute(wid);}catch(e){}}" +
         "    }catch(e){tsErr='render-throw';fin('');}" +
         "    setTimeout(function(){if(!fired)P('" + SIGNAL_NEED_UI + "');},6000);" +
         /* 25s 足够 interaction-only 静默通过；过不去说明本次必须人工交互。
          * 这批站登录即发奖励，随后会走日志兜底确认，没必要白等 60 秒。 */
         "    setTimeout(function(){tsErr=tsErr||'wait-timeout';fin('')},25000);});}" +
-        /* ================= 主流程 ================= */
+        "/* ---- DOM 驱动签到：若在 /profile 页面，查找并点击真实「立即签到」按钮，等待官方对话框过人机 ---- */" +
+        "async function tryDomCheckin(){try{" +
+        "  if(WELFARE)return false;" +
+        "  var t0=Date.now();var clicked=false;" +
+        "  while(Date.now()-t0<6000){" +
+        "    var btns=document.querySelectorAll('button,[role=\"button\"],a');" +
+        "    var clickBtn=null;var alreadyBtn=false;" +
+        "    for(var i=0;i<btns.length;i++){" +
+        "      var txt=String(btns[i].textContent||btns[i].innerText||'').trim();" +
+        "      if(/Checked\\s*in|已签到|今日已签/i.test(txt)){alreadyBtn=true;break;}" +
+        "      if(!clickBtn&&/Check\\s*in\\s*now|立即签到/i.test(txt)){clickBtn=btns[i];}" +
+        "    }" +
+        "    if(alreadyBtn){var c=await stateOf();" +
+        "      finish(true,true,c.ok?c.reward:0,c.ok&&c.rewardKnown,'今日已签到');return true;}" +
+        "    if(clickBtn&&!clickBtn.disabled&&!clicked){" +
+        "      clicked=true;P('找到页面签到按钮，正在点击…');" +
+        "      clickBtn.click();" +
+        "      var w0=Date.now();" +
+        "      while(Date.now()-w0<20000){" +
+        "        await new Promise(function(w){setTimeout(w,500);});" +
+        "        var b2=document.querySelectorAll('button,[role=\"button\"],a');" +
+        "        for(var j=0;j<b2.length;j++){" +
+        "          var t2=String(b2[j].textContent||b2[j].innerText||'').trim();" +
+        "          if(/Checked\\s*in|已签到|今日已签/i.test(t2)){" +
+        "            var c2=await stateOf();" +
+        "            finish(true,true,c2.ok?c2.reward:0,c2.ok&&c2.rewardKnown,'今日已签到');return true;}" +
+        "        }" +
+        "        if(document.querySelector('.cf-turnstile,iframe[src*=\"challenges.cloudflare.com\"]')){" +
+        "          P('正在进行无感人机验证…');" +
+        "        }" +
+        "      }" +
+        "      return false;" +
+        "    }" +
+        "    await new Promise(function(w){setTimeout(w,350);});" +
+        "  }" +
+        "  return false;" +
+        "}catch(e){return false;}}" +
+        "/* ================= 主流程 ================= */" +
         "var siteKeyFromServer=await loadStatus();" +
         "await refresh();" +
         "var out={token:window.__jstoken||'',siteKey:siteKeyFromServer||sitekey||'',unit:UNIT};" +
+        "var finished=false;" +
         "function finish(ok,already,reward,rewardKnown,msg,extra){" +
+        "  if(finished)return;finished=true;" +
         "  out.ok=ok;out.already=!!already;out.reward=reward;out.rewardKnown=!!rewardKnown;" +
         "  out.message=msg;out.token=window.__jstoken||out.token;" +
         "  if(tsErr)out.tsError=tsErr;if(extra)out.detail=extra;R(out);}" +
+        "try{var origF=window.fetch;window.fetch=async function(){" +
+        "  var u=String((arguments&&arguments[0])||'');" +
+        "  var r=await origF.apply(this,arguments);" +
+        "  try{if(u.indexOf('/api/user/checkin')!==-1){" +
+        "    var cl=r.clone();cl.json().then(function(j){" +
+        "      if(j&&j.success){var rw=usd(j.data&&j.data.quota_awarded);" +
+        "        finish(true,false,rw,true,rw>0?('签到成功 +$'+rw):'签到成功');}" +
+        "      else if(j&&ALREADY.test(j.message||'')){" +
+        "        stateOf().then(function(c){finish(true,true,c.ok?c.reward:0,c.ok&&c.rewardKnown,'今日已签到');});}" +
+        "    }).catch(function(){});" +
+        "  }}catch(e){}" +
+        "  return r;};}catch(e){}" +
         "if(!CHECKIN_ON){finish(false,false,0,false,'该站点未开启每日签到');return;}" +
         /* 第 1 步：只读状态 —— 已签就到此为止，绝不去碰人机验证 */
         "P('正在查询今日签到状态…');" +
@@ -311,6 +363,11 @@ public final class CheckinJs {
         "    out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
         "  finish(false,false,0,false,mm);return;" +
         "}" +
+        "/* 仅在 SeekAI 且在 /profile 页面时尝试 DOM 驱动点击，其余站点一律直接走标准流程 */" +
+        "if(/seekai\\.cc/i.test(location.hostname)&&location.pathname.indexOf('/profile')!==-1){" +
+        "  var domDone=await tryDomCheckin();" +
+        "  if(domDone)return;" +
+        "}" +
         "var res1=await post('/api/user/checkin');" +
         "var r1=res1.j;var st1=res1.status;" +
         "if(r1&&r1.success){var rw=usd(r1.data&&r1.data.quota_awarded);" +
@@ -320,10 +377,11 @@ public final class CheckinJs {
         "  finish(true,true,c1.ok?c1.reward:0,c1.ok&&c1.rewardKnown,'今日已签到');return;}" +
         "if(st1===401||(AUTHBAD.test(m1)&&!NEEDCAP.test(m1))){" +
         "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        "if(st1===429){finish(false,false,0,false,'站点限流（429），代理节点可能被拦，请换节点后重试');return;}" +
-        /* 第 3 步：需要人机验证 */
+        "if(st1===429){finish(false,false,0,false,'站点限流（429），请稍后重试');return;}" +
+        "/* 第 3 步：需要人机验证（明确被要求人机、403、或站点配置了 TS_ON） */" +
         "if(NEEDCAP.test(m1)||st1===403||TS_ON){" +
         "  if(!sitekey){finish(false,false,0,false,'需要人机验证，但站点未返回 siteKey（请点刷新后重试）');return;}" +
+        "  P('正在进行无感人机验证…');" +
         "  var tk=await turnstileToken();" +
         "  if(!tk){" +
         "    var c2=await stateOf();" +

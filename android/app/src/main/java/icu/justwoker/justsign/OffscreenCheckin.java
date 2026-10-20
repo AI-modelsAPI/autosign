@@ -1,6 +1,8 @@
 package icu.justwoker.justsign;
 
+import android.app.Activity;
 import android.content.Context;
+import android.view.ViewGroup;
 import android.os.Handler;
 import android.os.Looper;
 import android.webkit.JavascriptInterface;
@@ -169,18 +171,31 @@ public final class OffscreenCheckin {
                 if (base.isEmpty()) { finish(false, false, 0, false, "站点 baseUrl 为空"); return; }
                 if (accountKey == null || accountKey.isEmpty()) { finish(false, false, 0, false, "账号缺失"); return; }
 
-                wv = new WebView(ctx); /* 离屏：不 attach 窗口，无 UI，JS 全速运行 */
-                /* v1.3.2（P0-1）：必须绑定「站点×账号」专属 Profile —— 与授权/静默重授权/
-                 * 只读兜底同一个分区。此前这里用 Default 分区：账号授权后站点会话写在自己
-                 * 的命名分区里，离屏签到根本看不到它 → 会话型站恒判「授权已过期」；反过来
-                 * 若 Default 分区残留别的账号的 host Cookie，签到请求会以错误身份通过
-                 * （Engine.attempt 注释已写明服务端「先查 session 再回退 Authorization」）。
-                 * 绑定必须在 getSettings()/loadUrl 之前调用。 */
+                final boolean isSeekAi = "seekai-cc".equalsIgnoreCase(siteKey)
+                        || (base != null && base.contains("seekai.cc"));
+
+                wv = new WebView(ctx);
+                /* v1.3.2（P0-1）：必须紧跟 new WebView 之后绑定「站点×账号」专属 Profile */
                 mProfile = WebViewProfileUtil.bindProfile(wv,
                         WebViewProfileUtil.profileNameFor(siteKey, accountKey));
+
+                /* 仅对 SeekAI 挂载底层窗口以支持无感 Turnstile 渲染；其余站点纯离屏零干扰 */
+                if (isSeekAi) {
+                    if (ctx instanceof Activity) {
+                        try {
+                            Activity act = (Activity) ctx;
+                            ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+                            if (decor != null) decor.addView(wv, 0, new ViewGroup.LayoutParams(1080, 2400));
+                        } catch (Throwable ignored) {}
+                    }
+                    wv.layout(0, 0, 1080, 2400);
+                    wv.onResume();
+                    wv.resumeTimers();
+                }
                 WebSettings s = wv.getSettings();
                 s.setJavaScriptEnabled(true);
                 s.setDomStorageEnabled(true);
+                s.setDatabaseEnabled(true);
                 s.setUserAgentString(UA);
                 /* 第三方 Cookie（Turnstile 需要 challenges.cloudflare.com 的 cookie）。
                  * 注意：必须开在「本 WebView 绑定的分区」上，不是全局 Default 分区。 */
@@ -193,43 +208,15 @@ public final class OffscreenCheckin {
                 wv.setWebViewClient(new WebViewClient() {
                     @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) { return false; }
                     @Override public void onPageFinished(WebView v, String url) {
-                        if (done) return;
-                        boolean same = url != null && AuthProbeJs.sameOrigin(url, base);
-                        /* 诊断：只记是否同源与页面计数，不含 URL 细节/凭据。 */
-                        try {
-                            diagStore.opLog(siteKey, accountKey, "后台签到V2", "info",
-                                    "离屏页面加载完成",
-                                    "sameOrigin=" + same + "; pages=" + (++pageCount), "auto");
-                        } catch (Exception ignored) {}
+                        if (done || fired) return;
                         if (url == null || url.startsWith("about:")) return;
-                        if (!same) return;
-                        /* 每个同源页面完成时注入。
-                         *
-                         * 注入内容 = 探针 + 正式脚本。探针只做一件事：立刻回一个
-                         * probe 事件，证明「脚本确实在这个文档里跑起来了」。
-                         * 没有探针时，「页面已加载、脚本零回调」有两种完全不同的原因
-                         * （注入没生效 vs 脚本卡在 fetch 上），日志无法区分 —— 真机实测
-                         * 就卡在这个二义性上，白改了几轮。 */
-                        final WebView target = v;
-                        main.postDelayed(() -> {
-                            if (done || target != wv) return;
-                            try {
-                                target.evaluateJavascript(
-                                        "try{window.JustSign.onProgress('probe-js-alive')}catch(e){}", null);
-                                /* 给正式脚本挂结果回调：若因语法错误执行失败，
-                                 * 回调会带回 "SyntaxError: ..." 而不是静默丢弃。
-                                 * 没有这行时「脚本注入了但零回调」无法定位（真机白改数轮）。 */
-                                target.evaluateJavascript(js(), value -> {
-                                    if (value == null || "null".equals(value)) return;
-                                    try {
-                                        diagStore.opLog(siteKey, accountKey, "后台签到V2", "info",
-                                                "脚本执行返回", "value=" + clip(value), "auto");
-                                    } catch (Exception ignored) {}
-                                });
-                            } catch (Exception e) {
-                                finish(false, false, 0, false, "注入失败: " + e.getMessage());
-                            }
-                        }, 600);
+                        if (!AuthProbeJs.sameOrigin(url, base)) return;
+                        fired = true;
+                        try {
+                            v.evaluateJavascript(js(), null);
+                        } catch (Exception e) {
+                            finish(false, false, 0, false, "注入失败: " + e.getMessage());
+                        }
                     }
                     @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                         if (r == null || !r.isForMainFrame()) return;
@@ -252,9 +239,14 @@ public final class OffscreenCheckin {
                     try {
                         JSONObject st0 = new Store(ctx).findSite(siteKey);
                         String w = SiteProfile.welfareUrl(st0);
-                        if (!w.isEmpty()) target = w;
+                        if (!w.isEmpty()) target = w + "/";
+                        else if (isSeekAi) {
+                            target = base + "/profile";
+                        } else {
+                            target = base + "/";
+                        }
                     } catch (Exception ignored) {}
-                    try { if (wv != null) wv.loadUrl(target + "/"); }
+                    try { if (wv != null) wv.loadUrl(target); }
                     catch (Exception e) { finish(false, false, 0, false, "加载失败: " + e.getMessage()); }
                 });
             } catch (Throwable t) {
@@ -336,8 +328,17 @@ public final class OffscreenCheckin {
             final WebView w = wv; wv = null;
             /* destroy 必须与创建线程一致（主线程） */
             main.post(() -> {
-                try { if (w != null) { w.stopLoading(); w.loadUrl("about:blank"); w.removeJavascriptInterface("JustSign"); w.destroy(); } }
-                catch (Exception ignored) {}
+                try {
+                    if (w != null) {
+                        if (w.getParent() instanceof ViewGroup) {
+                            ((ViewGroup) w.getParent()).removeView(w);
+                        }
+                        w.stopLoading();
+                        w.loadUrl("about:blank");
+                        w.removeJavascriptInterface("JustSign");
+                        w.destroy();
+                    }
+                } catch (Exception ignored) {}
             });
 
             /* 成功（含"今日已签"）→ 写本地当日徽章，置灰立即生效。

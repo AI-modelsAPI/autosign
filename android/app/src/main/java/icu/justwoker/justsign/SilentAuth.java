@@ -511,7 +511,10 @@ public final class SilentAuth {
                                     .put("siteKey", siteKey)
                                     .put("updatedAt", System.currentTimeMillis());
                             if (!token.isEmpty()) patch.put("token", token);
-                            if (!setCookie.isEmpty()) patch.put("siteCookie", setCookie);
+                            if (!setCookie.isEmpty()) {
+                                String merged = WebViewProfileUtil.mergeProfileCookies(setCookie, mProfile, "https://" + siteHost);
+                                patch.put("siteCookie", merged == null || merged.isEmpty() ? setCookie : merged);
+                            }
                             if (login != null && !login.isEmpty()) patch.put("ghAnchor", login);
                             Object sidO2 = d.opt("id");
                             if (sidO2 != null) {

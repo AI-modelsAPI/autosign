@@ -40,10 +40,11 @@ public class Engine {
     /* v1.0.6：去掉 UA 中的 "; wv" 与 Version/4.0 标记。
      * 实测阿里云 WAF 对 WebView 特征 UA 更易触发 JS 质询；改为标准 Chrome Mobile UA，
      * 与 OffscreenLogout/OffscreenCheckin 的 UA 保持同族，避免同账号 UA 前后跳变。 */
-    public static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
-    /** v0.x：WebView/离屏通道历史上用的是 Chrome/131.0（无 .0.0 后缀）变体，与上面 UA 一字之差。
-     * WAF 对 UA 敏感，两者不可互换，故单独保留此常量，仅收敛 5 处离屏类里逐字相同的副本。 */
-    public static final String UA_OFFSCREEN = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+    /* 真机实测环境：Android 16 / PHZ110 设备上的真实 Chromium 内核已是 155 版本。
+     * 历史上写死的 131 版本与设备实际 TLS 栈/网络栈产生指纹冲突，直接触发 WAF 503 拦截。
+     * 此处统一使用真机实际内核版本 155，保持协议栈特征自洽。 */
+    public static final String UA = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36";
+    public static final String UA_OFFSCREEN = "Mozilla/5.0 (Linux; Android 16; PHZ110) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36";
 
     private final Store store;
     private final Context ctx;
@@ -429,7 +430,6 @@ public class Engine {
                         .header("Sec-Fetch-Dest", "empty")
                         .header("Sec-Fetch-Mode", "cors")
                         .header("Sec-Fetch-Site", "same-origin")
-                        .header("X-Requested-With", "XMLHttpRequest")
                         .header("Cookie", cookie)
                         .post(RequestBody.create("{}", MediaType.parse("application/json"))).build();
                 response = buildClientFromConfig().newCall(request).execute();
@@ -606,8 +606,7 @@ public class Engine {
                     .header("Sec-Fetch-Mode", "cors")
                     .header("Sec-Fetch-Site", "same-origin")
                     .header("Sec-CH-UA-Mobile", "?1")
-                    .header("Sec-CH-UA-Platform", "\"Android\"")
-                    .header("X-Requested-With", "XMLHttpRequest");
+                    .header("Sec-CH-UA-Platform", "\"Android\"");
             if (token != null && !token.isEmpty()) b.header("Authorization", "Bearer " + token);
             if (cookie != null && !cookie.isEmpty()) b.header("Cookie", cookie);
             if (uid != null && !uid.isEmpty()) b.header("New-Api-User", uid);
@@ -841,10 +840,9 @@ public class Engine {
                     .header("Sec-Fetch-Dest", "empty")
                     .header("Sec-Fetch-Mode", "cors")
                     .header("Sec-Fetch-Site", "same-origin")
-                    .header("Sec-CH-UA", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"")
+                    .header("Sec-CH-UA", "\"Chromium\";v=\"155\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"155\"")
                     .header("Sec-CH-UA-Mobile", "?1")
-                    .header("Sec-CH-UA-Platform", "\"Android\"")
-                    .header("X-Requested-With", "XMLHttpRequest");
+                    .header("Sec-CH-UA-Platform", "\"Android\"");
             if (token != null && !token.isEmpty() && !"null".equals(token)) rb.header("Authorization", "Bearer " + token);
             /* opus4.8 审计·B-03：cookie 型站点会话头（New API gin session）。
              * 服务端 UserAuth 先查 session 再回退 Authorization，两者同带无害。 */
@@ -967,76 +965,127 @@ public class Engine {
      * 诊断日志只记【字段名与是否命中】，不记字段值 —— 值可能含凭据。
      */
     private JSONObject foreignSelf(JSONObject site, String key, long unit) {
-        /* 福利站（子站点）用独立主机 + 独立令牌 welfare_token；
-         * 主站/捐赠站用站点 baseUrl + 账号 token。 */
+        /* 余额只从主站读，用账号的主站令牌（auth_token）。
+         *
+         * 这里不再碰福利站/捐赠站的令牌：用户明确捐赠站与本 APK 无关，
+         * 福利站只负责签到按钮。读余额时去跑 WelfareSso 纯属白等。
+         */
+        JSONObject acc0 = store.findAccount(key);
+        String mainToken = cachedToken(key);
+        if (mainToken.isEmpty() && acc0 != null) mainToken = clean(acc0.optString("token", ""));
+        /* welfare 仅用于日志说明，读余额不再依赖它。 */
         String welfare = SiteProfile.welfareUrl(site);
-        String host = welfare.isEmpty() ? "" : welfare;
-        String token;
-        if (!welfare.isEmpty()) {
-            JSONObject acc0 = store.findAccount(key);
-            token = SiteProfile.welfareToken(acc0);
-            if (token.isEmpty()) {
-                /* 首登人工、后续静默：这里复用主站会话走 SSO 拿 welfare_token。
-                 * 主站会话也没有时才如实报「需要人工」。 */
-                store.sysLog(site.optString("key", ""), key, "刷新", "info",
-                        "福利站令牌缺失，尝试静默 SSO",
-                        "welfare=" + SiteProfile.hostOf(welfare));
-                int sso = WelfareSso.attempt(ctx, store, site, key, 40);
-                if (sso == WelfareSso.SSO_OK) {
-                    token = SiteProfile.welfareToken(store.findAccount(key));
-                }
-                if (token.isEmpty()) {
-                    store.sysLog(site.optString("key", ""), key, "刷新", "warn",
-                            "福利站令牌仍缺失", WelfareSso.describe(sso)
-                                    + "; welfare=" + SiteProfile.hostOf(welfare));
-                    return null;
-                }
-            }
-        } else {
-            token = cachedToken(key);
-            if (token.isEmpty()) {
-                JSONObject acc = store.findAccount(key);
-                if (acc != null) token = clean(acc.optString("token", ""));
-            }
-            if (token.isEmpty()) return null;
-        }
         long u = unit > 0 ? unit : QUOTA_PER_UNIT_DEFAULT;
 
         /* 端点与字段全部来自协议表（SiteProfile），此处不再有站点字面量。 */
         SiteProfile.Kind kind = SiteProfile.kindOf(site);
         String hit = "";
         JSONObject mapped = null;
+        String diagNums = "-";
         long t0 = System.currentTimeMillis();
-        for (String p : SiteProfile.selfPaths(site)) {
+        /* 余额只从主站读。
+         *
+         * 用户明确：捐赠站在本 APK 里没有任何关系，对它的请求全是无用功。
+         * 主机分工（真机实测）：
+         *   api.fengwind.com          → /api/v1/auth/me + auth_token  ← 主站，余额在这里
+         *   api-donation.fengwind.com → /api/me                       ← 与本 APK 无关
+         *   api-welfalre.fengwind.com → /api/me、/api/level           ← 只有 XP/用量，无美元余额
+         *
+         * 站点记录的 baseUrl 可能填的是子域（实测填的是 donation），
+         * 因此主站地址由 SiteProfile.mainSiteUrl 推导，绝不拿 baseUrl 顶替——
+         * 那样会把 /api/v1/auth/me 发到捐赠站主机，该主机没有此接口（真机 401）。
+         *
+         * 历史教训：曾用福利站 /api/level 的 xp_balance（站点标注「当前 XP」）顶替余额，
+         * 显示 $254.56，而主站真实余额是 $38.79。
+         */
+        String mainUrl = SiteProfile.mainSiteUrl(site);
+        String mainCookie = clean(acc0.optString("siteCookie", ""));
+        try {
+            androidx.webkit.Profile prof = WebViewProfileUtil.profileOf(site.optString("key", ""), key);
+            String liveCookie = WebViewProfileUtil.cookieHeader(prof, mainUrl);
+            if (liveCookie != null && !liveCookie.isEmpty()) {
+                mainCookie = mainCookie.isEmpty() ? liveCookie : (mainCookie + "; " + liveCookie);
+            }
+        } catch (Throwable ignored) {}
+        /* 只有当 Token 和 Cookie 两个全都为空时，才算无法认证 */
+        if (mainToken.isEmpty() && mainCookie.isEmpty()) return null;
+        String mainPath = "/api/v1/auth/me";
             JSONObject r = null;
             long s0 = System.currentTimeMillis();
             try {
-                r = welfare.isEmpty()
-                        ? call(site, token, "", "", "GET", p)
-                        : callAt(host, token, "", "", "GET", p, null);
+                /* 1. 先尝试同时带 Token 与 Cookie 请求主站 */
+                r = callAt(mainUrl, mainToken, mainCookie, "", "GET", mainPath, null);
+                /* 2. 若报 401 TOKEN_EXPIRED：尝试调用 POST /api/v1/auth/refresh 自动续期 */
+                if (r != null && r.optInt("http") == 401) {
+                    /* ① 优先凭 refreshToken 原生请求刷新 */
+                    String rt0 = acc0 == null ? "" : clean(acc0.optString("refreshToken", ""));
+                    if (!rt0.isEmpty()) {
+                        try {
+                            JSONObject refBody = new JSONObject().put("refresh_token", rt0);
+                            JSONObject refResp = callAt(mainUrl, "", mainCookie, "", "POST", "/api/v1/auth/refresh", refBody.toString());
+                            if (refResp != null && refResp.optInt("http") == 200) {
+                                JSONObject rd = dd(refResp);
+                                String newAt = rd.optString("access_token", "");
+                                String newRt = rd.optString("refresh_token", "");
+                                if (!newAt.isEmpty()) {
+                                    mainToken = newAt;
+                                    JSONObject patch = new JSONObject().put("token", newAt);
+                                    if (!newRt.isEmpty()) patch.put("refreshToken", newRt);
+                                    store.patchAccount(key, patch);
+                                    r = callAt(mainUrl, newAt, mainCookie, "", "GET", mainPath, null);
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    /* ② 若仍为 401（或无 refreshToken）：离屏作为最后静默兜底，在后台自动重建会话 */
+                    if (r == null || r.optInt("http") == 401) {
+                        int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
+                        if (rc == OffscreenReauth.REAUTH_OK) {
+                            resetTokenCache();
+                            JSONObject accFresh = store.findAccount(key);
+                            mainToken = cachedToken(key);
+                            if (mainToken.isEmpty() && accFresh != null) mainToken = clean(accFresh.optString("token", ""));
+                            String freshCk = clean(accFresh == null ? "" : accFresh.optString("siteCookie", ""));
+                            if (!freshCk.isEmpty()) mainCookie = freshCk;
+                            r = callAt(mainUrl, mainToken, mainCookie, "", "GET", mainPath, null);
+                        }
+                    }
+                }
             } catch (Exception ignored) {}
+            String p = mainPath;
             int code = r == null ? 0 : r.optInt("http");
+            String errBody = "";
+            if (r != null) {
+                Object rawD = r.opt("data");
+                errBody = rawD == null ? "" : String.valueOf(rawD);
+                if (errBody.length() > 120) errBody = errBody.substring(0, 120);
+            }
             store.sysLog(site.optString("key", ""), key, "刷新", "info",
                     "会话端点探测",
-                    "kind=" + SiteProfile.kindName(kind) + "; path=" + p + "; http=" + code
+                    "kind=" + SiteProfile.kindName(kind) + "; host=" + SiteProfile.hostOf(mainUrl)
+                            + "; path=" + p + "; http=" + code
+                            + "; hasToken=" + (!mainToken.isEmpty()) + "; cookieLen=" + mainCookie.length()
                             + "; ms=" + (System.currentTimeMillis() - s0)
-                            + (code == 200 ? "; keys=" + keysOf(r) : ""));
-            if (code != 200) continue;
-            JSONObject m = mapForeignSelf(r, u, kind);
+                            + (code == 200 ? "; keys=" + keysOf(r) : (code == 0 ? "; netErr=" + lastError : "; resp=" + errBody)));
+            JSONObject m = code == 200 ? mapForeignSelf(r, u, kind) : null;
             if (m == null) {
-                /* 200 但映射失败：把字段名如实写进日志（只记名字不记值）。
-                 * 没有这行时「端点通了却显示接口不存在」完全无从下手 ——
-                 * 字段名写错是这类站点最常见的形态差异（真机已踩过）。 */
-                store.sysLog(site.optString("key", ""), key, "刷新", "warn",
-                        "会话响应无法映射额度",
-                        "path=" + p + "; keys=" + keysOf(r) + "; profileKeys=" + profileKeysOf(r)
-                                + "; profileTypes=" + profileTypesOf(r));
-                continue;
+                if (code == 200) {
+                    /* 200 但映射失败：把字段名如实写进日志（只记名字不记值）。 */
+                    store.sysLog(site.optString("key", ""), key, "刷新", "warn",
+                            "会话响应无法映射额度",
+                            "path=" + p + "; keys=" + keysOf(r) + "; profileKeys=" + profileKeysOf(r)
+                                    + "; profileTypes=" + profileTypesOf(r));
+                }
+            } else {
+                /* 成功路径也要把数值字段如实记下：
+                 * 「额度算错了」只能靠真实数字定位是哪个字段。 */
+                diagNums = profileNumsOf(r);
+                mapped = m; hit = p;
             }
-            mapped = m; hit = p; break;
+        if (mapped == null) {
+            try { return new JSONObject().put("http", code).put("ok", false).put("message", httpHint(code)); }
+            catch (Exception e) { return null; }
         }
-        if (mapped == null) return null;
-
         String uid = mapped.optString("_id", "");
         mapped.remove("_id");
         JSONObject norm = mapped.optJSONObject("data");
@@ -1046,7 +1095,13 @@ public class Engine {
                         + "; avail=" + (norm != null && norm.has("quota"))
                         + "; used=" + (norm != null && norm.has("used_quota"))
                         + "; id=" + !uid.isEmpty()
-                        + "; quota=" + (norm == null ? "-" : String.valueOf(norm.opt("quota")))
+                        /* 映射所用字段的实际取值 + profile 全部数值字段：
+                         * 「额度算错了」只能靠这些真实数字定位是哪个字段。
+                         * 都是金额/点数，不是凭据。 */
+                        + "; availUSD=" + String.valueOf(norm == null ? "-" : norm.opt("quota"))
+                        + "; usedUSD=" + String.valueOf(norm == null ? "-" : norm.opt("used_quota"))
+                        + "; unit=" + u
+                        + "; nums=" + diagNums
                         + "; totalMs=" + (System.currentTimeMillis() - t0));
         return mapped;
     }
@@ -1074,6 +1129,36 @@ public class Engine {
                 boolean numeric = k.contains("xp") || k.contains("cost") || k.contains("balance");
                 sb.append(k).append(':').append(v == null ? "null" : v.getClass().getSimpleName());
                 if (numeric && v instanceof Number) sb.append('=').append(v);
+            }
+            return sb.length() == 0 ? "-" : sb.toString();
+        } catch (Exception e) { return "-"; }
+    }
+
+    /**
+     * 诊断用：profile 子对象里**全部数值字段的键值**。
+     *
+     * 与 profileTypesOf 的分工：那个只记类型、给「映射失败」用；
+     * 这个在**映射成功**时记录，用于核对「额度到底取自哪个字段」——
+     * 真机上曾把 xp_balance（站点标签是「当前 XP」）当成美元余额，
+     * 结果可用余额显示 $254.56 而用户实际只有 $38.79。没有这行数字，
+     * 这种错只能靠用户发现。数值本身不是凭据，且只取数字型字段。
+     */
+    private static String profileNumsOf(JSONObject r) {
+        try {
+            JSONObject body = r == null ? null : r.optJSONObject("data");
+            if (body == null) return "-";
+            Object inner = body.opt("data");
+            JSONObject o = inner instanceof JSONObject ? (JSONObject) inner : body;
+            JSONObject pf = o.optJSONObject("profile");
+            JSONObject src = pf != null ? pf : o;
+            java.util.Iterator<String> it = src.keys();
+            StringBuilder sb = new StringBuilder();
+            while (it.hasNext()) {
+                String k = it.next();
+                Object v = src.opt(k);
+                if (!(v instanceof Number)) continue;
+                if (sb.length() > 0) sb.append(',');
+                sb.append(k).append('=').append(v);
             }
             return sb.length() == 0 ? "-" : sb.toString();
         } catch (Exception e) { return "-"; }
@@ -1148,27 +1233,16 @@ public class Engine {
 
         Double avail = firstFinite(user, SiteProfile.balanceFields(kind));
         Double used = firstFinite(user, SiteProfile.usedFields(kind));
-        /* 真机实测（api-donation.fengwind.com，2026-10-20）：
-         *   /api/level 的 profile 里 **没有** balance/usd_balance 这类余额字段，
-         *   只有 xp_balance=254.56 与 usage_total_cost=195.58（单位就是美元）。
-         * 旧判据「读不到可用额就 return null」把这一整站判死 →
-         * 上层回落 /api/user/self 报 404 → 界面「站点接口不存在」。
+        /* 可用额（美元）：站点给的就是美元，命中即用，不猜。
          *
-         * 现在：没有余额字段但**有已用金额**时，用「已用 + xp_balance」还原出
-         * 三额度（已用=usage_total_cost，可用=xp_balance，总额=两者之和）。
-         * 这不是编造 —— 两个数都来自站点响应，只是该站把"余额"叫成了 xp_balance。
-         * 一个金额都读不到时才返回 null，保留上次额度。 */
-        if (avail == null) {
-            if (used == null) return null;
-            /* 站点只给了「已用」：可用额按同名字段兜底（xp_balance），
-             * 仍读不到就只展示已用，不用 0 冒充余额。 */
-            Double alt = firstFinite(user, "xp_balance");
-            if (alt == null) {
-                avail = 0.0;
-            } else {
-                avail = alt;
-            }
-        }
+         * 严禁把 xp_balance 当美元余额：福利站前端把它标为「当前 XP」，
+         * 是等级点数，不是钱。曾误用 xp_balance 顶替余额，导致界面显示
+         * $254.56 而用户实际可用只有 $38.79（真机证伪，2026-10-20）。 */
+        /* 必须真的读到「可用额」才接受这次结果：卡片的头条数字就是它，
+         * 拿一个凑出来的 0 顶上，等于替站点断言「你的余额是 0」——
+         * 比空白更有害。读不到就返回 null，保留上次额度并如实报错。
+         * （「累计已用」缺失仍按 0 显示，与既有 New API 站行为一致。） */
+        if (avail == null) return null;
         double a = avail;
         double b = used == null ? 0 : used;
         String uid = String.valueOf(user.opt("id"));
@@ -1350,13 +1424,20 @@ public class Engine {
         /* 统一走 callWithAuth：过期先换、401 再换，全程后台无弹窗。
          * 这里传 allowReauth=false：刷新链的静默重授权由下方 statusLocked 自己那段处理
          * （已真机验证，且成功后需重跑整条 status 重算额度），不让 callWithAuth 再触发一次，避免双重重授权。 */
-        /* 端点来自协议表：New API 站走 /api/user/self，非 New API 站由 foreignSelf 逐个探测。
-         * 这里先用协议表的首个端点，避免对 fengwind 系发注定 404 的请求。 */
+        /* 路由直通：非 New API 站（fengwind 系等）主端点就是自己的业务接口，
+         * 直接走 foreignSelf 访问主站 /api/v1/auth/me，绝不发注定 404 的探测，更不触发后续误判重登。
+         * New API 站保持走标准 /api/user/self。 */
         SiteProfile.Kind selfKind = SiteProfile.kindOf(site);
-        String primarySelfPath = SiteProfile.selfPaths(site)[0];
-        JSONObject self = callWithAuth(site, key, "GET", primarySelfPath, null, false);
-        int selfHttp = self.optInt("http");
-
+        JSONObject self;
+        int selfHttp;
+        if (SiteProfile.hasWelfare(site) || selfKind != SiteProfile.Kind.NEWAPI) {
+            self = foreignSelf(site, key, store.siteMetaLong(sKey, "quotaPerUnit", QUOTA_PER_UNIT_DEFAULT));
+            selfHttp = self == null ? 0 : self.optInt("http");
+        } else {
+            self = callWithAuth(site, key, "GET", "/api/user/self", null, false);
+            selfHttp = self == null ? 0 : self.optInt("http");
+        }
+        if (self == null) self = new JSONObject().put("http", selfHttp);
         /*
          * v1.1.15 静默重授权自愈（仅 linuxdo 站，一轮刷新最多一次）：
          * ……（见下）
@@ -1383,6 +1464,7 @@ public class Engine {
          * window.open 被 WebView 丢弃（已在本版修复），不是「必须人工拖动」。
          * 因此恢复静默重授权——这正是死会话自愈的唯一自动路径。 */
         if (allowSilentReauth && keepAliveOk
+                && (selfKind == SiteProfile.Kind.NEWAPI)
                 && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
                 && "linuxdo".equals(SiteProtocol.provider(site, tk))
                 && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503
@@ -1418,8 +1500,9 @@ public class Engine {
             String message = self.optString("message", "");
             if (message.isEmpty()) message = selfHttp == 200
                     ? "站点业务响应或账号身份异常，保留上次额度" : httpHint(selfHttp);
+            String epName = (selfKind == SiteProfile.Kind.NEWAPI) ? "/api/user/self" : "/api/v1/auth/me";
             store.opLog(sKey, key, "刷新", "err", message,
-                    "GET /api/user/self；HTTP " + selfHttp + "；businessValid=false", "user");
+                    "GET " + epName + "；HTTP " + selfHttp + "；businessValid=false", "user");
             return new JSONObject().put("ok", false).put("http", selfHttp)
                     .put("message", message).put("account", key).put("site", site.optString("name"));
         }
@@ -1483,6 +1566,9 @@ public class Engine {
 
         /* 签到状态与奖励检测 */
         if (selfHttp == 200) {
+            /* 网页手动型站点（fengwind 等）：签到全在网页完成，App 内不设自动签到，绝不发起签到状态探测 */
+            boolean webOnly = "web".equals(siteKind(site)) || SiteProfile.checkinMode(site) == SiteProfile.CheckinMode.WEB_ONLY;
+            if (webOnly) return out;
             boolean loginKind = "login".equals(siteKind(site));
             JSONObject cs = null;
             if (SiteProtocol.isAnyRouter(site)) {
@@ -1975,39 +2061,88 @@ public class Engine {
         store.sysLog(sKey, key, "签到", "info", "登出对照",
                 "code=" + lo + "; loggedOut=" + loggedOut);
 
-        /* ③ 重登（离屏复用论坛会话；这是原代码验证过的静默通道） */
-        int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
+        /* ③ 重登：根据账号的 provider 分配通道（github 走 SilentAuth，linuxdo 走 OffscreenReauth 复用论坛会话） */
+        boolean reauthOk = false;
+        String provider = SiteProtocol.provider(site, acc);
+        if ("github".equals(provider)) {
+            final java.util.concurrent.CountDownLatch rl = new java.util.concurrent.CountDownLatch(1);
+            final boolean[] okArr = { false };
+            SilentAuth.run(ctx, sKey, key, (ok, needUi, user, msg) -> {
+                okArr[0] = ok;
+                rl.countDown();
+            });
+            try { rl.await(35, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) {}
+            reauthOk = okArr[0];
+        } else {
+            int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
+            reauthOk = (rc == OffscreenReauth.REAUTH_OK);
+        }
         store.sysLog(sKey, key, "签到", "info", "重登结果",
-                "rc=" + rc + "; ok=" + (rc == OffscreenReauth.REAUTH_OK));
-        if (rc != OffscreenReauth.REAUTH_OK) {
+                "provider=" + provider + "; ok=" + reauthOk);
+        if (!reauthOk) {
             store.opLog(sKey, key, "签到", "err", "需要重新登录",
-                    "重登未成功(rc=" + rc + ")", "user");
+                    "重登未成功(provider=" + provider + ")", "user");
             return out.put("ok", false).put("already", false).put("needUi", true)
                     .put("message", "需要在应用内重新登录");
         }
 
-        /* ④ 补发 sign_in（best-effort，不作判据） */
-        anyRouterPostSignIn(key);
+        boolean isAny = SiteProtocol.isAnyRouter(site);
+        boolean credited = false;
+        double reward = 0;
+        boolean rewardKnown = false;
+        String evidence = "";
+        double after = -1;
+        double delta = -999;
 
-        /* ⑤ 签到后余额（强制 fresh），增量是唯一到账证据 */
-        double after = anyRouterBalance(key, true);
-        double delta = (before >= 0 && after >= 0) ? (after - before) : -999;
-        boolean credited = delta > 15;
-
-        store.sysLog(sKey, key, "签到", "info", "到账核对",
-                "before=" + before + "; after=" + after + "; delta=" + delta
-                        + "; credited=" + credited + "; threshold=15");
+        if (isAny) {
+            /* AnyRouter 原判据：服务端无系统明文流水，唯一到账依据为余额增量 > 15，并补发 sign_in 写回执 */
+            anyRouterPostSignIn(key);
+            after = anyRouterBalance(key, true);
+            delta = (before >= 0 && after >= 0) ? (after - before) : -999;
+            credited = delta > 15;
+            if (credited) {
+                reward = Ui.round2(delta);
+                rewardKnown = true;
+                anyRouterWriteReceipt(key);
+            }
+            evidence = "before=" + before + "; after=" + after + "; delta=" + delta;
+            store.sysLog(sKey, key, "签到", "info", "AnyRouter增量核对",
+                    evidence + "; credited=" + credited + "; threshold=15");
+        } else {
+            /* AgentRouter 原判据：重登后在使用记录中的系统类别里有明文记录（GET /api/log/self?type=4）
+             * 由 todayBonus() 专门解析系统明文流水（lastSysCredit: type=4、今日、文案非一次性赠送，或 lastBonus: 含签到）。
+             * 只要检测到该明文记录，即判定重登到账成功并带出明文奖励金额！ */
+            JSONObject bonus = null;
+            try { bonus = todayBonus(key); } catch (Exception ignored) {}
+            if (bonus != null && (bonus.has("rewardUSD") || bonus.has("time"))) {
+                credited = true;
+                reward = bonus.optDouble("rewardUSD", 0);
+                rewardKnown = bonus.optBoolean("rewardKnown", reward > 0);
+                evidence = "系统明文流水已确认: " + bonus.optString("text", "");
+            } else {
+                /* 兜底对照：若日志接口未刷出，核对是否有余额增量 */
+                after = anyRouterBalance(key, true);
+                delta = (before >= 0 && after >= 0) ? (after - before) : -999;
+                if (delta > 0) {
+                    credited = true;
+                    reward = Ui.round2(delta);
+                    rewardKnown = true;
+                    evidence = "余额增量到账: delta=" + delta;
+                }
+            }
+            store.sysLog(sKey, key, "签到", "info", "AgentRouter流水核对",
+                    "credited=" + credited + "; evidence=" + evidence);
+        }
 
         if (credited) {
-            /* 用户要求：到账就置已签。 */
-            markChecked(key, Ui.round2(delta), true);
-            store.opLog(sKey, key, "签到", "ok", "重登到账 +$" + Ui.usd(Ui.round2(delta)),
-                    "before=" + before + "; after=" + after + "; delta=" + delta
-                            + "; loggedOut=" + loggedOut, "user");
+            markChecked(key, reward, rewardKnown);
+            store.opLog(sKey, key, "签到", "ok",
+                    "重登到账" + (rewardKnown && reward > 0 ? " +$" + Ui.usd(reward) : ""),
+                    evidence + "; loggedOut=" + loggedOut, "user");
             return out.put("ok", true).put("already", false).put("needUi", false)
-                    .put("reward", Ui.round2(delta)).put("rewardKnown", true)
+                    .put("reward", reward).put("rewardKnown", rewardKnown)
                     .put("silent", silentOk)
-                    .put("message", "重登成功，+$" + Ui.usd(Ui.round2(delta)) + " 已到账"
+                    .put("message", "重登成功，" + (rewardKnown && reward > 0 ? "+$" + Ui.usd(reward) + " 已到账" : "奖励已到账")
                             + (loggedOut ? "" : "（登出未确认）"));
         }
 

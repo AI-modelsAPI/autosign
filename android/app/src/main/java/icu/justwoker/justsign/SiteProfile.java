@@ -75,24 +75,13 @@ public final class SiteProfile {
     public static String[] selfPaths(Kind k) {
         switch (k) {
             case WELFARE: return new String[]{"/api/me", "/api/level"};
-            /* 顺序按「最可能命中」排：捐赠站是 /api/me，主站是 /api/v1/auth/me。
-             * 具体站点用 selfPaths(site) 按主机名调整，这里给默认序。 */
             case SUB2API: return new String[]{"/api/v1/auth/me", "/api/me"};
             default:      return new String[]{"/api/user/self"};
         }
     }
 
-    /**
-     * 按具体站点排序的会话端点候选：捐赠站（donation）用 /api/me，
-     * 主站用 /api/v1/auth/me。省掉一次注定 404 的探测（真机日志实测）。
-     */
     public static String[] selfPaths(JSONObject site) {
-        Kind k = kindOf(site);
-        if (k != Kind.SUB2API) return selfPaths(k);
-        String h = hostOf(site == null ? "" : site.optString("baseUrl",
-                site.optString("homeUrl", "")));
-        if (h.contains("donation")) return new String[]{"/api/me", "/api/v1/auth/me"};
-        return new String[]{"/api/v1/auth/me", "/api/me"};
+        return selfPaths(kindOf(site));
     }
 
     /** 可用额字段名候选（按顺序取第一个有限的数值）。 */
@@ -205,6 +194,35 @@ public final class SiteProfile {
     }
 
     /**
+     * 主站地址：**余额在这里**，签到在福利站/捐赠站。
+     *
+     * 真机 + 代码内既有实测记录（AuthProbeJs 注释）：
+     *   api.fengwind.com          → /api/v1/auth/me + auth_token   ← 主站，余额
+     *   api-donation.fengwind.com → /api/me         + donation_token ← 捐赠站，只签到
+     *   api-welfalre.fengwind.com → /api/me         + welfare_token  ← 福利站，只签到
+     *
+     * 站点记录的 baseUrl 可能是上面任意一个子域（用户实测配的是 donation），
+     * 因此不能直接拿 baseUrl 当主站 —— 那样会把 /api/v1/auth/me 发到捐赠站主机，
+     * 该主机没有这个接口（真机返回 401），永远读不到余额。
+     *
+     * 推导规则：把已知子域前缀换成 api.，其余主机原样返回（非 fengwind 系不受影响）。
+     */
+    public static String mainSiteUrl(JSONObject site) {
+        if (site == null) return "";
+        String base = site.optString("baseUrl", site.optString("homeUrl", ""));
+        base = base.trim().replaceAll("/+$", "");
+        if (base.isEmpty()) return "";
+        String h = hostOf(base);
+        if (!h.contains("fengwind")) return base;
+        String main = h;
+        if (h.startsWith("api-welfalre.")) main = "api." + h.substring("api-welfalre.".length());
+        else if (h.startsWith("api-welfalre.")) main = "api." + h.substring("api-welfalre.".length());
+        else if (h.startsWith("api-welfare.")) main = "api." + h.substring("api-welfare.".length());
+        if (main.equals(h)) return base;
+        return "https://" + main;
+    }
+
+    /**
      * 福利站需要独立的 Bearer 令牌（welfare_token），与主站 auth_token 不同。
      * 账号上单独存，取不到就说明还没走完 SSO。
      */
@@ -292,6 +310,7 @@ public final class SiteProfile {
         CheckinMode declared = parseMode(site.optString("checkinMode", ""));
         if (declared != null) return declared;
 
+        String host = hostOf(site.optString("baseUrl", site.optString("homeUrl", "")));
         Kind kind = kindOf(site);
         if (kind == Kind.WELFARE) return CheckinMode.BUTTON;
         if (kind == Kind.SUB2API) return CheckinMode.LOGIN_GRANT;
@@ -303,11 +322,10 @@ public final class SiteProfile {
         /* AnyRouter：早八点重登直接入账、无提示（用户实证的第三类）。 */
         if (SiteProtocol.isAnyRouter(site)) return CheckinMode.RELOGIN_SILENT;
 
-        /* agentrouter：实测 POST /api/user/checkin = 404（没有按钮端点），
-         * 而其前端代码在登录响应里判 ut.checked_in 才提示「签到成功，新增额度已到账」
-         * —— 说明当日额度是**登录动作**发放的，必须主动重登才触发。
-         * 因此归 RELOGIN（登出→重登→按余额增量核对到账）。 */
-        String host = hostOf(site.optString("baseUrl", site.optString("homeUrl", "")));
+        /* agentrouter：重登发奖型（RELOGIN）。
+         * 其前端无签到端点（POST /api/user/checkin = 404），必须重登才发奖；
+         * 到账判据不同于 AnyRouter：重登后在使用记录的系统类别中有明文记录（GET /api/log/self?type=4），
+         * 由 todayBonus() 解析系统明文流水判定到账。 */
         if (host.contains("agentrouter")) return CheckinMode.RELOGIN;
 
         /* 其余 New API 系（seekai / kktoken / justwoker / gorouter）实测都有

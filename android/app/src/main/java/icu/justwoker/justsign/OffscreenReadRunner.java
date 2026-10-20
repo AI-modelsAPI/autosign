@@ -103,6 +103,11 @@ public final class OffscreenReadRunner {
                     CookieManager pcm = WebViewProfileUtil.cookieManagerFor(profile);
                     pcm.setAcceptCookie(true);
                     pcm.setAcceptThirdPartyCookies(wv, true);
+                    JSONObject acc0 = store == null ? null : store.findAccount(accountKey);
+                    String savedCookie = acc0 == null ? "" : acc0.optString("siteCookie", "");
+                    if (!savedCookie.isEmpty()) {
+                        WebViewProfileUtil.injectCookies(profile, base, savedCookie);
+                    }
                 } catch (Exception ignored) {}
                 WebSettings ws = wv.getSettings();
                 ws.setJavaScriptEnabled(true);
@@ -188,16 +193,8 @@ public final class OffscreenReadRunner {
          * 只做一次：过不了就不再重载（避免把 IP 打得更脏），交给上层如实上报。
          */
         private void navigateToClearWaf() {
-            if (done || wv == null || navigatedForWaf) return;
-            navigatedForWaf = true;
-            try {
-                if (store != null) {
-                    store.opLog(siteKey, accountKey, "只读离屏兜底", "info",
-                            "WAF 未放行，导航站点页面以完成挑战", "once=true; page=/console", "auto");
-                }
-                WebViewProfileUtil.flush(profile);
-                wv.loadUrl(base + "/console");
-            } catch (Exception ignored) {}
+            /* 严禁盲目导航 /console：未登录时导航控制台等敏感路径会被 WAF 判定为恶意扫描，
+             * 直接触发滑块验证码。此处不再进行越权主动导航。 */
         }
 
         /** 与 SilentAuth / OffscreenSelfProbe 同一套出口策略：可达才套代理，否则直连。 */
@@ -243,14 +240,7 @@ public final class OffscreenReadRunner {
                          * http-NNN / identity-not-ready / missing-expected-id），已经过 redact，
                          * 不含 URL、Cookie 或正文。 */
                         if (!o.optBoolean("ok")) {
-                            /* 「导航型放行」：拿到的是 WAF 挑战页，fetch 里的脚本不会执行，
-                             * 必须让内核导航过去跑挑战 JS 才能拿到放行 Cookie。
-                             * 这里不结束，改为导航一次后重新注入脚本。 */
-                            if ("waf-need-navigate".equals(o.optString("reason", ""))
-                                    && !navigatedForWaf) {
-                                navigateToClearWaf();
-                                return;
-                            }
+                            /* 无论读取成败，都如实回传失败原因，绝不在未登录状态下去导航敏感控制台 */
                             JSONObject fail = new JSONObject()
                                     .put("http", o.optInt("status", 0))
                                     .put("reason", o.optString("reason", ""))

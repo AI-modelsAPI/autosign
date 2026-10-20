@@ -233,8 +233,6 @@ public class AuthActivity extends Activity {
     private volatile boolean holdsAuthLock = false;
     /* 本次授权绑定的「站点×账号」Profile（降级=Default 时为 null） */
     private androidx.webkit.Profile mProfile;
-    /** 是否已为 WAF 质询导航过一次（只做一次，避免反复重载）。 */
-    private boolean wafNavDone = false;
 
     public class Bridge {
         @JavascriptInterface public void onSession(String json) {
@@ -306,20 +304,6 @@ public class AuthActivity extends Activity {
                         logProbeDiagnostic("http200-nosuccess", "HTTP 200 但 success=false（未登录或响应异常）");
                     } catch (Exception e) {
                         logProbeDiagnostic("http200-badjson", "HTTP 200 响应非 JSON（疑似质询页）");
-                        /* 质询页修复（真机实证 agentrouter L站，2026-10-20）：
-                         * /api/user/self 返回的是 16011 字节的阿里云 WAF 挑战页，
-                         * 而 fetch 响应里的 <script> 永远不会执行 → 放行 Cookie 永远
-                         * 不会写入本分区（cookieLen 恒为 818 不变），于是一直轮询到超时。
-                         * 解法：用内核**导航**一次站点真实页面，让挑战 JS 真正跑起来，
-                         * 写入 acw_sc__v2 后再由下一轮探测读取。
-                         * 只导航一次（wafNavDone），避免把出口 IP 打得更脏。 */
-                        if (!wafNavDone && wv != null && body.length() > 2000) {
-                            wafNavDone = true;
-                            authLog("info", "WAF 质询", "响应为挑战页，导航站点页面以完成质询");
-                            h.post(() -> {
-                                if (!isAuthInactive() && wv != null) wv.loadUrl(baseUrl + "/console");
-                            });
-                        }
                     }
                 } else {
                     logProbeDiagnostic("http-" + status, "HTTP " + status + "（登录仍在进行）");
@@ -570,6 +554,7 @@ public class AuthActivity extends Activity {
                  * （HitTestResult 只对 <a target=_blank> 生效）。标准做法：挂一个中转
                  * WebView 接管弹窗，等它第一次被要求导航时取走 URL，再交本 WebView 加载。 */
                 final WebView relay = new WebView(AuthActivity.this);
+                if (mProfile != null) WebViewProfileUtil.bindProfile(relay, WebViewProfileUtil.profileNameFor(siteKey, accountKey));
                 /* 中转实例只取一次 URL。三条路径都必须回收，否则每个 window.open
                  * 都会泄漏一个持有 Activity 上下文的 WebView（审查发现）：
                  *   1) 正常取到 URL → 立刻销毁；
@@ -1555,7 +1540,8 @@ if (exchanging) return r.sameHost;
         }
         /* token 允许为空（cookie 型站）；脏值不落库 */
         if (token != null && !token.trim().isEmpty() && !"null".equals(token.trim())) patch.put("token", token.trim());
-
+        String rt = bundle.optString("refresh_token", "");
+        if (!rt.isEmpty()) patch.put("refreshToken", rt);
         /* v1.1.19：授权成功即落额度，杜绝「授权后刷新额度失败」。
          * 根因（真机日志 07:36 实证）：授权 WebView 里 /api/user/self 已 HTTP 200 拿到含
          * quota 的用户对象（body 586B），但 finishOk 只取身份+cookie、丢弃了额度；随后
@@ -1567,8 +1553,9 @@ if (exchanging) return r.sameHost;
         try {
             JSONObject selfU = bundle;
             JSONObject uu = bundle.optJSONObject("user");
-            if (uu != null && (uu.has("quota") || uu.has("used_quota"))) selfU = uu;
-            if (selfU.has("quota") || selfU.has("used_quota")) {
+            if (uu != null && (uu.has("quota") || uu.has("used_quota") || uu.has("balance"))) selfU = uu;
+            if (selfU.has("quota") || selfU.has("used_quota") || selfU.has("balance")) {
+                Double bVal = selfU.has("balance") ? selfU.optDouble("balance", 0) : null;
                 long unit = store.siteMetaLong(siteKey, "quotaPerUnit", Engine.QUOTA_PER_UNIT_DEFAULT);
                 if (unit <= 0) unit = Engine.QUOTA_PER_UNIT_DEFAULT;
                 double quota = selfU.optDouble("quota", 0);
@@ -1580,7 +1567,7 @@ if (exchanging) return r.sameHost;
                         .put("ok", true).put("http", 200).put("authorized", true)
                         .put("account", accountKey)
                         .put("site", siteObj == null ? "" : siteObj.optString("name", ""))
-                        .put("availableUSD", Ui.round2(quota / unit))
+                        .put("availableUSD", bVal != null ? Ui.round2(bVal) : Ui.round2(quota / unit))
                         .put("usedUSD", Ui.round2(used / unit))
                         .put("user", (uName == null || uName.isEmpty()) ? JSONObject.NULL : uName)
                         .put("statusDate", Engine.todayStr());

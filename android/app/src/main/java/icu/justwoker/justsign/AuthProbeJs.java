@@ -76,6 +76,8 @@ public final class AuthProbeJs {
             if(!j)return null;
             if(j.code===0&&j.data)return j.data;
             if(j.success===true)return j.data||j.user||null;
+            /* sub2api 主站 /api/v1/auth/me 直接返回用户对象（无 code:0 包裹，直接含 id/username/balance） */
+            if(j.id!=null&&(j.username||j.email||j.balance!=null))return j;
             return null;
           }
           function tryOne(url,T){
@@ -86,14 +88,15 @@ public final class AuthProbeJs {
                   var u=unwrap(t);if(!u)return null;
                   var id2=u.id||u.sub2api_user_id||u.linuxdo_id||u.user_id||'';
                   var nm=u.display_name||u.username||u.name||'';
-                  return JSON.stringify({success:true,data:{id:id2,username:nm,access_token:T}});
+                  var rt='';try{rt=localStorage.getItem('refresh_token')||'';}catch(e){}
+                  return JSON.stringify({success:true,data:{id:id2,username:nm,access_token:T,refresh_token:rt}});
                 });})
               .catch(function(){return null;});
           }
           function trySub2Api(){
             var T=bearer();
             if(!T)return Promise.resolve(null);
-            var urls=['/api/me','/api/v1/auth/me'];
+            var urls=['/api/v1/auth/me','/api/me'];
             return urls.reduce(function(p,u){
               return p.then(function(hit){return hit!=null?hit:tryOne(u,T);});
             },Promise.resolve(null));

@@ -13,10 +13,13 @@ public final class AuthPageGuard {
               var d=document;
               if(!d||!d.documentElement||!d.body)return false;
               if(d.readyState!=='interactive'&&d.readyState!=='complete')return false;
+              /* OAuth 授权确认页（connect.linux.do 等）：只要页面可交互即放行，不按 WAF 挑战误杀 */
+              var host=String(location.host||'').toLowerCase();
+              if(host.indexOf('linux.do')>=0||host==='github.com')return true;
               var h=String(d.documentElement.innerHTML||'').slice(0,262144);
               var title=String(d.title||'');
-              if(/acw_sc(?:__v2)?|aliyun_waf|\\barg1\\s*=/i.test(h))return false;
-              if(/_cf_chl_opt|id=["']challenge-(?:running|form)["']/i.test(h))return false;
+              if(/acw_sc(?:__v2)?|aliyun_waf|\\\\barg1\\\\s*=/i.test(h))return false;
+              if(/_cf_chl_opt|id=[\"']challenge-(?:running|form)[\"']/i.test(h))return false;
               if(/^(?:just a moment|checking your browser|security verification)/i.test(title))return false;
               if(!String(d.body.innerText||'').trim()&&!d.body.childElementCount)return false;
               return true;
@@ -39,7 +42,7 @@ public final class AuthPageGuard {
         // 'blocked'  = permanent (wrong document/params) → caller must NOT retry.
         // 'not-ready'= transient (loading or WAF challenge) → caller may retry later.
         // 'attempted'= business ran exactly once (or already consumed) → never replay.
-        return "(function(){if(location.href!==new URL(" + quote(pageUrl) + ").href)return 'blocked';"
+        return "(function(){try{var t=new URL(location.href),p=new URL(" + quote(pageUrl) + ");if(t.origin!==p.origin||t.pathname!==p.pathname)return 'blocked';}catch(e){return 'blocked';}"
                 + "if(!" + readyExpression() + ")return 'not-ready';"
                 + (once.isEmpty() ? "" : "if(window.__justsignBusinessOnce===" + quote(once)
                     + ")return 'attempted';window.__justsignBusinessOnce=" + quote(once) + ";")

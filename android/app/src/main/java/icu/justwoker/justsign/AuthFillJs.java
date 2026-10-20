@@ -67,8 +67,9 @@ public final class AuthFillJs {
                  * 就要人工过人机，重点只是徒增导航、还可能触发导航熔断(连续 8 次)。所以回到点一次即停，
                  * 剩下交给用户手动完成（用户已明确：可见页反正要人操作，自动点不点无所谓）。
                  * 稳健点击（派发 pointer/mouse 前置事件 + 一次 el.click()）保留，提高这一次点中的概率。 */
-                + "function alreadyClicked(){try{return sessionStorage.getItem('__js_ld_clicked')==='1';}catch(e){return window.__jsLdClicked===true;}}"
-                + "function markClicked(){try{sessionStorage.setItem('__js_ld_clicked','1');}catch(e){}window.__jsLdClicked=true;}"
+                /* 仅在当前 window 实例内防重复点击，绝不落 sessionStorage（那会跨重登持久保留，把后续所有重登全废掉） */
+                + "function alreadyClicked(){return window.__jsLdClicked===true;}"
+                + "function markClicked(){window.__jsLdClicked=true;}"
                 + "function findLinuxdoBtn(){try{"
                 + "var bs=document.querySelectorAll('button,[role=button],a');"
                 + "for(var i=0;i<bs.length;i++){var t=((bs[i].innerText||'')+'').trim();"

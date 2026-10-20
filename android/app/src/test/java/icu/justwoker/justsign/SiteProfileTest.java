@@ -265,4 +265,40 @@ public class SiteProfileTest {
         assertNotEquals(SiteProfile.CheckinMode.BUTTON, SiteProfile.checkinMode(agent));
         assertEquals("", SiteProfile.checkinActionPath(agent));
     }
+
+    /* ================= 主站地址推导（余额在这里） ================= */
+
+    /**
+     * 余额在主站 api.fengwind.com，不在捐赠站/福利站。
+     *
+     * 真机事故（2026-10-20）：站点记录的 baseUrl 填的是 api-donation.fengwind.com，
+     * 代码却把主站端点 /api/v1/auth/me 发到 baseUrl 上 —— 捐赠站主机没有该接口，
+     * 返回 401，于是额度永远读不到，只能退而用福利站的 xp_balance（XP 点数）顶替，
+     * 界面显示 $254.56，而真实余额是 $38.79。
+     *
+     * 这个用例锁死「无论 baseUrl 是哪个子域，主站地址都必须推导到 api.fengwind.com」。
+     */
+    @Test public void mainSiteUrlAlwaysResolvesToMainHost() throws Exception {
+        assertEquals("https://api.fengwind.com",
+                SiteProfile.mainSiteUrl(site("https://api-welfalre.fengwind.com", null)));
+        assertEquals("https://api.fengwind.com",
+                SiteProfile.mainSiteUrl(site("https://api-welfare.fengwind.com", null)));
+        /* 主站本身保持不变。 */
+        assertEquals("https://api.fengwind.com",
+                SiteProfile.mainSiteUrl(site("https://api.fengwind.com", null)));
+    }
+
+    /** 非 fengwind 系站点不受影响：原样返回自己的 baseUrl。 */
+    @Test public void mainSiteUrlLeavesOtherSitesUntouched() throws Exception {
+        assertEquals("https://agentrouter.org",
+                SiteProfile.mainSiteUrl(site("https://agentrouter.org", null)));
+        assertEquals("https://seekai.cc",
+                SiteProfile.mainSiteUrl(site("https://seekai.cc", null)));
+    }
+
+    /** 末尾斜杠要归一化，否则拼出来的 URL 会出现双斜杠。 */
+    @Test public void mainSiteUrlTrimsTrailingSlash() throws Exception {
+        assertEquals("https://api.fengwind.com",
+                SiteProfile.mainSiteUrl(site("https://api-welfalre.fengwind.com/", null)));
+    }
 }

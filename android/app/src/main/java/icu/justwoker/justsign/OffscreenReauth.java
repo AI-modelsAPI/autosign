@@ -216,13 +216,25 @@ public final class OffscreenReauth {
                          * AuthNavigationGuard 兜同样的场景）。停止回灌，交给 watchdog 收敛。 */
                         if (++popupHops > POPUP_HOP_LIMIT) return false;
                         final WebView relay = new WebView(ctx);
+                        /* 核心修复：relay 弹窗必须绑定本账号相同的 Profile 分区！
+                         * 否则使用全局 Default 分区，不仅没有论坛会话 Cookie，更没有之前已通过的
+                         * Cloudflare Turnstile 人机放行凭证（cf_clearance），导致弹窗直接撞上人机验证！ */
+                        WebViewProfileUtil.bindProfile(relay, WebViewProfileUtil.profileNameFor(siteKey, accountKey));
+                        try {
+                            CookieManager rcm = WebViewProfileUtil.cookieManagerFor(profile);
+                            rcm.setAcceptCookie(true);
+                            rcm.setAcceptThirdPartyCookies(relay, true);
+                        } catch (Exception ignored) {}
                         /* 与 AuthActivity 同款回收纪律：正常取到 URL、5s 未导航兜底、
                          * 异常三条路径都必须销毁，否则每次 window.open 泄漏一个 WebView。 */
                         final Runnable reapRelay = () -> main.post(() -> {
                             try { relay.stopLoading(); relay.destroy(); } catch (Exception ignored) {}
                         });
                         try {
-                            relay.getSettings().setJavaScriptEnabled(true);
+                            WebSettings rs = relay.getSettings();
+                            rs.setJavaScriptEnabled(true);
+                            rs.setDomStorageEnabled(true);
+                            rs.setUserAgentString(UA);
                             relay.setWebViewClient(new WebViewClient() {
                                 @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
                                     if (req == null || req.getUrl() == null) return false;
