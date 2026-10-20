@@ -327,6 +327,22 @@ public final class AuthFillJs {
         "      switched=true;click(m);R({ok:true,action:'expand2fa'});return true;}}" +
         "  return false;}" +
         /* ================= 状态机分步执行（阶段0: 关弹窗 -> 阶段1: 填账密 -> 阶段2: 唯一点击登录） ================= */
+        "function tryOtp(){\n" +
+        "  if(!OTP||!/^[0-9]{6}$/.test(OTP))return false;\n" +
+        "  var f=otpField();\n" +
+        "  if(!f||!visible(f)||f.type==='password'){\n" +
+        "    if(location.href.indexOf('two-factor')>=0)switchToTotp();\n" +
+        "    return false;\n" +
+        "  }\n" +
+        "  if(!doneOtp){\n" +
+        "    if(!f.value){if(setVal(f,OTP)){R({ok:true,filled:['otp'],hasOtpField:true});}}\n" +
+        "    if(f.value===OTP)doneOtp=true;\n" +
+        "  }\n" +
+        "  if(!doneOtp)return true;\n" +
+        "  if(!otpSubmitted){otpSubmitted=true;stableClick(function(){return submitBtn(f);},[{el:f,min:6}],'submit2fa');}\n" +
+        "  return true;\n" +
+        "}\n" +
+        "var otpSubmitted=false;\n" +
         "var PHASE=0;" +
         "var loginClicked=false,submittedOtp=false;" +
         "var doneAcc=false,donePwd=false,doneOtp=false;" +
@@ -335,6 +351,7 @@ public final class AuthFillJs {
         "  for(var i=0;i<m.length;i++){if(visible(m[i])&&!m[i].querySelector('#login-account-name,#login_field'))return true;}" +
         "}catch(e){}return false;}" +
         "function tryFill(){" +
+        "  if(tryOtp())return;" +
         "  if(loginClicked)return;" + /* 已触发登录点击：彻底停止后续动作，绝对不重复点，专心等待人机答题 */
         "  if(PHASE===0){" +
         "    dismissNotices();" +
