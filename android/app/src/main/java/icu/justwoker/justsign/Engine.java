@@ -505,6 +505,14 @@ public class Engine {
                         "model=session-self；确保服务端认得该会话", "auto");
             }
         }
+        /* 1b. refresh-cookie 站（SeekAI 等）：真实登出端点是 POST /api/user/auth/logout，
+         *     带 Bearer + X-Auth-Session(sid) + Cookie；成功与否以 refresh 复核为准，不再信任 success:true。 */
+        if (hasRefreshCookie(cookie)) {
+            int r = logoutRefreshCookieSite(site, accountKey, base, sKey, token, cookie);
+            store.opLog(sKey, accountKey, "登出", r == ReauthManager.CONFIRMED || r == ReauthManager.ABSENT ? "info" : "err",
+                    "refresh-cookie 登出结束", "model=refresh-cookie；result=" + ReauthManager.describe(r) + "；oauth=false", "auto");
+            return r;
+        }
         /* 2. 主通道：补全浏览器请求头的 OkHttp（实测可过阿里云 WAF 的请求头特征检测）。 */
         JSONObject res = httpLogout(base, token, cookie, uid);
         int code = res.optInt("http", 0);
@@ -525,6 +533,100 @@ public class Engine {
         }
         return decided;
     }
+    /**
+     * refresh-cookie 站点的登出 + 复核（重新授权前置）。
+     * 1) POST /api/user/auth/logout（Bearer 可用时带上，X-Auth-Session=sid，Cookie）；
+     * 2) 用旧 Cookie 调 POST /api/user/auth/refresh 复核：401 = 续期凭据已被服务端拒绝 = 会话已注销；
+     *    200 = 会话仍活，保存轮换后的凭据并判 UNCONFIRMED（阻断授权）；其它 = 无法确认。
+     * 注意：无凭据时 /api/user/auth/logout 也返回 200 success:true，因此 success 本身不作为证据。
+     */
+    private int logoutRefreshCookieSite(JSONObject site, String accountKey, String base, String sKey,
+                                        String token, String cookie) {
+        String sid = token.isEmpty() ? "" : CheckinJs.extractSid(token);
+        if (sid == null || sid.isEmpty()) sid = sidFromRefreshCookie(cookie);
+        Response r1 = null;
+        try {
+            Request.Builder b = new Request.Builder().url(base + "/api/user/auth/logout")
+                    .header("User-Agent", UA).header("Accept", "application/json, text/plain, */*")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Origin", base).header("Referer", base + "/")
+                    .header("Sec-Fetch-Dest", "empty").header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin").header("Cookie", cookie);
+            if (!token.isEmpty()) b.header("Authorization", "Bearer " + token);
+            if (sid != null && !sid.isEmpty()) b.header("X-Auth-Session", sid);
+            r1 = buildClientFromConfig().newCall(b.post(RequestBody.create("{}", MediaType.parse("application/json"))).build()).execute();
+            int http = r1.code();
+            String body = r1.body() == null ? "" : r1.body().string();
+            boolean waf = wafBlocked(body);
+            boolean success = false;
+            if (isJson(body)) { try { success = new JSONObject(body).optBoolean("success", false); } catch (Exception ignored) { } }
+            store.opLog(sKey, accountKey, "登出", "info", "主登出通道响应",
+                    "channel=refresh-cookie；endpoint=/api/user/auth/logout；HTTP=" + http + "；success=" + success
+                            + "；sid=" + (sid == null || sid.isEmpty() ? "-" : "true") + "；waf=" + waf, "auto");
+            if (http == 0 || http == 429 || http >= 500 || waf) return ReauthManager.UNCONFIRMED;
+            if (http == 403) return ReauthManager.DENIED;
+        } catch (Exception e) {
+            return ReauthManager.UNCONFIRMED;
+        } finally {
+            if (r1 != null) r1.close();
+        }
+        /* 复核：旧续期凭据是否仍被服务端接受 */
+        Response r2 = null;
+        try {
+            Request req = new Request.Builder().url(base + "/api/user/auth/refresh")
+                    .header("User-Agent", UA).header("Accept", "application/json, text/plain, */*")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("Origin", base).header("Referer", base + "/")
+                    .header("Sec-Fetch-Dest", "empty").header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin").header("Cookie", cookie)
+                    .post(RequestBody.create("{}", MediaType.parse("application/json"))).build();
+            r2 = buildClientFromConfig().newCall(req).execute();
+            int http = r2.code();
+            String body = r2.body() == null ? "" : r2.body().string();
+            if (http == 401 || http == 403) {
+                store.opLog(sKey, accountKey, "登出", "info", "登出复核：旧会话已不被接受",
+                        "HTTP=" + http + "；oauth=false", "auto");
+                return ReauthManager.CONFIRMED;
+            }
+            if (http == 200 && isJson(body)) {
+                JSONObject json = new JSONObject(body);
+                if (json.optBoolean("success", false)) {
+                    String rotated = mergeCookies(cookie, r2.headers("Set-Cookie"));
+                    String fresh = "";
+                    JSONObject data = json.optJSONObject("data");
+                    if (data != null) fresh = clean(data.optString("access_token", ""));
+                    if (!fresh.isEmpty()) {
+                        store.patchAccount(accountKey, new JSONObject().put("token", fresh).put("siteCookie", rotated));
+                        cacheToken(accountKey, fresh);
+                    }
+                    store.opLog(sKey, accountKey, "登出", "err", "登出复核：旧会话仍然有效",
+                            "HTTP=200；oauth=false；授权已阻断，请检查站点端登出是否生效", "auto");
+                    return ReauthManager.UNCONFIRMED;
+                }
+            }
+            store.opLog(sKey, accountKey, "登出", "warn", "登出复核无法确定",
+                    "HTTP=" + http + "；oauth=false", "auto");
+            return ReauthManager.UNCONFIRMED;
+        } catch (Exception e) {
+            return ReauthManager.UNCONFIRMED;
+        } finally {
+            if (r2 != null) r2.close();
+        }
+    }
+
+    private static String sidFromRefreshCookie(String cookie) {
+        if (cookie == null) return "";
+        for (String pair : cookie.split(";")) {
+            String t = pair.trim();
+            if (t.startsWith("new_api_refresh=")) {
+                String v = t.substring("new_api_refresh=".length());
+                int dot = v.indexOf('.');
+                return dot > 0 ? v.substring(0, dot) : "";
+            }
+        }
+        return "";
+    }
+
     /**
      * session Cookie 站（AgentRouter 等）的真实续期：GET /api/user/self 返回体内的
      * data.access_token 即可独立作 Bearer 使用（实测不带 Cookie 单独请求 self 仍返回本人数据）。
