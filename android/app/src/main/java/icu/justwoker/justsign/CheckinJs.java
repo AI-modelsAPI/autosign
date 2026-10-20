@@ -265,149 +265,155 @@ public final class CheckinJs {
         /* 25s 足够 interaction-only 静默通过；过不去说明本次必须人工交互。
          * 这批站登录即发奖励，随后会走日志兜底确认，没必要白等 60 秒。 */
         "    setTimeout(function(){tsErr=tsErr||'wait-timeout';fin('')},25000);});}" +
-        "/* ---- DOM 驱动签到：若在 /profile 页面，查找并点击真实「立即签到」按钮，等待官方对话框过人机 ---- */" +
-        "async function tryDomCheckin(){try{" +
-        "  if(WELFARE)return false;" +
-        "  var t0=Date.now();var clicked=false;" +
-        "  while(Date.now()-t0<6000){" +
-        "    var btns=document.querySelectorAll('button,[role=\"button\"],a');" +
-        "    var clickBtn=null;var alreadyBtn=false;" +
-        "    for(var i=0;i<btns.length;i++){" +
-        "      var txt=String(btns[i].textContent||btns[i].innerText||'').trim();" +
-        "      if(/Checked\\s*in|已签到|今日已签/i.test(txt)){alreadyBtn=true;break;}" +
-        "      if(!clickBtn&&/Check\\s*in\\s*now|立即签到/i.test(txt)){clickBtn=btns[i];}" +
-        "    }" +
-        "    if(alreadyBtn){var c=await stateOf();" +
-        "      finish(true,true,c.ok?c.reward:0,c.ok&&c.rewardKnown,'今日已签到');return true;}" +
-        "    if(clickBtn&&!clickBtn.disabled&&!clicked){" +
-        "      clicked=true;P('找到页面签到按钮，正在点击…');" +
-        "      clickBtn.click();" +
-        "      var w0=Date.now();" +
-        "      while(Date.now()-w0<20000){" +
-        "        await new Promise(function(w){setTimeout(w,500);});" +
-        "        var b2=document.querySelectorAll('button,[role=\"button\"],a');" +
-        "        for(var j=0;j<b2.length;j++){" +
-        "          var t2=String(b2[j].textContent||b2[j].innerText||'').trim();" +
-        "          if(/Checked\\s*in|已签到|今日已签/i.test(t2)){" +
-        "            var c2=await stateOf();" +
-        "            finish(true,true,c2.ok?c2.reward:0,c2.ok&&c2.rewardKnown,'今日已签到');return true;}" +
-        "        }" +
-        "        if(document.querySelector('.cf-turnstile,iframe[src*=\"challenges.cloudflare.com\"]')){" +
-        "          P('正在进行无感人机验证…');" +
-        "        }" +
-        "      }" +
-        "      return false;" +
-        "    }" +
-        "    await new Promise(function(w){setTimeout(w,350);});" +
-        "  }" +
-        "  return false;" +
-        "}catch(e){return false;}}" +
-        "/* ================= 主流程 ================= */" +
-        "var siteKeyFromServer=await loadStatus();" +
-        "await refresh();" +
-        "var out={token:window.__jstoken||'',siteKey:siteKeyFromServer||sitekey||'',unit:UNIT};" +
-        "var finished=false;" +
-        "function finish(ok,already,reward,rewardKnown,msg,extra){" +
-        "  if(finished)return;finished=true;" +
-        "  out.ok=ok;out.already=!!already;out.reward=reward;out.rewardKnown=!!rewardKnown;" +
-        "  out.message=msg;out.token=window.__jstoken||out.token;" +
-        "  if(tsErr)out.tsError=tsErr;if(extra)out.detail=extra;R(out);}" +
-        "try{var origF=window.fetch;window.fetch=async function(){" +
-        "  var u=String((arguments&&arguments[0])||'');" +
-        "  var r=await origF.apply(this,arguments);" +
-        "  try{if(u.indexOf('/api/user/checkin')!==-1){" +
-        "    var cl=r.clone();cl.json().then(function(j){" +
-        "      if(j&&j.success){var rw=usd(j.data&&j.data.quota_awarded);" +
-        "        finish(true,false,rw,true,rw>0?('签到成功 +$'+rw):'签到成功');}" +
-        "      else if(j&&ALREADY.test(j.message||'')){" +
-        "        stateOf().then(function(c){finish(true,true,c.ok?c.reward:0,c.ok&&c.rewardKnown,'今日已签到');});}" +
-        "    }).catch(function(){});" +
-        "  }}catch(e){}" +
-        "  return r;};}catch(e){}" +
-        "if(!CHECKIN_ON){finish(false,false,0,false,'该站点未开启每日签到');return;}" +
-        /* 第 1 步：只读状态 —— 已签就到此为止，绝不去碰人机验证 */
-        "P('正在查询今日签到状态…');" +
-        "var s1=await stateOf();" +
-        "if(s1.ok&&s1.checked){" +
-        "  finish(true,true,s1.reward,s1.rewardKnown," +
-        "    (s1.rewardKnown&&s1.reward>0)?'今日已签到':(s1.rewardKnown?'今日已签到（本站无奖励）':'今日已签到')," +
-        "    '来源: 服务端签到记录');return;}" +
-        /* 登录即签到型（just / kk）：站点在 OAuth 登录时就已发奖励，
-         * checkin 接口的 stats 有时并不回写。先查日志确证，
-         * 命中就直接判成功，完全不碰人机验证。 */
-        "var lb0=await todayBonusLog();" +
-        "if(lb0.found){finish(true,true,lb0.reward,lb0.known," +
-        "  (lb0.known&&lb0.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
-        "  '来源: 站点日志今日签到记录');return;}" +
-        "if(!s1.ok&&(s1.http===401||AUTHBAD.test(String(s1.message||'')))){" +
-        "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        /* 第 2 步：未签 → 正式签到 */
-        "P('正在签到…');" +
-        /* WELFARE：POST /api/checkin，必须带 X-Turnstile-Token。
-         * 令牌由站点自己的 Turnstile 挂件产出（不破解、不代答）。 */
-        "if(WELFARE){" +
-        "  var tk0=await turnstileToken();" +
-        "  if(!tk0){finish(false,false,0,false,'turnstile-wait-timeout：验证码未就绪');return;}" +
-        "  var rr=null,ss=0;" +
-        "  try{var rr0=await fetchT('/api/checkin',{method:'POST',credentials:'include'," +
-        "        headers:Object.assign({},H(),{'Content-Type':'application/json','X-Turnstile-Token':tk0})," +
-        "        body:'{}'},15000);ss=rr0.status;try{rr=await rr0.json()}catch(e){}}catch(e){}" +
-        "  var mm=(rr&&(rr.message||rr.error))||('HTTP '+ss);" +
-        "  if(ss===200&&(!rr||rr.code===0||rr.success!==false)){" +
-        "    var c=await stateOf();" +
-        "    var rw2=c.ok?Number(c.reward||0):0;" +
-        "    finish(true,false,rw2,rw2>0,rw2>0?('签到成功 +$'+rw2):'签到成功');return;}" +
-        "  if(ALREADY.test(mm)){var c2=await stateOf();" +
-        "    finish(true,true,c2.ok?c2.reward:0,c2.ok&&c2.rewardKnown,'今日已签到');return;}" +
-        "  if(ss===401||AUTHBAD.test(mm)){" +
-        "    out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        "  finish(false,false,0,false,mm);return;" +
-        "}" +
-        "/* 仅在 SeekAI 且在 /profile 页面时尝试 DOM 驱动点击，其余站点一律直接走标准流程 */" +
-        "if(/seekai\\.cc/i.test(location.hostname)&&location.pathname.indexOf('/profile')!==-1){" +
-        "  var domDone=await tryDomCheckin();" +
-        "  if(domDone)return;" +
-        "}" +
-        "var res1=await post('/api/user/checkin');" +
-        "var r1=res1.j;var st1=res1.status;" +
-        "if(r1&&r1.success){var rw=usd(r1.data&&r1.data.quota_awarded);" +
-        "  finish(true,false,rw,true,rw>0?'签到成功':'签到成功（本站无奖励）');return;}" +
-        "var m1=(r1&&r1.message)||('HTTP '+st1);" +
-        "if(ALREADY.test(m1)){var c1=await stateOf();" +
-        "  finish(true,true,c1.ok?c1.reward:0,c1.ok&&c1.rewardKnown,'今日已签到');return;}" +
-        "if(st1===401||(AUTHBAD.test(m1)&&!NEEDCAP.test(m1))){" +
-        "  out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        "if(st1===429){finish(false,false,0,false,'站点限流（429），请稍后重试');return;}" +
-        "/* 第 3 步：需要人机验证（明确被要求人机、403、或站点配置了 TS_ON） */" +
-        "if(NEEDCAP.test(m1)||st1===403||TS_ON){" +
-        "  if(!sitekey){finish(false,false,0,false,'需要人机验证，但站点未返回 siteKey（请点刷新后重试）');return;}" +
-        "  P('正在进行无感人机验证…');" +
-        "  var tk=await turnstileToken();" +
-        "  if(!tk){" +
-        "    var c2=await stateOf();" +
-        "    if(c2.ok&&c2.checked){finish(true,true,c2.reward,c2.rewardKnown,'今日已签到'," +
-        "      '人机验证未完成，但服务端已有今日记录');return;}" +
-        /* 登录即签到型兜底：这批站（just / kk）登录时就已发放奖励，
-         * 人机验证只是签到按钮的附加校验。日志里若已有今日签到记录，
-         * 说明奖励其实已到账，不该再报失败。奖励可能为 0（本站当日不发）。 */
-        "    var lb=await todayBonusLog();" +
-        "    if(lb.found){finish(true,true,lb.reward,lb.known," +
-        "      (lb.known&&lb.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）'," +
-        "      '来源: 站点日志今日签到记录（人机验证未完成但奖励已发）');return;}" +
-        "    finish(false,false,0,false,'人机验证未通过'+(tsErr?('（'+tsErr+'）'):'')," +
-        "      'sitekey='+String(sitekey).slice(0,10)+'…');return;}" +
-        "  P('验证通过，正在签到…');" +
-        "  var res2=await post('/api/user/checkin?turnstile='+encodeURIComponent(tk));" +
-        "  var r2=res2.j;var st2=res2.status;" +
-        "  if(r2&&r2.success){var rw2=usd(r2.data&&r2.data.quota_awarded);" +
-        "    finish(true,false,rw2,true,rw2>0?'签到成功':'签到成功（本站无奖励）');return;}" +
-        "  var m2=(r2&&r2.message)||('HTTP '+st2);" +
-        "  if(ALREADY.test(m2)){var c3=await stateOf();" +
-        "    finish(true,true,c3.ok?c3.reward:0,c3.ok&&c3.rewardKnown,'今日已签到');return;}" +
-        "  if(st2===401||AUTHBAD.test(m2)){out.auth=true;" +
-        "    finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}" +
-        "  finish(false,false,0,false,m2||'签到失败');return;}" +
-        "finish(false,false,0,false,m1||'签到失败');" +
-        "}catch(e){try{R({ok:false,message:'JS 异常: '+((e&&e.message)||String(e)),token:window.__jstoken||''});}catch(e2){}}" +
-        "})();})();";
+        "/* ---- 站点自己发出的签到 POST 结果（只作提示，成功与否以服务端状态为准） ----\n" +
+        " * 只认 POST、路径精确为 /api/user/checkin（去掉 query）。\n" +
+        " * 旧版缺陷：对任何方法、URL 含 /api/user/checkin 的响应都判成功，\n" +
+        " * 于是 stateOf() 的 GET 状态查询（success:true、无 quota_awarded）被当成「签到成功，奖励 0」。 */\n" +
+        "var hookRes=null;\n" +
+        "try{var origF=window.fetch;window.fetch=async function(){\n" +
+        "  var u=String((arguments&&arguments[0])||'');\n" +
+        "  var mth=String((arguments&&arguments[1]&&arguments[1].method)||'GET').toUpperCase();\n" +
+        "  var r=await origF.apply(this,arguments);\n" +
+        "  try{\n" +
+        "    var path=u.split('?')[0];\n" +
+        "    if(mth==='POST'&&/\\/api\\/user\\/checkin$/.test(path)){\n" +
+        "      r.clone().json().then(function(j){hookRes={status:r.status,j:j};}).catch(function(){});\n" +
+        "    }\n" +
+        "  }catch(e){}\n" +
+        "  return r;};}catch(e){}\n" +
+        "function sleep(ms){return new Promise(function(w){setTimeout(w,ms);});}\n" +
+        "/* 主流程 ================= */\n" +
+        "var siteKeyFromServer=await loadStatus();\n" +
+        "await refresh();\n" +
+        "var out={token:window.__jstoken||'',siteKey:siteKeyFromServer||sitekey||'',unit:UNIT};\n" +
+        "var finished=false;\n" +
+        "var finish=function(ok,already,reward,rewardKnown,msg,extra){\n" +
+        "  if(finished)return;finished=true;\n" +
+        "  out.ok=ok;out.already=!!already;out.reward=reward;out.rewardKnown=!!rewardKnown;\n" +
+        "  out.message=msg;out.token=window.__jstoken||out.token;\n" +
+        "  if(tsErr)out.tsError=tsErr;if(extra)out.detail=extra;R(out);};\n" +
+        "/* 只有服务端状态 checked_in_today==true 才调用本函数 */\n" +
+        "var doneOk=function(c,already,src){\n" +
+        "  var rw=c.ok?Number(c.reward||0):0;var known=!!(c.ok&&c.rewardKnown);\n" +
+        "  var head=already?'今日已签到':'签到成功';\n" +
+        "  var msg=known?(rw>0?(head+' +$'+rw):(head+'（本站无奖励）')):(head+'（奖励未知）');\n" +
+        "  finish(true,already,rw,known,msg,'来源: '+src);};\n" +
+        "/* 重新读取服务端状态，最多 4 次（每次间隔 1.5s），应对站点写入延迟 */\n" +
+        "var verifyChecked=async function(){\n" +
+        "  var c=null;\n" +
+        "  for(var k=0;k<4;k++){c=await stateOf();if(c.ok&&c.checked)return c;await sleep(1500);}\n" +
+        "  return c||{ok:false};};\n" +
+        "async function postCheckin(tk){\n" +
+        "  return await post('/api/user/checkin'+(tk?('?turnstile='+encodeURIComponent(tk)):''));}\n" +
+        "/* 分类站点返回（POST /api/user/checkin 的响应） */\n" +
+        "function classify(res){\n" +
+        "  var j=res.j,st=res.status;var m=(j&&j.message)||('HTTP '+st);\n" +
+        "  if(j&&j.success===true)return 'ok';\n" +
+        "  if(ALREADY.test(m)&&!NEEDCAP.test(m))return 'already';\n" +
+        "  if(st===401||(AUTHBAD.test(m)&&!NEEDCAP.test(m)))return 'auth';\n" +
+        "  if(st===429)return 'ratelimit';\n" +
+        "  if(NEEDCAP.test(m)||st===403||TS_ON)return 'captcha';\n" +
+        "  return 'fail';}\n" +
+        "/* DOM 驱动：仅 SeekAI /profile。点击站点自己的「立即签到」，由站点自己的 JS 完成 POST 与人机验证；\n" +
+        " * 成功与否只看服务端状态。超时返回 false，交给 API 路径（API 路径同样以服务端状态收尾）。 */\n" +
+        "async function tryDomCheckin(){try{\n" +
+        "  if(WELFARE)return false;\n" +
+        "  var t0=Date.now();var btn=null;\n" +
+        "  while(Date.now()-t0<8000&&!btn){\n" +
+        "    var btns=document.querySelectorAll('button,[role=\"button\"],a');\n" +
+        "    for(var i=0;i<btns.length;i++){\n" +
+        "      var b=btns[i];var txt=String(b.textContent||b.innerText||'').trim();\n" +
+        "      if(/Check\\s*in\\s*now|立即签到/i.test(txt)&&!b.disabled){btn=b;break;}\n" +
+        "    }\n" +
+        "    if(!btn)await sleep(500);\n" +
+        "  }\n" +
+        "  if(!btn)return false;\n" +
+        "  P('找到页面签到按钮，正在点击…');\n" +
+        "  btn.click();\n" +
+        "  var w0=Date.now();\n" +
+        "  while(Date.now()-w0<120000){\n" +
+        "    await sleep(2000);\n" +
+        "    var c=await stateOf();\n" +
+        "    if(c.ok&&c.checked){doneOk(c,false,'页面签到按钮 · 服务端 stats.checked_in_today');return true;}\n" +
+        "    if(document.querySelector('.cf-turnstile,iframe[src*=\"challenges.cloudflare.com\"]'))P('正在进行人机验证…');\n" +
+        "  }\n" +
+        "  return false;\n" +
+        "}catch(e){return false;}}\n" +
+        "if(!CHECKIN_ON){finish(false,false,0,false,'该站点未开启每日签到');return;}\n" +
+        "/* 第 1 步：只读状态。已签即结束，绝不触碰人机验证 */\n" +
+        "P('正在查询今日签到状态…');\n" +
+        "var s1=await stateOf();\n" +
+        "if(!s1.ok){\n" +
+        "  if(s1.http===401||AUTHBAD.test(String(s1.message||''))){out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}\n" +
+        "  finish(false,false,0,false,'签到状态读取失败：'+(s1.message||('HTTP '+s1.http)));return;}\n" +
+        "if(s1.checked){doneOk(s1,true,'服务端 stats.checked_in_today');return;}\n" +
+        "/* 登录即签到型（just / kk）：站点日志今日有签到记录即确证 */\n" +
+        "var lb0=await todayBonusLog();\n" +
+        "if(lb0.found){finish(true,true,lb0.reward,lb0.known,\n" +
+        "  (lb0.known&&lb0.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）',\n" +
+        "  '来源: 站点日志今日签到记录');return;}\n" +
+        "/* WELFARE（福利站）：独立端点，POST 需 X-Turnstile-Token 头 */\n" +
+        "if(WELFARE){\n" +
+        "  var tk0=await turnstileToken();\n" +
+        "  if(!tk0){finish(false,false,0,false,'turnstile-wait-timeout：验证码未就绪');return;}\n" +
+        "  var rr=null,ss=0;\n" +
+        "  try{var rr0=await fetchT('/api/checkin',{method:'POST',credentials:'include',\n" +
+        "        headers:Object.assign({},H(),{'Content-Type':'application/json','X-Turnstile-Token':tk0}),\n" +
+        "        body:'{}'},15000);ss=rr0.status;try{rr=await rr0.json()}catch(e){}}catch(e){}\n" +
+        "  var mm=(rr&&(rr.message||rr.error))||('HTTP '+ss);\n" +
+        "  if(ss===200&&rr&&rr.success!==false){\n" +
+        "    var cw=await verifyChecked();\n" +
+        "    if(cw.ok&&cw.checked){doneOk(cw,false,'福利站签到 · 服务端状态核验');return;}\n" +
+        "    finish(false,false,0,false,'福利站返回成功，但服务端未核验到今日记录');return;}\n" +
+        "  if(ALREADY.test(mm)){var cwa=await stateOf();doneOk(cwa,true,'福利站已签');return;}\n" +
+        "  if(ss===401||AUTHBAD.test(mm)){out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}\n" +
+        "  finish(false,false,0,false,mm);return;\n" +
+        "}\n" +
+        "/* 第 2 步：SeekAI /profile 走站点自己的按钮 */\n" +
+        "if(/seekai\\.cc/i.test(location.hostname)&&location.pathname.indexOf('/profile')!==-1){\n" +
+        "  var domDone=await tryDomCheckin();\n" +
+        "  if(domDone)return;\n" +
+        "  P('页面按钮未完成，改用接口签到…');\n" +
+        "  var sNow=await stateOf();\n" +
+        "  if(sNow.ok&&sNow.checked){doneOk(sNow,true,'服务端 stats.checked_in_today');return;}\n" +
+        "}\n" +
+        "/* 第 3 步：接口签到。先无令牌 POST（站点同样如此），被要求人机再挂 Turnstile */\n" +
+        "P('正在签到…');\n" +
+        "var r1=await postCheckin(null);\n" +
+        "var k1=classify(r1);\n" +
+        "if(k1==='ok'||k1==='already'){\n" +
+        "  var c1=await verifyChecked();\n" +
+        "  if(c1.ok&&c1.checked){doneOk(c1,k1==='already','接口签到 · 服务端状态核验');return;}\n" +
+        "  finish(false,false,0,false,k1==='already'?'站点提示已签，但服务端未核验到今日记录':'站点返回成功，但服务端未核验到今日记录（请人工核对）');return;}\n" +
+        "if(k1==='auth'){out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}\n" +
+        "if(k1==='ratelimit'){finish(false,false,0,false,'站点限流（429），请稍后重试');return;}\n" +
+        "if(k1!=='captcha'){\n" +
+        "  var cf=await verifyChecked();\n" +
+        "  if(cf.ok&&cf.checked){doneOk(cf,true,'服务端状态核验（POST 失败后）');return;}\n" +
+        "  finish(false,false,0,false,(r1.j&&r1.j.message)||('HTTP '+r1.status));return;}\n" +
+        "/* 第 3 步：人机验证（站点 turnstile_check 开启，或响应明确要求人机） */\n" +
+        "if(!sitekey){finish(false,false,0,false,'需要人机验证，但站点未返回 siteKey（请点刷新后重试）');return;}\n" +
+        "P('正在进行无感人机验证…');\n" +
+        "var tk=await turnstileToken();\n" +
+        "if(!tk){\n" +
+        "  var c2=await stateOf();\n" +
+        "  if(c2.ok&&c2.checked){doneOk(c2,true,'人机未完成，服务端已有今日记录');return;}\n" +
+        "  var lb=await todayBonusLog();\n" +
+        "  if(lb.found){finish(true,true,lb.reward,lb.known,\n" +
+        "    (lb.known&&lb.reward>0)?'登录即签到 · 今日奖励已到账':'登录即签到 · 今日已签（无奖励）',\n" +
+        "    '来源: 站点日志今日签到记录（人机未完成）');return;}\n" +
+        "  finish(false,false,0,false,'人机验证未通过'+(tsErr?('（'+tsErr+'）'):''),'sitekey='+String(sitekey).slice(0,10)+'…');return;}\n" +
+        "P('验证通过，正在签到…');\n" +
+        "var r2=await postCheckin(tk);\n" +
+        "var k2=classify(r2);\n" +
+        "if(k2==='ok'||k2==='already'){\n" +
+        "  var c3=await verifyChecked();\n" +
+        "  if(c3.ok&&c3.checked){doneOk(c3,k2==='already','人机验证后签到 · 服务端状态核验');return;}\n" +
+        "  finish(false,false,0,false,'站点返回成功，但服务端未核验到今日记录（请人工核对）');return;}\n" +
+        "if(k2==='auth'){out.auth=true;finish(false,false,0,false,'授权已过期，请回主页点击「重新授权」');return;}\n" +
+        "var c4=await verifyChecked();\n" +
+        "if(c4.ok&&c4.checked){doneOk(c4,true,'服务端状态核验（POST 失败后）');return;}\n" +
+        "finish(false,false,0,false,(r2.j&&r2.j.message)||('HTTP '+r2.status));\n" +
+        "}catch(e){try{R({ok:false,message:'JS 异常: '+((e&&e.message)||String(e)),token:window.__jstoken||''});}catch(e2){}}\n" +
+        "})();})();\n";
 }
