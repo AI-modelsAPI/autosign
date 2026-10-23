@@ -153,11 +153,11 @@ console.log('\nB. 一直卡在 v2 挑战页 → 判失败但标记「可重试�
 {
   const r = await runScenario({ selfResponses: [V2PAGE], captchaVisible: false });
   ok(r && r.ok === false, '回传 ok:false（绝不把挑战页当数据）');
-  ok(r && r.reason === 'waf-not-cleared', 'reason=waf-not-cleared，实际=' + (r && r.reason));
+  ok(r && r.reason === 'waf-need-navigate', 'reason=waf-need-navigate，实际=' + (r && r.reason));
   ok(r && r.retryable === true, '标记 retryable=true（未过盾值得再试）');
 }
 
-console.log('\nC. 挑战页未放行 → 一律可重试（一次没成 ≠ 永远不成）');
+console.log('\nC. 挑战页未放行 → 请求导航并标记可重试');
 {
   const r = await runScenario({ selfResponses: [V2PAGE], captchaVisible: true });
   ok(r && r.ok === false, '回传 ok:false');

@@ -63,14 +63,14 @@ public final class AuthProbeJs {
            * 此前只探 /api/user/self → 登录明明成功也永远探测不到 → 「登录失败/额度为空」。
            * 仅当 New API 端点不存在（404）时才回退，不影响既有站点。
            * 安全：token 只作为凭据回传落库（与其它站同待遇），绝不写日志。 */
-          function bearer(){
-            try{
-              var ks=['auth_token','donation_token','welfare_token'];
-              for(var i=0;i<ks.length;i++){var v=localStorage.getItem(ks[i]);
-                if(v)return v;}
-              return '';
-            }catch(e){return '';}
-          }
+           function bearer(){
+               try{
+                 var ks=['auth_token','donation_token','welfare_token'];
+                 for(var i=0;i<ks.length;i++){var v=localStorage.getItem(ks[i]);
+                 if(v)return {value:v,key:ks[i]};}
+                 return null;
+               }catch(e){return null;}
+             }
           function unwrap(t){
             var j=null;try{j=JSON.parse(t);}catch(e){return null;}
             if(!j)return null;
@@ -93,11 +93,16 @@ public final class AuthProbeJs {
                 });})
               .catch(function(){return null;});
           }
-          function trySub2Api(){
-            var T=bearer();
-            if(!T)return Promise.resolve(null);
-            var urls=['/api/v1/auth/me','/api/me'];
-            return urls.reduce(function(p,u){
+           function trySub2Api(){
+             var B=bearer();
+             if(!B)return Promise.resolve(null);
+             var T=B.value;
+             /* 主站令牌对应 v1 路由；捐赠/福利令牌对应 /api/me，
+              * 先走正确端点，避免每次授权探测多发一个必定 404 的请求。 */
+             var urls=B.key==='auth_token'
+               ? ['/api/v1/auth/me','/api/me']
+               : ['/api/me','/api/v1/auth/me'];
+             return urls.reduce(function(p,u){
               return p.then(function(hit){return hit!=null?hit:tryOne(u,T);});
             },Promise.resolve(null));
           }

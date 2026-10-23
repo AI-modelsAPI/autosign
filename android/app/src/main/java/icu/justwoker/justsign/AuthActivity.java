@@ -1036,6 +1036,7 @@ if (exchanging) return r.sameHost;
              * 只要 success=true 且有会话 Cookie 即收凭据；token 仅尽力而为。 */
             boolean cookieProvider = "linuxdo".equals(oauthProvider);
             if (r.optBoolean("success") && (d != null || (cookieProvider && !setCookie.isEmpty()))) {
+                if (d == null) d = new JSONObject();
                 /* opus4.8 审计：token 尽力而为（JSON null/缺失视为无，三字段回退）；
                  * cookie 型站（AgentRouter）以 setCookie 为真凭据。 */
                 String token = "";

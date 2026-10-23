@@ -286,7 +286,7 @@ public final class AuthFillJs {
              b) 提交按钮存在、可见、未 disabled
              c) 没有待完成的人机验证
            每 120ms 检查一次，连续 2 次满足才点（防抖），最多等 6s。 */
-        "function stableClick(getBtn,fields,tag){" +
+        "function stableClick(getBtn,fields,tag,onDone){" +
         "  var okCount=0,tries=0;" +
         "  var iv2=setInterval(function(){" +
         "    tries++;" +
@@ -298,10 +298,10 @@ public final class AuthFillJs {
         "    var ready=!!b&&valsOk&&!captchaPending();" +
         "    if(ready){okCount++;}else{okCount=0;}" +
         "    if(okCount>=2){clearInterval(iv2);" +
-        "      if(click(b))R({ok:true,action:tag,waitedMs:tries*120});return;}" +
+        "      if(click(b)){if(onDone)onDone(true);R({ok:true,action:tag,waitedMs:tries*120});}return;}" +
         "    if(tries>=50){clearInterval(iv2);" +
-        "      R({ok:true,action:'submitAborted',reason:captchaPending()?'captcha':'notReady'});}" +
-        "  },120);}" +
+        "      if(onDone)onDone(false);R({ok:true,action:'submitAborted',reason:captchaPending()?'captcha':'notReady'});}" +
+         "  },120);}" +
         "var switched=false;" +
         "function switchToTotp(){" +
         "  if(switched||!OTP)return false;" +
@@ -344,7 +344,7 @@ public final class AuthFillJs {
         "}\n" +
         "var otpSubmitted=false;\n" +
         "var PHASE=0;" +
-        "var loginClicked=false,submittedOtp=false;" +
+        "var loginClicked=false,submittedOtp=false,submitScheduled=false;" +
         "var doneAcc=false,donePwd=false,doneOtp=false;" +
         "function modalPresent(){try{" +
         "  var m=document.querySelectorAll('.modal-container,.d-modal,.modal-inner-container,.bootbox.modal,[role=\"dialog\"]');" +
@@ -369,16 +369,10 @@ public final class AuthFillJs {
         "    if(filled.length)R({ok:true,filled:filled,hasOtpField:!!otpField(),otpConfigured:!!OTP});" +
         "    if(donePwd&&(doneAcc||!ACC))PHASE=2;" +
         "  }" +
-        "  if(PHASE===2&&AUTO&&!loginClicked){" +
-        "    var b=submitBtn(pwdField());" +
-        "    if(b&&visible(b)){" +
-        "      loginClicked=true;" + /* 严格单次抢占锁，生命周期内只触发一次！ */
-        "      try{b.disabled=false;b.removeAttribute('disabled');}catch(e){}" +
-        "      if(click(b)){" +
-        "        window.__jsfill_done=1;" +
-        "        R({ok:true,action:'submitLogin',msg:'已点击登录，请完成人机答题'});" +
-        "      }else{loginClicked=false;}" +
-        "    }" +
+        "  if(PHASE===2&&AUTO&&!loginClicked&&!submitScheduled){" +
+        "    submitScheduled=true;var p2=pwdField();" +
+        "    stableClick(function(){return submitBtn(p2);},[{el:p2,min:1}],'submitLogin',function(clicked){" +
+        "      if(clicked){loginClicked=true;window.__jsfill_done=1;}else{submitScheduled=false;}});" +
         "  }" +
         "  return doneAcc&&donePwd;}" +
         "tryFill();" +

@@ -96,7 +96,7 @@ console.log('\nB. fengwind 捐赠站（404 + donation_token）→ 回退 /api/me
   ok(b.success === true && b.data && b.data.id === 777, '归一化为 success/data.id，实际=' + JSON.stringify(b));
 }
 
-console.log('\nC. 主站型（/api/me 404 → /api/v1/auth/me + auth_token）');
+console.log('\nC. 主站型（优先 /api/v1/auth/me + auth_token）');
 {
   const e = makeEnv({
     ls: { auth_token: 'TKN-xyz' },
@@ -107,7 +107,7 @@ console.log('\nC. 主站型（/api/me 404 → /api/v1/auth/me + auth_token）');
     },
   });
   await run(e); await settle();
-  ok(e.calls.length === 3, '三次尝试（New API → /api/me → /api/v1/auth/me），实际=' + e.calls.length);
+  ok(e.calls.length === 2, '两次尝试（New API → /api/v1/auth/me），实际=' + e.calls.length);
   const b = JSON.parse((e.results[0] || {}).b || '{}');
   ok(b.data && b.data.id === 888, '取到第二个候选身份，实际=' + JSON.stringify(b));
 }

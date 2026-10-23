@@ -186,7 +186,8 @@ public class Engine {
         return callWithAuth(site, accountKey, method, path, jsonBody, true);
     }
     /**
-     * @param allowReauth 只读兜底仍救不回时，是否允许对 linuxdo 站尝试静默重授权重建会话后重试一次。
+     * @param allowReauth 只读兜底仍救不回明确失效会话时，是否允许对 linuxdo 站尝试静默重授权重建会话后重试一次。
+     *   仅 401/403 会触发这条路径；503/WAF 只走原生重试与只读离屏兜底。
      *   重试时传 false 以防循环。所有业务调用（Key 列表/新建/删除/划转/日志/刷新）默认 true——
      *   v1.1.16 修复：此前静默重授权只写在 statusLocked（刷新链），Key 列表等走 callWithAuth 的
      *   业务请求在会话失效时只有「只读离屏」一层兜底，而只读救不回已过期的会话 → 恒 503。
@@ -293,7 +294,7 @@ public class Engine {
                         "离屏执行异常，保留原始错误", "reason=" + ReadFallback.category(e), "auto");
             }
         }
-        /* 只读兜底救不回「已失效的会话」（WAF 归一化 503 / 401 / 403）时，对 linuxdo 站复用论坛会话
+        /* 只读兜底救不回明确失效的会话（401 / 403）时，对 linuxdo 站复用论坛会话
          * 静默重建站点会话，成功后重试一次（禁止再次静默避免循环）。仅响应型会话失效信号触发，
          * 传输层异常（网络断）不触发——WebView 走同一出口也救不了网络问题。
          * v1.3.0 修复（用户实证「any站签到时保活没修好」）：静默重授权=保活，会把失效会话重建。
@@ -306,7 +307,7 @@ public class Engine {
             /* 解开循环依赖：原判据里 keepAliveOk 依赖 isCheckedToday（本地「已签」标记），
              * 而「是否已签」本身又要读站点——端点失效时读不到 → 永远判定「未签」→
              * 永不重建会话 → 永久签不上（真机复现）。
-             * 现在只用【响应证据】：能走到这里说明响应已是失效信号（401/403/503/WAF），
+              * 现在只用【响应证据】：能走到这里说明响应已是明确失效信号（401/403），
              * 不存在「保活把会话续着」的情况，因此直接允许重建。
              * 「别把活会话续着」的原意图，改由 statusLocked 在【会话可读】时判断。 */
             if (acc != null && "linuxdo".equals(SiteProtocol.provider(site, acc))) {
@@ -327,12 +328,11 @@ public class Engine {
         return response;
     }
 
-    /** 响应是否呈现「会话失效/被拦」信号（可被静默重授权自愈）；传输层异常不算。 */
+    /** 响应是否明确呈现「会话失效」信号（可被静默重授权自愈）；WAF/503 不算。 */
     private boolean sessionLikelyDead(JSONObject response, Exception failure) {
         if (failure != null || response == null) return false;
         int http = response.optInt("http");
-        return http == 401 || http == 403 || http == 503
-                || Engine.wafBlocked(response.optString("body", ""));
+        return http == 401 || http == 403;
     }
 
     private JSONObject callWithAuthNative(JSONObject site, String accountKey, String method, String path, String jsonBody) throws Exception {
@@ -447,6 +447,11 @@ public class Engine {
                                 + "；HTTP=" + http + "；code=" + (code.isEmpty() ? "-" : code)
                                 + "；token=" + !newToken.isEmpty() + "；refreshCookieRotated=" + rotatedCookie
                                 + "；oauth=false", "auto");
+                /* Refresh Cookie 可能先轮换、后因业务错误返回失败；旧值此时已不可再用，
+                 * 必须先保存服务端下发的新值，否则下一次只能重新授权。 */
+                if (rotatedCookie && (http != 200 || !json.optBoolean("success", false) || newToken.isEmpty())) {
+                    store.patchAccount(accountKey, new JSONObject().put("siteCookie", rotated));
+                }
                 if (http != 200 || !json.optBoolean("success", false) || newToken.isEmpty()) return "";
                 JSONObject patch = new JSONObject().put("token", newToken).put("siteCookie", rotated);
                 store.patchAccount(accountKey, patch);
@@ -1551,11 +1556,11 @@ public class Engine {
         boolean rewardSite = SiteProtocol.isAnyRouter(site) || Engine.needsReloginCheckin(site);
         /* v1.3.2（真机实测 agentrouter.org/L站-1 死结）：原守卫对「重登型发奖站」一律
          * 禁止静默重授权，本意是「别把活着的会话续着，否则永远走不到登出→重登领奖」。
-         * 但当会话已经**读不出来**（503/401/403/WAF）时，根本不存在「保活」这回事：
+         * 但当会话已经**明确被拒绝**（401/403）时，根本不存在「保活」这回事：
          *   status() 读不到 → 重登流程中止（会话状态无法确认）→ 而唯一能重建会话的
          *   OffscreenReauth 又被本守卫挡死 → 该账号永久签不上（真机复现 3 次，稳定）。
          * 因此把守卫精确化：只在「能读到会话且今日未签」时才阻止保活；
-         * 会话读不出来时放行重建 —— 这是重登流程的前置条件，不是保活。
+         * 会话明确被拒绝时放行重建 —— 这是重登流程的前置条件，不是保活。
          * 读得出来（HTTP 200 且业务 success=true）说明会话活着，原意图完整保留。 */
         boolean selfReadable = selfHttp == 200
                 && self.optJSONObject("data") != null
@@ -1569,8 +1574,7 @@ public class Engine {
                 && (selfKind == SiteProfile.Kind.NEWAPI)
                 && !SiteProtocol.validSelf(self, tk.optString("siteUserId", ""))
                 && "linuxdo".equals(SiteProtocol.provider(site, tk))
-                && (selfHttp == 401 || selfHttp == 403 || selfHttp == 503
-                    || Engine.wafBlocked(self.optString("body", "")))) {
+                && (selfHttp == 401 || selfHttp == 403)) {
             int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
             if (rc == OffscreenReauth.REAUTH_OK) {
                 resetTokenCache();
@@ -2154,14 +2158,21 @@ public class Engine {
                     .put("silent", silentOk).put("message", "本周期已签到(金额未知)");
         }
 
-        /* ① 签到前余额（缓存优先，避免多余请求） */
-        double before = anyRouterBalance(key, false);
+        /* ① 签到前余额必须 fresh；旧卡片缓存会把同期消费/奖励混入增量判据。 */
+        double before = anyRouterBalance(key);
 
         /* ② 登出（必须确认，否则不建新会话，防会话数超限） */
         int lo = logoutSession(key);
         boolean loggedOut = lo == ReauthManager.CONFIRMED || lo == ReauthManager.ABSENT;
         store.sysLog(sKey, key, "签到", "info", "登出对照",
                 "code=" + lo + "; loggedOut=" + loggedOut);
+        if (!ReauthManager.mayProceed(lo)) {
+            store.opLog(sKey, key, "签到", "err", "旧会话注销未确认，已中止重登",
+                    ReauthManager.describe(lo) + "; 不建立新会话", "user");
+            return out.put("ok", false).put("already", false).put("needUi", false)
+                    .put("message", "无法确认旧会话已退出，未建立新会话（"
+                            + ReauthManager.describe(lo) + "）");
+        }
 
         /* ③ 重登：根据账号的 provider 分配通道（github 走 SilentAuth，linuxdo 走 OffscreenReauth 复用论坛会话） */
         boolean reauthOk = false;
@@ -2199,7 +2210,7 @@ public class Engine {
         if (isAny) {
             /* AnyRouter 原判据：服务端无系统明文流水，唯一到账依据为余额增量 > 15，并补发 sign_in 写回执 */
             anyRouterPostSignIn(key);
-            after = anyRouterBalance(key, true);
+            after = anyRouterBalance(key);
             delta = (before >= 0 && after >= 0) ? (after - before) : -999;
             credited = delta > 15;
             if (credited) {
@@ -2223,7 +2234,7 @@ public class Engine {
                 evidence = "系统明文流水已确认: " + bonus.optString("text", "");
             } else {
                 /* 兜底对照：若日志接口未刷出，核对是否有余额增量 */
-                after = anyRouterBalance(key, true);
+                after = anyRouterBalance(key);
                 delta = (before >= 0 && after >= 0) ? (after - before) : -999;
                 if (delta > 0) {
                     credited = true;
@@ -2300,7 +2311,7 @@ public class Engine {
             /* 真实到账判据（用户实证）：AnyRouter 必须「登出→重登」才发奖，奖励直接到账；
              * sign_in 响应不可靠。成功 = 登入对照(REAUTH_OK) + 余额增量 > $15
              * （阈值取 15 而非 25：签到时可能正在用服务消耗余额）。登出对照记入日志。 */
-            double before = anyRouterBalance(accountKey, false);   // 签到前余额（缓存优先）
+            double before = anyRouterBalance(accountKey);          // 签到前余额（强制 fresh）
 
             /* 1. 登出对照：真实服务端注销确认（CONFIRMED/ABSENT 为确认登出）。 */
             int lo = logoutSession(accountKey);
@@ -2308,10 +2319,33 @@ public class Engine {
             store.opLog(sKey, accountKey, "AnyRouter重登", "info",
                     loggedOut ? "登出已确认" : "登出未确认(" + ReauthManager.describe(lo) + ")",
                     "code=" + lo + "；oauth=false", "auto");
+            if (!ReauthManager.mayProceed(lo)) {
+                store.opLog(sKey, accountKey, "AnyRouter重登", "err",
+                        "旧会话注销未确认，已中止重登",
+                        ReauthManager.describe(lo) + "；不建立新会话", "auto");
+                return out.put("ok", false).put("already", false).put("needUi", false)
+                        .put("message", "无法确认旧会话已退出，未建立新会话（"
+                                + ReauthManager.describe(lo) + "）");
+            }
 
-            /* 2. 登入对照：OffscreenReauth 复用论坛会话重建站点会话（身份 id 校验 + 抓新 cookie）。 */
-            int rc = OffscreenReauth.attempt(ctx, store, site, accountKey, 30);
-            if (rc != OffscreenReauth.REAUTH_OK) {
+            /* 2. 登入对照：按 provider 复用现有会话，成功后才继续核验余额。 */
+            boolean reauthOk;
+            String provider = SiteProtocol.provider(site, acc);
+            if ("linuxdo".equals(provider)) {
+                reauthOk = OffscreenReauth.attempt(ctx, store, site, accountKey, 30)
+                        == OffscreenReauth.REAUTH_OK;
+            } else {
+                final java.util.concurrent.CountDownLatch rl = new java.util.concurrent.CountDownLatch(1);
+                final boolean[] okArr = { false };
+                SilentAuth.run(ctx, site.optString("key", ""), accountKey, (ok, needUi, user, msg) -> {
+                    okArr[0] = ok;
+                    rl.countDown();
+                });
+                try { rl.await(35, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                reauthOk = okArr[0];
+            }
+            if (!reauthOk) {
                 /* 论坛会话也失效或需人机 → 可见授权(L2)。登出已执行，不写回执。 */
                 return out.put("ok", false).put("already", false).put("needUi", true)
                         .put("message", "需要在应用内重新登录");
@@ -2321,7 +2355,7 @@ public class Engine {
             anyRouterPostSignIn(accountKey);
 
             /* 4. 签到后余额（强制 fresh 读），对比增量。 */
-            double after = anyRouterBalance(accountKey, true);
+            double after = anyRouterBalance(accountKey);
             double delta = (before >= 0 && after >= 0) ? (after - before) : -999;
             boolean credited = delta > 15;
 
@@ -2353,16 +2387,8 @@ public class Engine {
         }
     }
 
-    /** AnyRouter 当前可用余额(USD)。fresh=false 时优先用卡片缓存 lastStatus，避免多余请求；取不到或 fresh 时拉一次 status。读不到返回 -1。 */
-    private double anyRouterBalance(String accountKey, boolean fresh) {
-        if (!fresh) {
-            JSONObject acc = store.findAccount(accountKey);
-            JSONObject ls = acc == null ? null : acc.optJSONObject("lastStatus");
-            if (ls != null && ls.optBoolean("ok")) {
-                double v = ls.optDouble("availableUSD", -1);
-                if (v >= 0) return v;
-            }
-        }
+    /** AnyRouter 当前可用余额(USD)，始终 fresh，避免增量判据使用陈旧缓存。 */
+    private double anyRouterBalance(String accountKey) {
         try {
             JSONObject st = status(accountKey);
             if (st != null && st.optBoolean("ok")) return st.optDouble("availableUSD", -1);
@@ -2738,8 +2764,8 @@ public class Engine {
                             } catch (Exception ignored) {}
                         }
                     } else {
-                        /* v1.0.3：重登型站（AgentRouter/JustDoWork）定时签到 =
-                         * 先 status() 检测今日奖励；无今日奖励则登出→SilentAuth 重登→再探测。
+                         /* v1.0.3：重登型站（AgentRouter/JustDoWork）定时签到 =
+                          * 先 status() 检测今日奖励；无今日奖励则登出→按 provider 重登→再探测。
                          * 非重登型 login 站保持原保活逻辑。 */
                         JSONObject r = status(key);
                         int hc = r == null ? 0 : r.optInt("http");
@@ -2760,13 +2786,28 @@ public class Engine {
                             final CountDownLatch rl = new CountDownLatch(1);
                             final String[] rlEv = { "cron-relogin-fail" };
                             final String[] rlDt = { "未返回" };
-                            SilentAuth.run(ctx, sKey, key, (ok, needUi, user, msg) -> {
-                                if (ok) rlEv[0] = "cron-relogin-ok";
-                                else if (needUi) { rlEv[0] = "cron-relogin-ui"; rlDt[0] = msg == null ? "需人工授权" : msg; }
-                                else { rlEv[0] = "cron-relogin-fail"; rlDt[0] = msg == null ? "" : msg; }
-                                rl.countDown();
-                            });
-                            if (!rl.await(110, TimeUnit.SECONDS)) { rlEv[0] = "cron-relogin-fail"; rlDt[0] = "等待超时"; }
+                            String provider = SiteProtocol.provider(site, tk);
+                            if ("linuxdo".equals(provider)) {
+                                int rc = OffscreenReauth.attempt(ctx, store, site, key, 30);
+                                if (rc == OffscreenReauth.REAUTH_OK) {
+                                    rlEv[0] = "cron-relogin-ok";
+                                    rlDt[0] = "Linux DO 离屏重授权成功";
+                                } else if (rc == OffscreenReauth.REAUTH_NEEDS_UI) {
+                                    rlEv[0] = "cron-relogin-ui";
+                                    rlDt[0] = "需要前台完成人机验证或授权";
+                                } else {
+                                    rlEv[0] = "cron-relogin-fail";
+                                    rlDt[0] = "Linux DO 离屏重授权条件不满足";
+                                }
+                            } else {
+                                SilentAuth.run(ctx, sKey, key, (ok, needUi, user, msg) -> {
+                                    if (ok) rlEv[0] = "cron-relogin-ok";
+                                    else if (needUi) { rlEv[0] = "cron-relogin-ui"; rlDt[0] = msg == null ? "需人工授权" : msg; }
+                                    else { rlEv[0] = "cron-relogin-fail"; rlDt[0] = msg == null ? "" : msg; }
+                                    rl.countDown();
+                                });
+                                if (!rl.await(110, TimeUnit.SECONDS)) { rlEv[0] = "cron-relogin-fail"; rlDt[0] = "等待超时"; }
+                            }
                             store.appendLog(sKey, key, rlEv[0], rlDt[0]);
                             store.opLog(sKey, key, "定时签到",
                                     rlEv[0].endsWith("ok") ? "ok" : "err", rlDt[0], "", "cron");

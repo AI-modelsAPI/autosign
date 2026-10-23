@@ -154,21 +154,22 @@ public final class SiteProtocol {
         return catchUp && rewardWindowOpen(now) ? now : target + DAY_MS;
     }
     /**
-     * 判定 AnyRouter 是否在当前周期（即最近已过去的北京时间 08:00 之后）完成过签到/重登。
-     * 支持显式 api_sign_in 回执，也支持 08:00 之后成功登入/重登的时间戳（lastLogin）。
+     * 判定当前奖励周期是否有真实签到回执。
+     *
+     * lastLogin 只表示认证成功，不能证明奖励到账；回执必须来自 lastCheckin。
      */
     public static boolean hasSignInReceipt(JSONObject account, long now) {
-        if (account == null) return false;
-        long epoch = rewardEpochMs(now);
-        long lastLogin = account.optLong("lastLogin", 0);
-        if (lastLogin >= epoch && lastLogin <= now) return true;
-        if (!hasSignInReceipt(account, rewardDate(now))) return false;
-        return account.optJSONObject("lastCheckin").optLong("time", 0) <= now;
+        return hasSignInReceipt(account, rewardDate(now), now);
     }
     public static boolean hasSignInReceipt(JSONObject account, String period) {
+        return hasSignInReceipt(account, period, Long.MAX_VALUE);
+    }
+    private static boolean hasSignInReceipt(JSONObject account, String period, long now) {
         JSONObject receipt = account == null ? null : account.optJSONObject("lastCheckin");
-        if (receipt == null || period == null || !period.equals(receipt.optString("date"))
-                || !"api_sign_in".equals(receipt.optString("source"))) return false;
+        if (receipt == null || period == null || !period.equals(receipt.optString("date"))) return false;
+        String source = receipt.optString("source", "");
+        /* 兼容旧数据：早期 AgentRouter/重登路径没有写 source。 */
+        if (!source.isEmpty() && !"api_sign_in".equals(source) && !"relogin".equals(source)) return false;
         long time = receipt.optLong("time", 0);
         try {
             java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
@@ -177,7 +178,7 @@ public final class SiteProtocol {
             java.util.Date parsed = f.parse(period, p);
             if (parsed == null || p.getIndex() != period.length()) return false;
             long start = parsed.getTime();
-            return time >= start && time < start + DAY_MS;
+            return time >= start && time < start + DAY_MS && time <= now;
         } catch (Exception ignored) { return false; }
     }
 }

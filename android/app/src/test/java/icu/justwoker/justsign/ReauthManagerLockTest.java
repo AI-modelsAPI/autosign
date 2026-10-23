@@ -94,4 +94,11 @@ public class ReauthManagerLockTest {
         assertTrue(ReauthManager.isHeld(SITE, ACC));
         ReauthManager.release(SITE, ACC);
     }
+
+    @Test public void onlyConfirmedOrAbsentMayProceed() {
+        assertTrue(ReauthManager.mayProceed(ReauthManager.CONFIRMED));
+        assertTrue(ReauthManager.mayProceed(ReauthManager.ABSENT));
+        assertFalse(ReauthManager.mayProceed(ReauthManager.UNCONFIRMED));
+        assertFalse(ReauthManager.mayProceed(ReauthManager.DENIED));
+    }
 }

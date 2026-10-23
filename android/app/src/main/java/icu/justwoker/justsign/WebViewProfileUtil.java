@@ -123,7 +123,8 @@ public final class WebViewProfileUtil {
     /**
      * v1.0.7：该 Profile 下 Linux DO（connect.linux.do）是否已有会话。
      * Discourse 的登录 Cookie 是 _linuxdo_session / _forum_session / logged_in=yes，
-     * 不同部署命名不同，故做宽松包含性探测；探不到只是走人工登录，不影响正确性。
+     * 不同部署命名不同，故做宽松包含性探测；cf_clearance 只代表防护挑战通过，
+     * 不能单独当作论坛登录态。
      */
     public static boolean linuxdoLoggedIn(@Nullable Profile profile) {
         try {
@@ -133,7 +134,7 @@ public final class WebViewProfileUtil {
             String c = (c1 == null ? "" : c1) + ";" + (c2 == null ? "" : c2);
             if (c.trim().isEmpty()) return false;
             String l = c.toLowerCase(java.util.Locale.US);
-            return l.contains("session") || l.contains("logged_in") || l.contains("cf_clearance");
+            return l.contains("session") || l.contains("logged_in");
         } catch (Throwable t) { return false; }
     }
     /** 该 Profile（或 Default）下是否已有 GitHub 会话 Cookie。 */
