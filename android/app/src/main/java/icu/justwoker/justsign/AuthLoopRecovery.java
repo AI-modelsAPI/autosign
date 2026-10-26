@@ -52,6 +52,34 @@ public final class AuthLoopRecovery {
         return false;
     }
 
+    /**
+     * 判断当前页面是否仍是站点的登录入口，而不是 /、/console 之类的首页/控制台。
+     * 只比较同一站点的 origin，避免把 OAuth 服务商页面误判成站点登录页。
+     */
+    static boolean isLoginRoute(String currentUrl, String siteBaseUrl) {
+        if (!sameHost(currentUrl, siteBaseUrl)) return false;
+        try {
+            String path = URI.create(currentUrl).getPath();
+            if (path == null) path = "/";
+            path = path.toLowerCase(Locale.ROOT);
+            return path.equals("/login") || path.startsWith("/login/")
+                    || path.equals("/signin") || path.startsWith("/signin/")
+                    || path.equals("/auth") || path.startsWith("/auth/");
+        } catch (Exception e) { return false; }
+    }
+
+    /**
+     * /login 被旧站点 Cookie 302 到首页时，等一次真实 self 响应再决定是否重置。
+     * 503/WAF 和 OAuth 跳转不在这里处理，避免把安全质询或正常授权链误清掉。
+     */
+    static boolean shouldForceLoginRoute(String currentUrl, String siteBaseUrl,
+                                         int selfStatus, boolean selfSuccess,
+                                         boolean visitedOAuthProvider, boolean alreadyForced) {
+        if (alreadyForced || visitedOAuthProvider || selfSuccess) return false;
+        if (!sameHost(currentUrl, siteBaseUrl) || isLoginRoute(currentUrl, siteBaseUrl)) return false;
+        return selfStatus == 200 || selfStatus == 401 || selfStatus == 403;
+    }
+
     static boolean sameHost(String a, String b) {
         String ha = host(a), hb = host(b);
         return !ha.isEmpty() && ha.equals(hb);

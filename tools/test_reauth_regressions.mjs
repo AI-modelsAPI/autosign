@@ -4,6 +4,8 @@ import fs from 'node:fs';
 const root = 'android/app/src/main/java/icu/justwoker/justsign';
 const site = fs.readFileSync(`${root}/SiteProtocol.java`, 'utf8');
 const engine = fs.readFileSync(`${root}/Engine.java`, 'utf8');
+const auth = fs.readFileSync(`${root}/AuthActivity.java`, 'utf8');
+const loop = fs.readFileSync(`${root}/AuthLoopRecovery.java`, 'utf8');
 
 function methodBody(source, marker) {
   const start = source.indexOf(marker);
@@ -63,5 +65,16 @@ assert(scheduled.includes('String provider = SiteProtocol.provider(site, tk);'))
 assert(scheduled.includes('OffscreenReauth.attempt(ctx, store, site, key, 30)'));
 assert(scheduled.includes('SilentAuth.run(ctx, sKey, key'));
 assert(scheduled.indexOf('ReauthManager.mayProceed(lo)') < scheduled.indexOf('String provider = SiteProtocol.provider(site, tk);'));
+
+const logout = methodBody(engine, 'public int logoutSession(String accountKey)');
+assert(logout.includes('clearProfileSiteSession(accountKey)'),
+  'confirmed logout must clear the matching WebView profile session');
+assert(auth.includes('WebViewProfileUtil.clearCookiesForUrl(mProfile, baseUrl)'),
+  'visible Linux DO auth must clear stale site cookies before /login');
+assert(auth.includes('forceLoginRoute("登录页元素=0")'),
+  'zero login elements must trigger a bounded /login recovery');
+assert(auth.includes('hasVisitedOAuthProvider = true'),
+  'Linux DO navigation in observer mode must mark the OAuth provider as visited');
+assert(loop.includes('shouldForceLoginRoute'), 'route recovery helper must exist');
 
 console.log('reauth regressions: PASS');

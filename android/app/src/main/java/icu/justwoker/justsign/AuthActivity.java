@@ -67,6 +67,11 @@ public class AuthActivity extends Activity {
     private volatile boolean observingLogin = false;
     /** 观察者模式开始时间（5 分钟总超时兜底）。 */
     private volatile long observeStartMs = 0;
+    /** 观察者最近一次 self 探测结果，用于识别 /login 被旧会话带回首页。 */
+    private volatile int observerSelfStatus = 0;
+    private volatile boolean observerSelfSuccess = false;
+    /** 每轮可见授权最多自动清理本站旧 Cookie 并重载一次登录页。 */
+    private volatile boolean loginRouteForced = false;
     private long lastProbeLogMs = 0;
     private String lastProbeLogKind = "";
 
@@ -162,6 +167,13 @@ public class AuthActivity extends Activity {
                     String uid = acc == null ? "" : acc.optString("siteUserId", "");
                     try { wv.evaluateJavascript(AuthProbeJs.render(baseUrl, uid), null); }
                     catch (Exception e) { logProbeDiagnostic("injection", "脚本注入失败"); }
+                    if (AuthLoopRecovery.shouldForceLoginRoute(cur, baseUrl,
+                            observerSelfStatus, observerSelfSuccess,
+                            hasVisitedOAuthProvider, loginRouteForced)) {
+                        forceLoginRoute("当前页面不是登录路由；self=" + observerSelfStatus
+                                + "；未检测到有效站点会话");
+                        return;
+                    }
                 }
                 /* v1.1.10：授权确认页「允许」按钮 —— 之前只在 onPageFinished 注入一次，
                  * 若那一刻确认页还是 CF 质询态，会被文档门控挡住且永不重试（真机 17:08:55
@@ -287,6 +299,7 @@ public class AuthActivity extends Activity {
             h.post(() -> {
                 if (isAuthInactive() || !observingLogin) return;   /* 已收凭据/已停止：忽略迟到的探测结果 */
                 if (!AuthProbeJs.sameOrigin(wv == null ? null : wv.getUrl(), baseUrl)) return;
+                observerSelfStatus = status;
                 try { WebViewProfileUtil.flush(mProfile); } catch (Exception ignored) {}
                 String ck = WebViewProfileUtil.cookieHeader(mProfile, baseUrl);
                 /* 诊断只记长度与状态码，不落正文/头/凭据 */
@@ -295,6 +308,7 @@ public class AuthActivity extends Activity {
                     try {
                         JSONObject r = new JSONObject(body);
                         if (r.optBoolean("success")) {
+                            observerSelfSuccess = true;
                             observingLogin = false;
                             /* /api/user/self 的 data 即用户对象，包成兑换响应同构
                              * bundle 交给 handleBundle 收凭据（cookie 型站路径）。 */
@@ -405,9 +419,16 @@ public class AuthActivity extends Activity {
                                 showTip(label);
                                 break;
                             case "observerDump":
-                                label = "登录页元素(" + r.optInt("count", 0) + ")";
+                                int elementCount = r.optInt("count", 0);
+                                if (elementCount <= 0 && observingLogin && !hasVisitedOAuthProvider) {
+                                    authLog("warn", "授权页未显示登录界面",
+                                            "登录页元素=0；当前页面没有可用登录入口");
+                                    forceLoginRoute("登录页元素=0");
+                                    return;
+                                }
+                                label = "登录页元素(" + elementCount + ")";
                                 authLog("info", "登录页元素快照",
-                                        "count=" + r.optInt("count", 0) + "；els=" + r.optString("els", ""));
+                                        "count=" + elementCount + "；els=" + r.optString("els", ""));
                                 break;
                             case "linuxdoBtnClicked":
                                 label = "已点击 LinuxDO 登录按钮（" + r.optString("text", "") + "）";
@@ -747,6 +768,13 @@ public class AuthActivity extends Activity {
             try {
                 java.net.URI nu = new java.net.URI(url);
                 String h0 = nu.getHost() == null ? "" : nu.getHost().toLowerCase(java.util.Locale.US);
+                /* 观察者模式会在这里提前 return，不能漏掉 OAuth 服务商访问标记。
+                 * 否则 hCaptcha 完成后从 connect.linux.do 回到 linux.do/login 时，
+                 * 站点 self 尚未恢复，login-route 自愈会误以为仍在本站首页，直接把
+                 * 已完成的人机验证判成「没有显示 Linux DO 登录页」。 */
+                if ("linux.do".equals(h0) || h0.endsWith(".linux.do")) {
+                    hasVisitedOAuthProvider = true;
+                }
                 if (h0.contains(siteHost) || h0.contains("linux.do")) {
                     String safe = "https://" + h0 + (nu.getPath() == null ? "/" : nu.getPath());
                     /* 去重只看「地址」，不能把 stage 里的自增序号算进去
@@ -905,6 +933,33 @@ if (exchanging) return r.sameHost;
             new Store(this).opLog(siteKey, accountKey, "授权链路", level,
                     summary, detail == null ? "" : detail, "auto");
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * 站点的旧登录 Cookie 可能把 /login 直接 302 到首页，观察者随后只能得到「元素(0)」。
+     * 只清本站域 Cookie，保留 connect.linux.do 论坛会话；第二次仍不出现登录页时停止，
+     * 不让用户被首页↔登录页无限重载困住。
+     */
+    private void forceLoginRoute(String reason) {
+        if (isAuthInactive() || !observingLogin) return;
+        if (loginRouteForced) {
+            authLog("err", "授权页未显示登录界面", "本站首页仍未出现登录入口；" + reason);
+            showLoadError("站点没有显示 Linux DO 登录页，请先在系统浏览器确认该站点可正常登录后再重试");
+            return;
+        }
+        loginRouteForced = true;
+        authLog("warn", "授权页未落在登录路由", "清理本站旧会话并重载 /login；" + reason);
+        showTip("正在清理旧会话并打开登录页…");
+        try {
+            WebViewProfileUtil.clearCookiesForUrl(mProfile, baseUrl);
+            WebViewProfileUtil.flush(mProfile);
+            if (wv != null) wv.clearHistory();
+        } catch (Exception ignored) {}
+        observerSelfStatus = 0;
+        observerSelfSuccess = false;
+        final String loginUrl = baseUrl + "/login";
+        authUrl = loginUrl;
+        h.post(() -> { if (!isAuthInactive() && wv != null) wv.loadUrl(loginUrl); });
     }
 
     private void exchange(String provider, String code, String state) { exchange(provider, code, state, null, false); }
@@ -1183,6 +1238,9 @@ if (exchanging) return r.sameHost;
         stateFromWebView = false;
         pendingExchangeJs = null;
         observingLogin = false;
+        observerSelfStatus = 0;
+        observerSelfSuccess = false;
+        loginRouteForced = false;
         authLog("info", "开始可见授权", "siteHost=" + siteHost + "；provider=" + oauthProvider
                 + "；账号使用专属会话分区");
         applyProxyThen(() -> new Thread(this::authFlowNetwork, "auth-flow").start());
@@ -1213,6 +1271,15 @@ if (exchanging) return r.sameHost;
                 authUrl = baseUrl + "/login";
                 observingLogin = true;
                 observeStartMs = System.currentTimeMillis();
+                /* 可见「重新授权」必须从干净的站点会话开始。logoutSession 走的是
+                 * OkHttp/离屏通道，不能保证同时删除该账号 Profile 里的旧站点 Cookie；
+                 * 旧 Cookie 会把 /login 直接带回首页，观察者只能看到「登录页元素(0)」。
+                 * 这里只清本站域，connect.linux.do 的论坛会话仍保留，OAuth 仍可直通。 */
+                try {
+                    WebViewProfileUtil.clearCookiesForUrl(mProfile, baseUrl);
+                    WebViewProfileUtil.flush(mProfile);
+                    wv.clearHistory();
+                } catch (Exception ignored) {}
                 boolean haveSession = false;
                 try {
                     /* v1.1.10：只有「非 WAF 的站点 Cookie」或论坛登录态才算已保存会话。

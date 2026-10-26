@@ -475,7 +475,32 @@ public class Engine {
      * 返回 ReauthManager 的分级码：CONFIRMED / ABSENT / UNCONFIRMED / DENIED。
      */
     public int logoutSession(String accountKey) {
-        synchronized (opLock(accountKey)) { return logoutSessionLocked(accountKey); }
+        synchronized (opLock(accountKey)) {
+            int result = logoutSessionLocked(accountKey);
+            if (ReauthManager.mayProceed(result)) clearProfileSiteSession(accountKey);
+            return result;
+        }
+    }
+
+    /**
+     * OkHttp/离屏登出与 WebView Profile 是两套 Cookie 存储。登出确认后必须同步清掉
+     * 账号专属 Profile 的本站 Cookie，否则下一次 /login 仍可能被旧会话 302 到首页；
+     * 只清本站域，保留 Linux DO 论坛会话供 OAuth 复用。
+     */
+    private void clearProfileSiteSession(String accountKey) {
+        try {
+            JSONObject site = store.siteOfAccount(accountKey);
+            if (site == null) return;
+            String siteKey = site.optString("key", "");
+            String base = site.optString("baseUrl", "").replaceAll("/+$", "");
+            if (siteKey.isEmpty() || base.isEmpty()) return;
+            androidx.webkit.Profile profile = WebViewProfileUtil.profileOf(siteKey, accountKey);
+            if (profile == null) return;
+            WebViewProfileUtil.clearCookiesForUrl(profile, base);
+            WebViewProfileUtil.flush(profile);
+            store.opLog(siteKey, accountKey, "登出", "info", "本站 WebView 会话已清理",
+                    "保留 Linux DO 论坛会话，下一次授权从 /login 开始", "auto");
+        } catch (Exception ignored) {}
     }
     private int logoutSessionLocked(String accountKey) {
         JSONObject site = store.siteOfAccount(accountKey);
