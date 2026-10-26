@@ -5,6 +5,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -32,13 +35,29 @@ jobs:
           cmdline-tools-version: "latest"
           packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
-      - name: 构建 Debug APK（debug 签名，下载即可安装）
+      - name: 构建 Release APK
         run: |
           cd android
-          gradle assembleDebug --no-daemon
+          gradle assembleRelease --no-daemon
+          VERSION=$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)"/\1/p' app/build.gradle | head -n 1)
+          test -n "$VERSION"
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk "../dist/AutoSign-${VERSION}-release.apk"
+
+      - name: 发布 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find dist -maxdepth 1 -type f -name 'AutoSign-*-release.apk' -print -quit)
+          test -n "$APK"
+          gh release create "$GITHUB_REF_NAME" "$APK" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AutoSign $GITHUB_REF_NAME" \
+            --generate-notes
 
       - uses: actions/upload-artifact@v4
         with:
           name: justsign-android-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: dist/*.apk
           if-no-files-found: error
